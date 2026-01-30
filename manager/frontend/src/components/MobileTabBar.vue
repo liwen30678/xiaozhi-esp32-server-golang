@@ -1,0 +1,101 @@
+<template>
+  <van-tabbar
+    v-model="activeTab"
+    @change="handleTabChange"
+    fixed
+    placeholder
+    safe-area-inset-bottom
+    class="mobile-tabbar"
+  >
+    <van-tabbar-item
+      v-for="tab in tabs"
+      :key="tab.name"
+      :icon="tab.icon"
+      :name="tab.name"
+    >
+      {{ tab.label }}
+    </van-tabbar-item>
+  </van-tabbar>
+</template>
+
+<script setup>
+import { ref, computed, watch, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+
+const router = useRouter()
+const route = useRoute()
+const authStore = useAuthStore()
+
+const activeTab = ref(0)
+
+// 根据用户角色定义标签栏
+const tabs = computed(() => {
+  if (authStore.isAdmin) {
+    // 管理员标签栏
+    return [
+      { name: 'dashboard', label: '首页', icon: 'home-o', path: '/dashboard' },
+      { name: 'config', label: '配置', icon: 'setting-o', path: '/admin/vad-config' },
+      { name: 'manage', label: '管理', icon: 'apps-o', path: '/admin/users' }
+    ]
+  } else {
+    // 普通用户标签栏
+    return [
+      { name: 'console', label: '首页', icon: 'home-o', path: '/console' },
+      { name: 'agents', label: '智能体', icon: 'apps-o', path: '/agents' },
+      { name: 'mine', label: '我的', icon: 'user-o', path: '/user/speakers' }
+    ]
+  }
+})
+
+// 根据当前路由设置活动标签
+const updateActiveTab = () => {
+  const currentPath = route.path
+  const tabIndex = tabs.value.findIndex(tab => {
+    if (tab.path === currentPath) {
+      return true
+    }
+    // 支持路径前缀匹配
+    if (currentPath.startsWith(tab.path)) {
+      return true
+    }
+    return false
+  })
+  
+  if (tabIndex >= 0) {
+    activeTab.value = tabIndex
+  }
+}
+
+// 标签切换处理
+const handleTabChange = (index) => {
+  const tab = tabs.value[index]
+  if (tab && tab.path !== route.path) {
+    router.push(tab.path)
+  }
+}
+
+// 监听路由变化
+watch(
+  () => route.path,
+  () => {
+    updateActiveTab()
+  },
+  { immediate: true }
+)
+
+onMounted(() => {
+  updateActiveTab()
+})
+</script>
+
+<style scoped>
+.mobile-tabbar {
+  border-top: 1px solid #ebedf0;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.1);
+}
+
+:deep(.van-tabbar-item--active) {
+  color: #409EFF;
+}
+</style>

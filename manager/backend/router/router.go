@@ -1,6 +1,7 @@
 package router
 
 import (
+	"xiaozhi/manager/backend/config"
 	"xiaozhi/manager/backend/controllers"
 	"xiaozhi/manager/backend/middleware"
 
@@ -9,15 +10,15 @@ import (
 	"gorm.io/gorm"
 )
 
-func Setup(db *gorm.DB) *gin.Engine {
+func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
 
 	// CORS配置
-	config := cors.DefaultConfig()
-	config.AllowAllOrigins = true
-	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	config.AllowCredentials = true
-	r.Use(cors.New(config))
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowAllOrigins = true
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
+	corsConfig.AllowCredentials = true
+	r.Use(cors.New(corsConfig))
 
 	// 初始化控制器
 	authController := &controllers.AuthController{DB: db}
@@ -26,6 +27,24 @@ func Setup(db *gorm.DB) *gin.Engine {
 	userController := &controllers.UserController{DB: db, WebSocketController: webSocketController}
 	deviceActivationController := &controllers.DeviceActivationController{DB: db}
 	setupController := &controllers.SetupController{DB: db}
+	speakerGroupController := controllers.NewSpeakerGroupController(db, cfg)
+	poolStatsController := controllers.NewPoolStatsController()
+
+	// 初始化聊天历史控制器（需要配置）
+	cfg = config.Load()
+	audioBasePath := "./storage/chat_history/audio"
+	maxFileSize := int64(10 * 1024 * 1024) // 默认10MB
+	if cfg.History.AudioBasePath != "" {
+		audioBasePath = cfg.History.AudioBasePath
+	}
+	if cfg.History.MaxFileSize > 0 {
+		maxFileSize = cfg.History.MaxFileSize
+	}
+	chatHistoryController := &controllers.ChatHistoryController{
+		DB:            db,
+		AudioBasePath: audioBasePath,
+		MaxFileSize:   maxFileSize,
+	}
 
 	// API路由组
 	api := r.Group("/api")
@@ -46,6 +65,10 @@ func Setup(db *gorm.DB) *gin.Engine {
 		// 内部服务接口（无需认证）
 		api.GET("/configs", adminController.GetDeviceConfigs)
 		api.GET("/system/configs", adminController.GetSystemConfigs)
+		api.POST("/internal/history/messages", chatHistoryController.SaveMessage)                         // 保存消息（内部服务接口）
+		api.PUT("/internal/history/messages/:message_id/audio", chatHistoryController.UpdateMessageAudio) // 更新消息音频（内部服务接口）
+		api.GET("/internal/history/messages", chatHistoryController.GetMessagesForInit)                   // 获取消息（用于初始化加载，内部服务接口）
+		api.POST("/internal/pool/stats", poolStatsController.ReportPoolStats)                             // 上报资源池统计数据（内部服务接口）
 
 		// 需要认证的路由
 		auth := api.Group("")
@@ -86,6 +109,27 @@ func Setup(db *gorm.DB) *gin.Engine {
 
 				// 消息注入
 				user.POST("/devices/inject-message", userController.InjectMessage)
+
+				// 声纹组管理
+				user.POST("/speaker-groups", speakerGroupController.CreateSpeakerGroup)
+				user.GET("/speaker-groups", speakerGroupController.GetSpeakerGroups)
+				user.GET("/speaker-groups/:id", speakerGroupController.GetSpeakerGroup)
+				user.PUT("/speaker-groups/:id", speakerGroupController.UpdateSpeakerGroup)
+				user.DELETE("/speaker-groups/:id", speakerGroupController.DeleteSpeakerGroup)
+				user.POST("/speaker-groups/:id/verify", speakerGroupController.VerifySpeakerGroup)
+
+				// 声纹样本管理（注意：使用 :id 而不是 :group_id，避免路由冲突）
+				user.POST("/speaker-groups/:id/samples", speakerGroupController.AddSample)
+				user.GET("/speaker-groups/:id/samples", speakerGroupController.GetSamples)
+				user.GET("/speaker-groups/:id/samples/:sample_id/file", speakerGroupController.GetSampleFile)
+				user.DELETE("/speaker-groups/:id/samples/:sample_id", speakerGroupController.DeleteSample)
+
+				// 聊天历史
+				user.GET("/history/messages", chatHistoryController.GetMessages)
+				user.DELETE("/history/messages/:id", chatHistoryController.DeleteMessage)
+				user.GET("/history/export", chatHistoryController.ExportMessages)
+				user.GET("/history/agents/:agent_id/messages", chatHistoryController.GetMessagesByAgent)
+				user.GET("/history/messages/:id/audio", chatHistoryController.GetAudioFile)
 			}
 
 			// 管理员路由
@@ -120,6 +164,11 @@ func Setup(db *gorm.DB) *gin.Engine {
 				admin.POST("/tts-configs", adminController.CreateTTSConfig)
 				admin.PUT("/tts-configs/:id", adminController.UpdateTTSConfig)
 				admin.DELETE("/tts-configs/:id", adminController.DeleteTTSConfig)
+
+				admin.GET("/speaker-configs", adminController.GetSpeakerConfigs)
+				admin.POST("/speaker-configs", adminController.CreateSpeakerConfig)
+				admin.PUT("/speaker-configs/:id", adminController.UpdateSpeakerConfig)
+				admin.DELETE("/speaker-configs/:id", adminController.DeleteSpeakerConfig)
 
 				admin.GET("/vision-configs", adminController.GetVisionConfigs)
 				admin.POST("/vision-configs", adminController.CreateVisionConfig)
@@ -193,6 +242,10 @@ func Setup(db *gorm.DB) *gin.Engine {
 				// 配置导入导出
 				admin.GET("/configs/export", adminController.ExportConfigs)
 				admin.POST("/configs/import", adminController.ImportConfigs)
+
+				// 资源池统计
+				admin.GET("/pool/stats", poolStatsController.GetPoolStats)
+				admin.GET("/pool/stats/summary", poolStatsController.GetPoolStatsSummary)
 			}
 		}
 	}

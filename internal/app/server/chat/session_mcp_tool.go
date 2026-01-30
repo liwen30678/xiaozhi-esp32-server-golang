@@ -66,7 +66,7 @@ func getHTTPClient() *http.Client {
 
 // 关闭会话
 func (c *ChatManager) LocalMcpCloseChat() error {
-	c.Close()
+	//c.Close()
 	return nil
 }
 

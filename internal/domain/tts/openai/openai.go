@@ -260,9 +260,9 @@ func (p *OpenAITTSProvider) TextToSpeechStream(ctx context.Context, text string,
 		}
 
 		// 根据音频格式处理流式响应
-		if p.ResponseFormat == "mp3" {
+		if p.ResponseFormat == "mp3" || p.ResponseFormat == "wav" || p.ResponseFormat == "pcm" {
 			// 创建音频解码器
-			decoder, err := util.CreateAudioDecoder(ctx, resp.Body, outputChan, frameDuration, p.ResponseFormat)
+			decoder, err := util.CreateAudioDecoderWithSampleRate(ctx, resp.Body, outputChan, frameDuration, p.ResponseFormat, sampleRate)
 			if err != nil {
 				log.Errorf("创建OpenAI音频解码器失败: %v", err)
 				close(outputChan)
@@ -289,4 +289,23 @@ func (p *OpenAITTSProvider) TextToSpeechStream(ctx context.Context, text string,
 	}()
 
 	return outputChan, nil
+}
+
+// SetVoice 设置音色参数
+func (p *OpenAITTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}
+
+// Close 关闭资源（无状态 Provider，无需关闭）
+func (p *OpenAITTSProvider) Close() error {
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *OpenAITTSProvider) IsValid() bool {
+	return p != nil
 }

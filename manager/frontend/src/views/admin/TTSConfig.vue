@@ -75,6 +75,10 @@
             <el-option label="Edge 离线" value="edge_offline" />
             <el-option label="小智 TTS" value="xiaozhi" />
             <el-option label="Microsoft TTS" value="microsoft" />
+            <el-option label="OpenAI" value="openai" />
+            <el-option label="千问" value="aliyun_qwen" />
+            <el-option label="智谱" value="zhipu" />
+            <el-option label="Minimax" value="minimax" />
           </el-select>
         </el-form-item>
         
@@ -126,7 +130,23 @@
             <el-input v-model="form.doubao.cluster" placeholder="请输入集群名称" />
           </el-form-item>
           <el-form-item label="音色" prop="doubao.voice">
-            <el-input v-model="form.doubao.voice" placeholder="请输入音色" />
+            <el-select 
+              v-model="form.doubao.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+              allow-create
+              default-first-option
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="API URL" prop="doubao.api_url">
             <el-input v-model="form.doubao.api_url" placeholder="请输入API URL" />
@@ -148,7 +168,23 @@
             <el-input v-model="form.doubao_ws.cluster" placeholder="请输入集群名称" />
           </el-form-item>
           <el-form-item label="音色" prop="doubao_ws.voice">
-            <el-input v-model="form.doubao_ws.voice" placeholder="请输入音色" />
+            <el-select 
+              v-model="form.doubao_ws.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+              allow-create
+              default-first-option
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="WebSocket主机" prop="doubao_ws.ws_host">
             <el-input v-model="form.doubao_ws.ws_host" placeholder="请输入WebSocket主机地址" />
@@ -161,7 +197,23 @@
         <!-- Edge TTS 配置 -->
         <template v-if="form.provider === 'edge'">
           <el-form-item label="音色" prop="edge.voice">
-            <el-input v-model="form.edge.voice" placeholder="请输入音色" />
+            <el-select 
+              v-model="form.edge.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+              allow-create
+              default-first-option
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="语速" prop="edge.rate">
             <el-input v-model="form.edge.rate" placeholder="请输入语速（如：+0%）" />
@@ -199,10 +251,199 @@
           </el-form-item>
         </template>
 
+        <!-- 千问 TTS 配置 -->
+        <template v-if="form.provider === 'aliyun_qwen'">
+          <el-form-item label="API Key" prop="qwen_tts.api_key">
+            <el-input v-model="form.qwen_tts.api_key" placeholder="请输入API Key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="地域" prop="qwen_tts.region">
+            <el-select v-model="form.qwen_tts.region" placeholder="请选择地域" style="width: 100%">
+              <el-option label="北京" value="beijing" />
+              <el-option label="新加坡" value="singapore" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模型" prop="qwen_tts.model">
+            <el-input v-model="form.qwen_tts.model" placeholder="qwen3-tts-flash" />
+          </el-form-item>
+          <el-form-item label="音色" prop="qwen_tts.voice">
+            <el-input v-model="form.qwen_tts.voice" placeholder="Cherry" />
+          </el-form-item>
+          <el-form-item label="语种" prop="qwen_tts.language_type">
+            <el-select v-model="form.qwen_tts.language_type" placeholder="请选择语种" style="width: 100%">
+              <el-option label="自动" value="Auto" />
+              <el-option label="中文" value="Chinese" />
+              <el-option label="英文" value="English" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="使用流式" prop="qwen_tts.stream">
+            <el-switch v-model="form.qwen_tts.stream" />
+          </el-form-item>
+          <el-form-item label="帧时长" prop="qwen_tts.frame_duration">
+            <el-input-number v-model="form.qwen_tts.frame_duration" :min="1" :max="1000" style="width: 100%" />
+          </el-form-item>
+        </template>
+
+        <!-- 智谱 TTS 配置（使用 OpenAI 格式） -->
+        <template v-if="form.provider === 'zhipu'">
+          <el-form-item label="API Key" prop="zhipu.api_key">
+            <el-input v-model="form.zhipu.api_key" placeholder="请输入API Key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="API URL" prop="zhipu.api_url">
+            <el-input v-model="form.zhipu.api_url" placeholder="https://open.bigmodel.cn/api/paas/v4/audio/speech" />
+          </el-form-item>
+          <el-form-item label="模型" prop="zhipu.model">
+            <el-input v-model="form.zhipu.model" placeholder="glm-tts" />
+          </el-form-item>
+          <el-form-item label="音色" prop="zhipu.voice">
+            <el-select 
+              v-model="form.zhipu.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="响应格式" prop="zhipu.response_format">
+            <el-select v-model="form.zhipu.response_format" placeholder="请选择响应格式" style="width: 100%">
+              <el-option label="WAV" value="wav" />
+              <el-option label="PCM" value="pcm" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="音量" prop="zhipu.volume">
+            <el-input-number v-model="form.zhipu.volume" :min="0" :max="10" :step="0.1" style="width: 100%" placeholder="0-10，默认1.0" />
+          </el-form-item>
+          <el-form-item label="语速" prop="zhipu.speed">
+            <el-input-number v-model="form.zhipu.speed" :min="0.5" :max="2.0" :step="0.1" style="width: 100%" placeholder="0.5-2.0，默认1.0" />
+          </el-form-item>
+          <el-form-item label="使用流式" prop="zhipu.stream">
+            <el-switch v-model="form.zhipu.stream" />
+          </el-form-item>
+          <el-form-item v-if="form.zhipu.stream" label="编码格式" prop="zhipu.encode_format">
+            <el-select v-model="form.zhipu.encode_format" placeholder="请选择编码格式" style="width: 100%">
+              <el-option label="Base64" value="base64" />
+              <el-option label="Hex" value="hex" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="帧时长" prop="zhipu.frame_duration">
+            <el-input-number v-model="form.zhipu.frame_duration" :min="1" :max="1000" style="width: 100%" placeholder="毫秒" />
+          </el-form-item>
+        </template>
+
+        <!-- Minimax TTS 配置 -->
+        <template v-if="form.provider === 'minimax'">
+          <el-form-item label="API Key" prop="minimax.api_key">
+            <el-input v-model="form.minimax.api_key" placeholder="请输入API Key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="模型" prop="minimax.model">
+            <el-input v-model="form.minimax.model" placeholder="speech-2.8-hd" />
+          </el-form-item>
+          <el-form-item label="音色" prop="minimax.voice">
+            <el-select 
+              v-model="form.minimax.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+              allow-create
+              default-first-option
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="语速" prop="minimax.speed">
+            <el-input-number v-model="form.minimax.speed" :min="0.5" :max="2.0" :step="0.1" style="width: 100%" placeholder="0.5-2.0，默认1.0" />
+          </el-form-item>
+          <el-form-item label="音量" prop="minimax.vol">
+            <el-input-number v-model="form.minimax.vol" :min="0" :max="2" :step="0.1" style="width: 100%" placeholder="0-2，默认1.0" />
+          </el-form-item>
+          <el-form-item label="音调" prop="minimax.pitch">
+            <el-input-number v-model="form.minimax.pitch" :min="-12" :max="12" :step="1" style="width: 100%" placeholder="-12到12，默认0" />
+          </el-form-item>
+          <el-form-item label="采样率" prop="minimax.sample_rate">
+            <el-input-number v-model="form.minimax.sample_rate" :min="8000" :max="48000" :step="1000" style="width: 100%" placeholder="默认32000" />
+          </el-form-item>
+          <el-form-item label="比特率" prop="minimax.bitrate">
+            <el-input-number v-model="form.minimax.bitrate" :min="32000" :max="320000" :step="16000" style="width: 100%" placeholder="默认128000" />
+          </el-form-item>
+          <el-form-item label="音频格式" prop="minimax.format">
+            <el-select v-model="form.minimax.format" placeholder="请选择音频格式" style="width: 100%">
+              <el-option label="MP3" value="mp3" />
+              <el-option label="WAV" value="wav" />
+              <el-option label="PCM" value="pcm" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="声道数" prop="minimax.channel">
+            <el-input-number v-model="form.minimax.channel" :min="1" :max="2" style="width: 100%" placeholder="默认1" />
+          </el-form-item>
+        </template>
+
+        <!-- OpenAI TTS 配置 -->
+        <template v-if="form.provider === 'openai'">
+          <el-form-item label="API Key" prop="openai.api_key">
+            <el-input v-model="form.openai.api_key" placeholder="请输入API Key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="API URL" prop="openai.api_url">
+            <el-input v-model="form.openai.api_url" placeholder="请输入API URL（默认：https://api.openai.com/v1/audio/speech）" />
+          </el-form-item>
+          <el-form-item label="模型" prop="openai.model">
+            <el-input v-model="form.openai.model" placeholder="请输入模型（默认：tts-1）" />
+          </el-form-item>
+          <el-form-item label="音色" prop="openai.voice">
+            <el-select 
+              v-model="form.openai.voice" 
+              placeholder="请选择音色" 
+              style="width: 100%" 
+              filterable
+              :loading="voiceLoading"
+              :disabled="voiceLoading"
+            >
+              <el-option 
+                v-for="option in voiceOptions" 
+                :key="option.value" 
+                :label="option.label" 
+                :value="option.value" 
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="响应格式" prop="openai.response_format">
+            <el-select v-model="form.openai.response_format" placeholder="请选择响应格式" style="width: 100%">
+              <el-option label="MP3" value="mp3" />
+              <el-option label="Opus" value="opus" />
+              <el-option label="AAC" value="aac" />
+              <el-option label="FLAC" value="flac" />
+              <el-option label="WAV" value="wav" />
+              <el-option label="PCM" value="pcm" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="语速" prop="openai.speed">
+            <el-input-number v-model="form.openai.speed" :min="0.25" :max="4.0" :step="0.1" style="width: 100%" placeholder="0.25-4.0，默认1.0" />
+          </el-form-item>
+          <el-form-item label="使用流式" prop="openai.stream">
+            <el-switch v-model="form.openai.stream" />
+          </el-form-item>
+          <el-form-item label="帧时长" prop="openai.frame_duration">
+            <el-input-number v-model="form.openai.frame_duration" :min="1" :max="1000" style="width: 100%" placeholder="毫秒" />
+          </el-form-item>
+        </template>
+
         <!-- 小智 TTS 配置 -->
         <template v-if="form.provider === 'xiaozhi'">
           <el-form-item label="服务器地址" prop="xiaozhi.server_addr">
-            <el-input v-model="form.xiaozhi.server_addr" placeholder="请输入服务器地址" />
+            <el-input v-model="form.xiaozhi.server_addr" placeholder="请输入服务器地址（如：wss://api.tenclass.net/xiaozhi/v1/）" />
           </el-form-item>
           <el-form-item label="设备ID" prop="xiaozhi.device_id">
             <el-input v-model="form.xiaozhi.device_id" placeholder="请输入设备ID" />
@@ -246,7 +487,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../../utils/api'
@@ -258,10 +499,14 @@ const showDialog = ref(false)
 const editingConfig = ref(null)
 const formRef = ref()
 
+// 音色列表相关
+const voiceOptions = ref([])
+const voiceLoading = ref(false)
+
 const form = reactive({
   name: '',
   config_id: '',
-  provider: 'xiaozhi',
+  provider: 'cosyvoice',
   is_default: false,
   enabled: true,
   cosyvoice: {
@@ -271,6 +516,16 @@ const form = reactive({
     target_sr: 24000,
     audio_format: 'mp3',
     instruct_text: '你好'
+  },
+  qwen_tts: {
+    api_key: '',
+    api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    region: 'beijing',
+    model: 'qwen3-tts-flash',
+    voice: 'Cherry',
+    language_type: 'Chinese',
+    stream: true,
+    frame_duration: 60
   },
   doubao: {
     appid: '6886011847',
@@ -315,6 +570,40 @@ const form = reactive({
     voice: 'zh-CN-XiaoxiaoNeural',
     language: 'zh-CN',
     timeout: 60
+  },
+  openai: {
+    api_key: '',
+    api_url: 'https://api.openai.com/v1/audio/speech',
+    model: 'tts-1',
+    voice: 'alloy',
+    response_format: 'mp3',
+    speed: 1.0,
+    stream: true,
+    frame_duration: 60
+  },
+  zhipu: {
+    api_key: '',
+    api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
+    model: 'glm-tts',
+    voice: 'tongtong',
+    response_format: 'pcm',
+    speed: 1.0,
+    volume: 1.0,
+    stream: true,
+    encode_format: 'base64',
+    frame_duration: 60
+  },
+  minimax: {
+    api_key: '',
+    model: 'speech-2.8-hd',
+    voice: 'male-qn-qingse',
+    speed: 1.0,
+    vol: 1.0,
+    pitch: 0,
+    sample_rate: 32000,
+    bitrate: 128000,
+    format: 'mp3',
+    channel: 1
   }
 })
 
@@ -360,6 +649,55 @@ const generateConfig = () => {
       config.sample_rate = form.edge_offline.sample_rate
       config.channels = form.edge_offline.channels
       config.frame_duration = form.edge_offline.frame_duration
+      break
+    case 'aliyun_qwen':
+      config.provider = 'aliyun_qwen'
+      config.api_key = form.qwen_tts.api_key
+      config.api_url = form.qwen_tts.api_url
+      config.region = form.qwen_tts.region
+      config.model = form.qwen_tts.model || 'qwen3-tts-flash'
+      config.voice = form.qwen_tts.voice || 'Cherry'
+      config.language_type = form.qwen_tts.language_type || 'Chinese'
+      config.stream = form.qwen_tts.stream
+      config.frame_duration = form.qwen_tts.frame_duration || 60
+      break
+    case 'openai':
+      config.api_key = form.openai.api_key
+      config.api_url = form.openai.api_url
+      config.model = form.openai.model
+      config.voice = form.openai.voice
+      config.response_format = form.openai.response_format
+      config.speed = form.openai.speed
+      config.stream = form.openai.stream
+      config.frame_duration = form.openai.frame_duration
+      break
+    case 'zhipu':
+      // 智谱 TTS 配置
+      config.provider = 'zhipu'
+      config.api_key = form.zhipu.api_key
+      config.api_url = form.zhipu.api_url || 'https://open.bigmodel.cn/api/paas/v4/audio/speech'
+      config.model = form.zhipu.model || 'glm-tts'
+      config.voice = form.zhipu.voice
+      config.response_format = form.zhipu.response_format
+      config.speed = form.zhipu.speed
+      config.volume = form.zhipu.volume || 1.0
+      config.stream = form.zhipu.stream
+      config.encode_format = form.zhipu.encode_format || 'base64'
+      config.frame_duration = form.zhipu.frame_duration
+      break
+    case 'minimax':
+      // Minimax TTS 配置
+      config.provider = 'minimax'
+      config.api_key = form.minimax.api_key
+      config.model = form.minimax.model || 'speech-2.8-hd'
+      config.voice = form.minimax.voice || 'male-qn-qingse'
+      config.speed = form.minimax.speed || 1.0
+      config.vol = form.minimax.vol || 1.0
+      config.pitch = form.minimax.pitch || 0
+      config.sample_rate = form.minimax.sample_rate || 32000
+      config.bitrate = form.minimax.bitrate || 128000
+      config.format = form.minimax.format || 'mp3'
+      config.channel = form.minimax.channel || 1
       break
     case 'xiaozhi':
       config.server_addr = form.xiaozhi.server_addr
@@ -413,7 +751,15 @@ const rules = {
   'microsoft.subscription_key': [{ required: true, message: '请输入订阅密钥', trigger: 'blur' }],
   'microsoft.region': [{ required: true, message: '请输入服务区域', trigger: 'blur' }],
   'microsoft.voice': [{ required: true, message: '请输入语音名称', trigger: 'blur' }],
-  'microsoft.language': [{ required: true, message: '请输入语言代码', trigger: 'blur' }]
+  'microsoft.language': [{ required: true, message: '请输入语言代码', trigger: 'blur' }],
+  // OpenAI TTS 验证规则
+  'openai.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // 智谱 TTS 验证规则
+  'zhipu.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // Minimax TTS 验证规则
+  'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // 千问 TTS 验证规则
+  'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
 }
 
 const loadConfigs = async () => {
@@ -435,6 +781,9 @@ const editConfig = (config) => {
   form.provider = config.provider
   form.is_default = config.is_default
   form.enabled = config.enabled
+  
+  // 加载对应 provider 的音色列表
+  loadVoiceOptions(config.provider)
   
   // 解析配置JSON并填充到对应的表单字段
   try {
@@ -479,6 +828,51 @@ const editConfig = (config) => {
         form.edge_offline.sample_rate = configData.sample_rate || 16000
         form.edge_offline.channels = configData.channels || 1
         form.edge_offline.frame_duration = configData.frame_duration || 20
+        break
+      case 'aliyun_qwen':
+        form.qwen_tts.api_key = configData.api_key || ''
+        form.qwen_tts.api_url = configData.api_url || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
+        form.qwen_tts.region = configData.region || 'beijing'
+        form.qwen_tts.model = configData.model || 'qwen3-tts-flash'
+        form.qwen_tts.voice = configData.voice || 'Cherry'
+        form.qwen_tts.language_type = configData.language_type || 'Chinese'
+        form.qwen_tts.stream = configData.stream !== undefined ? configData.stream : true
+        form.qwen_tts.frame_duration = configData.frame_duration || 60
+        break
+      case 'openai':
+        form.openai.api_key = configData.api_key || ''
+        form.openai.api_url = configData.api_url || 'https://api.openai.com/v1/audio/speech'
+        form.openai.model = configData.model || 'tts-1'
+        form.openai.voice = configData.voice || 'alloy'
+        form.openai.response_format = configData.response_format || 'mp3'
+        form.openai.speed = configData.speed || 1.0
+        form.openai.stream = configData.stream !== undefined ? configData.stream : true
+        form.openai.frame_duration = configData.frame_duration || 60
+        break
+      case 'zhipu':
+        // 智谱配置从 json_data 中读取
+        form.zhipu.api_key = configData.api_key || ''
+        form.zhipu.api_url = configData.api_url || 'https://open.bigmodel.cn/api/paas/v4/audio/speech'
+        form.zhipu.model = configData.model || 'glm-tts'
+        form.zhipu.voice = configData.voice || 'tongtong'
+        form.zhipu.response_format = configData.response_format || 'pcm'
+        form.zhipu.speed = configData.speed || 1.0
+        form.zhipu.volume = configData.volume || 1.0
+        form.zhipu.stream = configData.stream !== undefined ? configData.stream : true
+        form.zhipu.encode_format = configData.encode_format || 'base64'
+        form.zhipu.frame_duration = configData.frame_duration || 60
+        break
+      case 'minimax':
+        form.minimax.api_key = configData.api_key || ''
+        form.minimax.model = configData.model || 'speech-2.8-hd'
+        form.minimax.voice = configData.voice || 'male-qn-qingse'
+        form.minimax.speed = configData.speed || 1.0
+        form.minimax.vol = configData.vol || configData.volume || 1.0
+        form.minimax.pitch = configData.pitch || 0
+        form.minimax.sample_rate = configData.sample_rate || 32000
+        form.minimax.bitrate = configData.bitrate || 128000
+        form.minimax.format = configData.format || 'mp3'
+        form.minimax.channel = configData.channel || 1
         break
       case 'xiaozhi':
         form.xiaozhi.server_addr = configData.server_addr || ''
@@ -606,7 +1000,7 @@ const resetForm = () => {
   Object.assign(form, {
     name: '',
     config_id: '',
-    provider: 'xiaozhi',
+    provider: 'cosyvoice',
     is_default: false,
     enabled: true,
     cosyvoice: {
@@ -616,6 +1010,16 @@ const resetForm = () => {
       target_sr: 24000,
       audio_format: 'mp3',
       instruct_text: '你好'
+    },
+    qwen_tts: {
+      api_key: '',
+      api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+      region: 'beijing',
+      model: 'qwen3-tts-flash',
+      voice: 'Cherry',
+      language_type: 'Chinese',
+      stream: true,
+      frame_duration: 60
     },
     doubao: {
       appid: '6886011847',
@@ -660,6 +1064,40 @@ const resetForm = () => {
       voice: 'zh-CN-XiaoxiaoNeural',
       language: 'zh-CN',
       timeout: 60
+    },
+    openai: {
+      api_key: '',
+      api_url: 'https://api.openai.com/v1/audio/speech',
+      model: 'tts-1',
+      voice: 'alloy',
+      response_format: 'mp3',
+      speed: 1.0,
+      stream: true,
+      frame_duration: 60
+    },
+    zhipu: {
+      api_key: '',
+      api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
+      model: 'glm-tts',
+      voice: 'tongtong',
+      response_format: 'pcm',
+      speed: 1.0,
+      volume: 1.0,
+      stream: true,
+      encode_format: 'base64',
+      frame_duration: 60
+    },
+    minimax: {
+      api_key: '',
+      model: 'speech-2.8-hd',
+      voice: 'male-qn-qingse',
+      speed: 1.0,
+      vol: 1.0,
+      pitch: 0,
+      sample_rate: 32000,
+      bitrate: 128000,
+      format: 'mp3',
+      channel: 1
     }
   })
 }
@@ -675,6 +1113,48 @@ const handleDialogClose = () => {
 const formatDate = (dateString) => {
   return new Date(dateString).toLocaleString('zh-CN')
 }
+
+// 加载音色列表
+const loadVoiceOptions = async (provider) => {
+  if (!provider) {
+    voiceOptions.value = []
+    return
+  }
+  
+  // 只有这些 provider 需要从后端获取音色列表
+  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai']
+  if (!providersWithVoices.includes(provider)) {
+    voiceOptions.value = []
+    return
+  }
+  
+  voiceLoading.value = true
+  try {
+    const response = await api.get(`/user/voice-options`, {
+      params: { provider }
+    })
+    voiceOptions.value = response.data.data || []
+  } catch (error) {
+    console.error('加载音色列表失败:', error)
+    voiceOptions.value = []
+  } finally {
+    voiceLoading.value = false
+  }
+}
+
+// 监听 provider 变化，自动加载对应的音色列表
+watch(() => form.provider, (newProvider) => {
+  if (showDialog.value) {
+    loadVoiceOptions(newProvider)
+  }
+}, { immediate: false })
+
+// 监听对话框打开，加载当前 provider 的音色列表
+watch(showDialog, (isOpen) => {
+  if (isOpen && form.provider) {
+    loadVoiceOptions(form.provider)
+  }
+})
 
 onMounted(() => {
   loadConfigs()

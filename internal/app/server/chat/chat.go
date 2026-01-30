@@ -12,7 +12,6 @@ import (
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	userconfig "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
-	"xiaozhi-esp32-server-golang/internal/domain/vad/silero_vad"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
@@ -77,10 +76,6 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 		return nil, err
 	}
 
-	if deviceConfig.Vad.Provider == "silero_vad" {
-		silero_vad.InitVadPool(deviceConfig.Vad.Config)
-	}
-
 	// 创建带取消功能的上下文
 	ctx, cancel := context.WithCancel(pctx)
 
@@ -115,7 +110,6 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 		AsrAudioBuffer: &AsrAudioBuffer{
 			PcmData:          make([]float32, 0),
 			AudioBufferMutex: sync.RWMutex{},
-			PcmFrameSize:     0,
 		},
 		VoiceStatus: VoiceStatus{
 			HaveVoice:            false,
@@ -127,8 +121,8 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 	}
 
 	ttsType := clientState.DeviceConfig.Tts.Provider
-	//如果使用 xiaozhi tts，则固定使用24000hz, 20ms帧长
-	if ttsType == constants.TtsTypeXiaozhi || ttsType == constants.TtsTypeEdgeOffline {
+	//如果使用 xiaozhi 或 edge_offline tts，则固定使用24000hz, 20ms帧长
+	if ttsType == constants.TtsTypeXiaozhi /*|| ttsType == constants.TtsTypeEdgeOffline*/ {
 		clientState.OutputAudioFormat.SampleRate = 24000
 		clientState.OutputAudioFormat.FrameDuration = 20
 	}
@@ -181,6 +175,11 @@ func (c *ChatManager) GetDeviceId() string {
 	return c.clientState.DeviceID
 }
 
+// GetSession 获取 ChatSession
+func (c *ChatManager) GetSession() *ChatSession {
+	return c.session
+}
+
 // InjectMessage 注入消息到设备
 func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
 	if skipLlm {
@@ -188,6 +187,6 @@ func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
 		return c.session.AddTextToTTSQueue(message)
 	} else {
 		// 通过LLM处理消息
-		return c.session.AddAsrResultToQueue(message)
+		return c.session.AddAsrResultToQueue(message, nil)
 	}
 }

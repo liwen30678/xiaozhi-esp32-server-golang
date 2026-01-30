@@ -290,3 +290,22 @@ func (p *CosyVoiceTTSProvider) TextToSpeechStream(ctx context.Context, text stri
 
 	return outputChan, nil
 }
+
+// SetVoice 设置音色参数
+func (p *CosyVoiceTTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if spkID, ok := voiceConfig["spk_id"].(string); ok && spkID != "" {
+		p.SpeakerID = spkID
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 spk_id")
+}
+
+// Close 关闭资源（无状态 Provider，无需关闭）
+func (p *CosyVoiceTTSProvider) Close() error {
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *CosyVoiceTTSProvider) IsValid() bool {
+	return p != nil
+}

@@ -2,7 +2,6 @@ package silero_vad
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	log "xiaozhi-esp32-server-golang/logger"
 
@@ -20,17 +19,6 @@ var defaultVADConfig = map[string]interface{}{
 	"speech_pad_ms":           60,
 }
 
-// 资源池默认配置
-var defaultPoolConfig = struct {
-	// 池大小
-	MaxSize int
-	// 获取超时时间（毫秒）
-	AcquireTimeout int64
-}{
-	MaxSize:        10,
-	AcquireTimeout: 3000, // 3秒
-}
-
 // 全局变量和初始化
 var (
 	// 全局解码器实例池
@@ -41,102 +29,7 @@ var (
 	initMutex sync.Mutex
 	// 初始化标志
 	initialized = false
-	// 全局VAD资源池实例
-	globalVADResourcePool *VADResourcePool
-
-	once sync.Once
 )
-
-// InitVADFromConfig 从配置文件初始化VAD模块
-func InitVADFromConfig(config map[string]interface{}) error {
-	var modelPath string
-	// 从viper获取模型路径
-	if rawModelPath, ok := config["model_path"]; ok {
-		tModelPath, ok := rawModelPath.(string)
-		if ok {
-			modelPath = tModelPath
-		}
-	}
-
-	// 获取其他可选配置
-	if rawThreshold, ok := config["threshold"]; ok {
-		threshold, ok := rawThreshold.(float64)
-		if ok && threshold > 0 {
-			globalVADResourcePool.defaultConfig["threshold"] = threshold
-		}
-	}
-
-	if rawSilenceMs, ok := config["min_silence_duration_ms"]; ok {
-		silenceMs, ok := rawSilenceMs.(int64)
-		if ok && silenceMs > 0 {
-			globalVADResourcePool.defaultConfig["min_silence_duration_ms"] = silenceMs
-		}
-	}
-
-	if rawSampleRate, ok := config["sample_rate"]; ok {
-		sampleRate, ok := rawSampleRate.(int)
-		if ok && sampleRate > 0 {
-			globalVADResourcePool.defaultConfig["sample_rate"] = sampleRate
-		}
-	}
-
-	if rawChannels, ok := config["channels"]; ok {
-		channels, ok := rawChannels.(int)
-		if ok && channels > 0 {
-			globalVADResourcePool.defaultConfig["channels"] = channels
-		}
-	}
-
-	// VAD资源池特有配置
-	if rawPoolSize, ok := config["pool_size"]; ok {
-		poolSize, ok := rawPoolSize.(int)
-		if ok && poolSize > 0 {
-			globalVADResourcePool.maxSize = poolSize
-		}
-	}
-
-	if rawTimeout, ok := config["acquire_timeout_ms"]; ok {
-		timeout, ok := rawTimeout.(int64)
-		if ok && timeout > 0 {
-			globalVADResourcePool.acquireTimeout = timeout
-		}
-	}
-
-	// 设置模型路径并完成初始化
-	return initVADResourcePool(modelPath)
-}
-
-// 内部方法：初始化VAD资源池
-func initVADResourcePool(modelPath string) error {
-	if modelPath == "" {
-		return errors.New("模型路径不能为空")
-	}
-
-	initMutex.Lock()
-	defer initMutex.Unlock()
-
-	// 已经初始化过，检查模型路径是否变更
-	if globalVADResourcePool.initialized {
-		currentPath, ok := globalVADResourcePool.defaultConfig["model_path"].(string)
-		if ok && currentPath == modelPath {
-			return nil // 模型路径未变，无需重复初始化
-		}
-		log.Infof("VAD资源池模型路径变更，重新初始化: %s", modelPath)
-	}
-
-	// 设置模型路径
-	globalVADResourcePool.defaultConfig["model_path"] = modelPath
-
-	// 初始化资源池
-	err := globalVADResourcePool.initialize()
-	if err != nil {
-		return fmt.Errorf("初始化VAD资源池失败: %v", err)
-	}
-
-	globalVADResourcePool.initialized = true
-	log.Infof("VAD资源池初始化完成，模型路径: %s，池大小: %d", modelPath, globalVADResourcePool.maxSize)
-	return nil
-}
 
 // SileroVAD Silero VAD模型实现
 type SileroVAD struct {
@@ -235,42 +128,22 @@ func (s *SileroVAD) Close() error {
 	return nil
 }
 
-// createVADInstance 创建指定类型的VAD实例（内部实现）
-func createVADInstance(config map[string]interface{}) (VAD, error) {
+// IsValid 检查资源是否有效
+func (s *SileroVAD) IsValid() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.detector != nil
+}
+
+// AcquireVAD 创建并返回 Silero VAD 实例（由全局资源池管理）
+func AcquireVAD(config map[string]interface{}) (VAD, error) {
 	return NewSileroVAD(config)
 }
 
-// CreateVAD 创建指定类型的VAD实例（公共API）
-func CreateVAD(config map[string]interface{}) (VAD, error) {
-	return createVADInstance(config)
-}
-
-func InitVadPool(config map[string]interface{}) {
-	once.Do(func() {
-		globalVADResourcePool = &VADResourcePool{
-			maxSize:        defaultPoolConfig.MaxSize,
-			acquireTimeout: defaultPoolConfig.AcquireTimeout,
-			defaultConfig:  defaultVADConfig,
-			initialized:    false, // 标记为未完全初始化，需要后续读取配置
-		}
-		InitVADFromConfig(config)
-	})
-
-}
-
-// AcquireVAD 获取一个VAD实例
-func AcquireVAD(config map[string]interface{}) (VAD, error) {
-	if globalVADResourcePool == nil || !globalVADResourcePool.initialized {
-		return nil, errors.New("VAD资源池尚未初始化")
-	}
-
-	return globalVADResourcePool.AcquireVAD()
-}
-
-// ReleaseVAD 释放一个VAD实例
+// ReleaseVAD 释放 VAD 实例
 func ReleaseVAD(vad VAD) error {
-	if globalVADResourcePool != nil && globalVADResourcePool.initialized {
-		globalVADResourcePool.ReleaseVAD(vad)
+	if vad != nil {
+		return vad.Close()
 	}
 	return nil
 }

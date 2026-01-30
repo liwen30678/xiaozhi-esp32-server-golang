@@ -24,6 +24,10 @@ type LLMProvider interface {
 	// GetModelInfo 获取模型信息
 	// 返回模型名称和其他元数据
 	GetModelInfo() map[string]interface{}
+	// Close 关闭资源，释放连接等
+	Close() error
+	// IsValid 检查资源是否有效
+	IsValid() bool
 }
 
 // LLMFactory 大语言模型工厂接口

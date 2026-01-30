@@ -1,0 +1,192 @@
+<template>
+  <div class="mobile-layout">
+    <MobileNavBar
+      :title="pageTitle"
+      :show-back="showBack"
+      class="mobile-nav-bar"
+    >
+      <template #right>
+        <van-icon name="user-o" @click="handleUserClick" />
+      </template>
+    </MobileNavBar>
+    
+    <div class="mobile-content" :class="{ 'with-tabbar': showTabBar }">
+      <router-view v-slot="{ Component }">
+        <transition name="fade" mode="out-in">
+          <component :is="Component" />
+        </transition>
+      </router-view>
+    </div>
+    
+    <MobileTabBar v-if="showTabBar" class="mobile-tabbar" />
+    
+    <!-- 用户菜单弹出层 -->
+    <van-popup
+      v-model:show="showUserMenu"
+      position="bottom"
+      :style="{ padding: '20px' }"
+    >
+      <div class="user-menu">
+        <div class="user-info">
+          <van-icon name="user-circle-o" size="48" />
+          <div class="user-details">
+            <div class="username">{{ authStore.user?.username }}</div>
+            <div class="user-role">{{ roleText }}</div>
+          </div>
+        </div>
+        <van-cell-group inset>
+          <van-cell title="退出登录" is-link @click="handleLogout" />
+        </van-cell-group>
+      </div>
+    </van-popup>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { showConfirmDialog, showSuccessToast } from 'vant'
+import MobileNavBar from './MobileNavBar.vue'
+import MobileTabBar from './MobileTabBar.vue'
+import { useAuthStore } from '../stores/auth'
+import { isMobile } from '../utils/device'
+
+const route = useRoute()
+const router = useRouter()
+const authStore = useAuthStore()
+
+const showUserMenu = ref(false)
+
+// 页面标题
+const pageTitle = computed(() => {
+  return route.meta?.title || '小智管理系统'
+})
+
+// 是否显示返回按钮（非首页且不在标签栏页面时显示）
+const showBack = computed(() => {
+  const hideBackPages = ['/dashboard', '/console', '/agents', '/user/speakers', '/login']
+  const currentPath = route.path
+  return !hideBackPages.some(path => currentPath === path || currentPath.startsWith(path + '/'))
+})
+
+// 是否显示底部标签栏
+const showTabBar = computed(() => {
+  const hideTabBarPages = [
+    '/login',
+    '/setup',
+    '/test',
+    '/simple-login'
+  ]
+  const currentPath = route.path
+  
+  // 详情页面不显示标签栏
+  if (currentPath.includes('/edit') || currentPath.includes('/detail') || currentPath.includes('/history')) {
+    return false
+  }
+  
+  return !hideTabBarPages.includes(currentPath)
+})
+
+// 角色文本
+const roleText = computed(() => {
+  return authStore.isAdmin ? '管理员' : '普通用户'
+})
+
+// 用户图标点击
+const handleUserClick = () => {
+  showUserMenu.value = true
+}
+
+// 退出登录
+const handleLogout = async () => {
+  try {
+    await showConfirmDialog({
+      title: '提示',
+      message: '确定要退出登录吗？'
+    })
+    
+    authStore.logout()
+    showSuccessToast('已退出登录')
+    router.push('/login')
+    showUserMenu.value = false
+  } catch {
+    // 用户取消
+  }
+}
+
+// 监听路由变化，关闭用户菜单
+watch(
+  () => route.path,
+  () => {
+    showUserMenu.value = false
+  }
+)
+</script>
+
+<style scoped>
+.mobile-layout {
+  min-height: 100vh;
+  background-color: #f7f8fa;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-content {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-content.with-tabbar {
+  padding-bottom: 50px; /* 为底部标签栏留出空间 */
+}
+
+/* 页面切换动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 用户菜单样式 */
+.user-menu {
+  padding: 10px 0;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.user-info .van-icon {
+  margin-right: 16px;
+  color: #409EFF;
+}
+
+.user-details {
+  flex: 1;
+}
+
+.username {
+  font-size: 18px;
+  font-weight: 500;
+  color: #323233;
+  margin-bottom: 4px;
+}
+
+.user-role {
+  font-size: 14px;
+  color: #969799;
+}
+
+:deep(.van-popup) {
+  border-radius: 12px 12px 0 0;
+}
+</style>

@@ -55,7 +55,7 @@ func Init(configFile string) error {
 	startPeriodicConfigUpdate()
 
 	//init vad
-	//initVad()
+	initVad()
 
 	//init redis
 	initRedis()
@@ -101,7 +101,7 @@ func startPeriodicConfigUpdate() {
 				if err := updateConfigFromAPI(); err != nil {
 					log.Warnf("周期性配置更新失败: %v", err)
 				} else {
-					log.Debug("周期性配置更新成功")
+					//log.Debug("周期性配置更新成功")
 				}
 			case <-configUpdateStop:
 				log.Info("周期性配置更新已停止")
@@ -134,43 +134,69 @@ func initConfig(configFile string) error {
 }
 
 // updateConfigFromAPI 从接口获取配置并更新viper配置
+// 内部会持续重试，直到成功后才返回
 func updateConfigFromAPI() error {
 	configProviderType := viper.GetString("config_provider.type")
+	retryInterval := 10 * time.Second // 重试间隔
+	retryCount := 0
 
-	//fmt.Printf("获取系统配置, config_provider.type: %s\n", configProviderType)
+	for {
+		// 从配置文件获取后端管理系统地址
+		configProvider, err := user_config.GetProvider(configProviderType)
+		if err != nil {
+			retryCount++
+			log.Warnf("获取配置提供者失败 (第%d次重试): %v，%v后重试", retryCount, err, retryInterval)
+			time.Sleep(retryInterval)
+			continue
+		}
 
-	// 从配置文件获取后端管理系统地址
-	configProvider, err := user_config.GetProvider(configProviderType)
-	if err != nil {
-		return fmt.Errorf("获取配置提供者失败: %v", err)
-	}
+		// 创建上下文
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
-	// 创建上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+		// 获取系统配置JSON字符串
+		configJSON, err := configProvider.GetSystemConfig(ctx)
+		cancel()
 
-	// 获取系统配置JSON字符串
-	configJSON, err := configProvider.GetSystemConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("获取系统配置失败: %v", err)
-	}
+		if err != nil {
+			retryCount++
+			log.Warnf("获取系统配置失败 (第%d次重试): %v，%v后重试", retryCount, err, retryInterval)
+			time.Sleep(retryInterval)
+			continue
+		}
 
-	if configJSON == "" {
+		if configJSON == "" {
+			// 配置为空，视为成功（可能服务返回空配置）
+			if retryCount > 0 {
+				log.Infof("配置获取成功（配置为空，经过%d次重试）", retryCount)
+			}
+			return nil
+		}
+
+		// 解析JSON为map
+		var configMap map[string]interface{}
+		if err := json.Unmarshal([]byte(configJSON), &configMap); err != nil {
+			retryCount++
+			log.Warnf("解析配置JSON失败 (第%d次重试): %v，%v后重试", retryCount, err, retryInterval)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		// 使用viper.MergeConfigMap设置到viper
+		if err := viper.MergeConfigMap(configMap); err != nil {
+			retryCount++
+			log.Warnf("合并配置到viper失败 (第%d次重试): %v，%v后重试", retryCount, err, retryInterval)
+			time.Sleep(retryInterval)
+			continue
+		}
+
+		// 成功
+		if retryCount > 0 {
+			log.Infof("配置获取成功（经过%d次重试）", retryCount)
+		} else {
+			log.Debug("配置获取成功")
+		}
 		return nil
 	}
-
-	// 解析JSON为map
-	var configMap map[string]interface{}
-	if err := json.Unmarshal([]byte(configJSON), &configMap); err != nil {
-		return fmt.Errorf("解析配置JSON失败: %v", err)
-	}
-
-	// 使用viper.MergeConfigMap设置到viper
-	if err := viper.MergeConfigMap(configMap); err != nil {
-		return fmt.Errorf("合并配置到viper失败: %v", err)
-	}
-
-	return nil
 }
 
 func initLog() error {
@@ -224,17 +250,16 @@ func initLog() error {
 	return nil
 }
 
-/*
-	func initVad() error {
-		err := vad.InitVAD()
-		if err != nil {
-			fmt.Printf("initVad error: %v\n", err)
-			os.Exit(1)
-			return err
-		}
-		return nil
-	}
-*/
+func initVad() error {
+	log.Infof("开始初始化 VAD 模块...")
+	vadProvider := viper.GetString("vad.provider")
+	log.Infof("VAD 提供商: %s", vadProvider)
+	
+	// VAD 使用懒加载模式，将在首次使用时通过全局资源池自动初始化
+	log.Infof("VAD 模块将使用懒加载模式，在首次使用时自动初始化")
+	return nil
+}
+
 func initRedis() error {
 	// 初始化我们的统一Redis模块
 	redisConfig := &redisdb.Config{

@@ -251,3 +251,22 @@ func saveWavToTmp(wavData []byte) error {
 func (p *DoubaoTTSProvider) TextToSpeechStream(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) (outputChan chan []byte, err error) {
 	return nil, nil
 }
+
+// SetVoice 设置音色参数
+func (p *DoubaoTTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}
+
+// Close 关闭资源（无状态 Provider，无需关闭）
+func (p *DoubaoTTSProvider) Close() error {
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *DoubaoTTSProvider) IsValid() bool {
+	return p != nil
+}

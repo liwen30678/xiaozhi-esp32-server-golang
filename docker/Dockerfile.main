@@ -1,33 +1,53 @@
-# 构建阶段
-FROM golang:1.24.4 AS builder
+# 构建阶段（仅支持 amd64/x64 架构）
+# syntax=docker/dockerfile:1
+FROM --platform=linux/amd64 golang:1.24.4 AS builder
 
 # 设置非交互式安装环境变量
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 获取构建参数
-ARG TARGETARCH
-
 # 安装构建依赖
-RUN apt-get update && apt-get install -y libopus-dev libopusfile-dev pkg-config wget
+RUN apt-get update && apt-get install -y \
+    libopus-dev \
+    libopusfile-dev \
+    pkg-config \
+    libc++-dev \
+    libc++abi-dev \
+    g++
 
-# 根据架构下载并安装ONNX Runtime
-RUN ONNX_ARCH=$(case ${TARGETARCH} in \
-        amd64) echo "x64" ;; \
-        arm64) echo "aarch64" ;; \
-        *) echo "x64" ;; \
-    esac) && \
-    ONNX_VERSION="1.21.0" && \
-    ONNX_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" && \
-    echo "Downloading ONNX Runtime for ${ONNX_ARCH} architecture from ${ONNX_URL}" && \
-    wget -O /tmp/onnxruntime.tgz "${ONNX_URL}" && \
+# 复制 onnxruntime 库文件（仅 x64）
+COPY docker/lib/onnxruntime-linux-x64-1.21.0.tgz /tmp/
+
+# 安装ONNX Runtime（x64架构）
+RUN echo "Installing ONNX Runtime for x64 architecture" && \
     cd /tmp && \
-    tar -xzf onnxruntime.tgz && \
-    ONNX_DIR=$(ls -d onnxruntime-linux-*/) && \
+    if [ ! -f "onnxruntime-linux-x64-1.21.0.tgz" ]; then \
+        echo "Error: ONNX Runtime file not found!" && \
+        ls -la /tmp/*.tgz 2>/dev/null || echo "No .tgz files found" && \
+        exit 1; \
+    fi && \
+    tar -xzf onnxruntime-linux-x64-1.21.0.tgz || (echo "Failed to extract ONNX Runtime" && exit 1) && \
+    ONNX_DIR=$(ls -d onnxruntime-linux-x64-*/ 2>/dev/null | head -n1) && \
+    if [ -z "${ONNX_DIR}" ]; then \
+        echo "Error: Failed to find extracted ONNX Runtime directory" && \
+        ls -la /tmp/ && \
+        exit 1; \
+    fi && \
+    echo "Found ONNX Runtime directory: ${ONNX_DIR}" && \
     mkdir -p /usr/local/include/onnxruntime && \
+    if [ ! -d "${ONNX_DIR}include" ]; then \
+        echo "Error: ${ONNX_DIR}include directory not found" && \
+        ls -la "${ONNX_DIR}" && \
+        exit 1; \
+    fi && \
     cp -r ${ONNX_DIR}include/* /usr/local/include/onnxruntime/ && \
+    if [ ! -d "${ONNX_DIR}lib" ]; then \
+        echo "Error: ${ONNX_DIR}lib directory not found" && \
+        ls -la "${ONNX_DIR}" && \
+        exit 1; \
+    fi && \
     cp -r ${ONNX_DIR}lib/* /usr/local/lib/ && \
     rm -rf /tmp/onnxruntime* && \
-    ldconfig
+    (ldconfig 2>&1 || echo "Warning: ldconfig failed, but continuing...")
 
 # 设置Go环境变量
 ENV ONNXRUNTIME_DIR=/usr/local
@@ -38,16 +58,22 @@ ENV CGO_ENABLED=1
 
 # 创建工作目录并复制源代码
 WORKDIR /app
+# 先复制 lib 目录（包含 ten-vad 的头文件和库文件，cgo 编译时需要）
+COPY lib ./lib
 COPY . .
 
 # 下载Go模块
 RUN go mod tidy
 
+# 设置 CGO 链接库路径（用于 ten-vad）
+ENV CGO_LDFLAGS="-L${ONNXRUNTIME_DIR}/lib -lonnxruntime -L/app/lib/ten-vad/lib/Linux/x64"
+ENV CGO_CFLAGS="-I${ONNXRUNTIME_DIR}/include/onnxruntime -I/app/lib/ten-vad/include"
+
 # 构建主程序
 RUN go build -o /app/xiaozhi_server ./cmd/server/
 
-# 运行阶段
-FROM ubuntu:22.04
+# 运行阶段（仅支持 amd64/x64 架构）
+FROM --platform=linux/amd64 ubuntu:22.04
 
 # 设置非交互式安装环境变量
 ENV DEBIAN_FRONTEND=noninteractive
@@ -56,33 +82,45 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus0 \
     libopusfile0 \
+    libc++1 \
+    libc++abi1 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 获取构建参数
-ARG TARGETARCH
+# 复制 onnxruntime 库文件（仅 x64）
+COPY docker/lib/onnxruntime-linux-x64-1.21.0.tgz /tmp/
 
-# 安装wget用于下载
-RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
-
-# 根据架构下载并安装ONNX Runtime运行时
-RUN ONNX_ARCH=$(case ${TARGETARCH} in \
-        amd64) echo "x64" ;; \
-        arm64) echo "aarch64" ;; \
-        *) echo "x64" ;; \
-    esac) && \
-    ONNX_VERSION="1.21.0" && \
-    ONNX_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ONNX_VERSION}.tgz" && \
-    echo "Downloading ONNX Runtime for ${ONNX_ARCH} architecture from ${ONNX_URL}" && \
-    wget -O /tmp/onnxruntime.tgz "${ONNX_URL}" && \
+# 安装ONNX Runtime运行时（x64架构）
+RUN echo "Installing ONNX Runtime for x64 architecture" && \
     cd /tmp && \
-    tar -xzf onnxruntime.tgz && \
-    ONNX_DIR=$(ls -d onnxruntime-linux-*/) && \
+    if [ ! -f "onnxruntime-linux-x64-1.21.0.tgz" ]; then \
+        echo "Error: ONNX Runtime file not found!" && \
+        ls -la /tmp/*.tgz 2>/dev/null || echo "No .tgz files found" && \
+        exit 1; \
+    fi && \
+    tar -xzf onnxruntime-linux-x64-1.21.0.tgz || (echo "Failed to extract ONNX Runtime" && exit 1) && \
+    ONNX_DIR=$(ls -d onnxruntime-linux-x64-*/ 2>/dev/null | head -n1) && \
+    if [ -z "${ONNX_DIR}" ]; then \
+        echo "Error: Failed to find extracted ONNX Runtime directory" && \
+        ls -la /tmp/ && \
+        exit 1; \
+    fi && \
+    echo "Found ONNX Runtime directory: ${ONNX_DIR}" && \
     mkdir -p /usr/local/include/onnxruntime && \
+    if [ ! -d "${ONNX_DIR}include" ]; then \
+        echo "Error: ${ONNX_DIR}include directory not found" && \
+        ls -la "${ONNX_DIR}" && \
+        exit 1; \
+    fi && \
     cp -r ${ONNX_DIR}include/* /usr/local/include/onnxruntime/ && \
+    if [ ! -d "${ONNX_DIR}lib" ]; then \
+        echo "Error: ${ONNX_DIR}lib directory not found" && \
+        ls -la "${ONNX_DIR}" && \
+        exit 1; \
+    fi && \
     cp -r ${ONNX_DIR}lib/* /usr/local/lib/ && \
     rm -rf /tmp/onnxruntime* && \
-    ldconfig
+    (ldconfig 2>&1 || echo "Warning: ldconfig failed, but continuing...")
 
 # 设置ONNX Runtime环境变量
 ENV ONNXRUNTIME_DIR=/usr/local
@@ -94,9 +132,14 @@ WORKDIR /workspace
 
 # 从构建阶段复制编译后的二进制文件
 COPY --from=builder /app/xiaozhi_server /workspace/bin/xiaozhi_server
+# 复制 lib 目录（包含 ten-vad 运行时库）
+COPY --from=builder /app/lib /workspace/lib
 
 # 创建必要的目录
 RUN mkdir -p /workspace/logs /workspace/config
+
+# 设置运行时库路径（用于 ten-vad）
+ENV LD_LIBRARY_PATH=/workspace/lib:/workspace/lib/ten-vad/lib/Linux/x64
 
 # 暴露端口: http/websocket:8989, udp:8990, mqtt: 1883,2883,8883
 EXPOSE 8989 8990 1883 2883 8883

@@ -9,11 +9,11 @@ import (
 
 	"sync"
 
-	"xiaozhi-esp32-server-golang/internal/domain/asr"
 	utypes "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/memory"
+	"xiaozhi-esp32-server-golang/internal/domain/speaker"
 	"xiaozhi-esp32-server-golang/internal/domain/tts"
 
 	. "xiaozhi-esp32-server-golang/internal/data/audio"
@@ -26,6 +26,7 @@ import (
 
 // Dialogue 表示对话历史
 type Dialogue struct {
+	mu       sync.RWMutex // 保护 Messages 的读写锁
 	Messages []*schema.Message
 }
 
@@ -62,7 +63,8 @@ type ClientState struct {
 	Llm
 
 	// TTS 提供者
-	TTSProvider tts.TTSProvider
+	TTSProvider      tts.TTSProvider        // 默认TTS提供者
+	SpeakerTTSConfig map[string]interface{} // 声纹识别的TTS配置（完整config，优先使用）
 	// memory提供者
 	MemoryProvider memory.MemoryProvider
 	MemoryContext  string //memory context
@@ -97,6 +99,28 @@ type ClientState struct {
 
 	IsTtsStart        bool //是否tts开始
 	IsWelcomeSpeaking bool //是否已经欢迎语
+
+	// 声纹识别相关
+	SpeakerProvider speaker.SpeakerProvider // 声纹识别提供者（在 session 中初始化）
+
+	// 异步获取声纹结果的回调函数（在 session 中设置）
+	OnVoiceSilenceSpeakerCallback func(ctx context.Context)
+
+	// ASR首次返回字符的回调函数（在 session 中设置）
+	OnAsrFirstTextCallback func(text string, isFinal bool)
+}
+
+// IsSpeakerEnabled 检查是否启用声纹识别（从全局配置中读取）
+func (c *ClientState) IsSpeakerEnabled() bool {
+	// 从全局配置（viper）获取 enable 字段
+	enabled := viper.GetBool("voice_identify.enable")
+	return enabled
+}
+
+// HasSpeakerGroups 检查设备配置中是否有声纹组
+func (c *ClientState) HasSpeakerGroups() bool {
+	// 检查设备配置中是否有声纹组配置
+	return len(c.DeviceConfig.VoiceIdentify) > 0
 }
 
 func (c *ClientState) IsRealTime() bool {
@@ -116,10 +140,15 @@ func (c *ClientState) AddMessage(msg *schema.Message) {
 		log.Warnf("尝试添加 nil 消息到对话历史")
 		return
 	}
+	c.Dialogue.mu.Lock()
+	defer c.Dialogue.mu.Unlock()
 	c.Dialogue.Messages = append(c.Dialogue.Messages, msg)
 }
 
 func (c *ClientState) GetMessages(count int) []*schema.Message {
+	c.Dialogue.mu.RLock()
+	defer c.Dialogue.mu.RUnlock()
+
 	// 添加边界检查，防止数组越界
 	if len(c.Dialogue.Messages) == 0 {
 		return []*schema.Message{}
@@ -217,6 +246,8 @@ func AlignToolMessages(messages []*schema.Message) []*schema.Message {
 }
 
 func (c *ClientState) InitMessages(messages []*schema.Message) error {
+	c.Dialogue.mu.Lock()
+	defer c.Dialogue.mu.Unlock()
 	c.Dialogue.Messages = AlignToolMessages(messages)
 	return nil
 }
@@ -325,20 +356,21 @@ func (s *ClientState) InitAsr() error {
 
 	log.Infof("初始化asr, asrConfig: %+v", asrConfig)
 
-	//初始化asr
-	asrProvider, err := asr.NewAsrProvider(asrConfig.Provider, asrConfig.Config)
-	if err != nil {
-		log.Errorf("创建asr提供者失败: %v", err)
-		return fmt.Errorf("创建asr提供者失败: %v", err)
-	}
+	//初始化asr（不再直接创建 AsrProvider，改为使用资源池）
 	ctx, cancel := context.WithCancel(s.Ctx)
 	s.Asr = Asr{
 		Ctx:             ctx,
 		Cancel:          cancel,
-		AsrProvider:     asrProvider,
 		AsrAudioChannel: make(chan []float32, 100),
 		AsrEnd:          make(chan bool, 1),
 		AsrResult:       bytes.Buffer{},
+		AsrType:         asrConfig.Provider,
+		ClientState:     s, // 设置 ClientState 引用
+	}
+
+	// 设置 ASR 模式
+	if mode, ok := asrConfig.Config["mode"].(string); ok {
+		s.Asr.Mode = mode
 	}
 
 	if rawAutoEnd, ok := asrConfig.Config["auto_end"]; ok {
@@ -353,6 +385,11 @@ func (c *ClientState) Destroy() {
 	c.Asr.Stop()
 	c.Vad.Reset()
 
+	// 归还ASR资源（如果存在）
+	// 注意：这里需要导入 pool 包，但为了避免循环依赖，在调用处处理
+	// 或者在这里使用类型断言，但需要导入 pool 包
+	// 暂时在调用处（ChatSession.Close）处理资源归还
+
 	c.VoiceStatus.Reset()
 	c.AsrAudioBuffer.ClearAsrAudioData()
 
@@ -364,24 +401,24 @@ func (c *ClientState) Destroy() {
 	c.SetTtsStart(false)
 }
 
-func (c *ClientState) SetAsrPcmFrameSize(sampleRate int, channels int, perFrameDuration int) {
-	c.AsrAudioBuffer.PcmFrameSize = sampleRate * channels * perFrameDuration / 1000
-}
-
 func (state *ClientState) OnManualStop() {
 	state.OnVoiceSilence()
 }
 
 func (state *ClientState) OnVoiceSilence() {
+	log.Debugf("OnVoiceSilence, voiceDuration: %d, voiceDurationInSession: %d", state.Vad.GetVoiceDuration(), state.Vad.GetVoiceDurationInSession())
 	state.SetClientVoiceStop(true) //设置停止说话标志位, 此时收到的音频数据不会进vad
 	//客户端停止说话
 	state.Asr.Stop() //停止asr并获取结果，进行llm
 	//释放vad
 	state.Vad.Reset() //释放vad实例
-	//asr统计
-	state.SetStartAsrTs() //进行asr统计
 
 	state.SetStatus(ClientStatusListenStop)
+
+	// 如果设置了异步获取声纹结果的回调，则调用
+	if state.OnVoiceSilenceSpeakerCallback != nil {
+		state.OnVoiceSilenceSpeakerCallback(state.Ctx)
+	}
 }
 
 type Llm struct {

@@ -181,3 +181,22 @@ func (p *EdgeTTSProvider) TextToSpeechStream(ctx context.Context, text string, s
 	}()
 	return outputChan, nil
 }
+
+// SetVoice 设置音色参数
+func (p *EdgeTTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}
+
+// Close 关闭资源（无状态 Provider，无需关闭）
+func (p *EdgeTTSProvider) Close() error {
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *EdgeTTSProvider) IsValid() bool {
+	return p != nil
+}

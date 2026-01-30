@@ -18,14 +18,13 @@ type FunasrAdapter struct {
 func NewFunasrAdapter(config map[string]interface{}) (AsrProvider, error) {
 	// 创建 FunasrConfig 配置
 	funasrConfig := funasr.FunasrConfig{
-		Host:           "localhost",
-		Port:           "10095",
-		Mode:           "online",
-		SampleRate:     audio.SampleRate,
-		ChunkInterval:  audio.FrameDuration,
-		MaxConnections: 5,
-		Timeout:        30,
-		AutoEnd:        false,
+		Host:          "localhost",
+		Port:          "10095",
+		Mode:          "online",
+		SampleRate:    audio.SampleRate,
+		ChunkInterval: audio.FrameDuration,
+		Timeout:       30,
+		AutoEnd:       false,
 	}
 
 	log.Log().Infof("funasr config: %+v", config)
@@ -54,11 +53,6 @@ func NewFunasrAdapter(config map[string]interface{}) (AsrProvider, error) {
 		funasrConfig.ChunkInterval = chunkInterval
 	} else if chunkIntervalFloat, ok := config["chunk_interval"].(float64); ok && chunkIntervalFloat > 0 {
 		funasrConfig.ChunkInterval = int(chunkIntervalFloat)
-	}
-	if maxConnections, ok := config["max_connections"].(int); ok && maxConnections > 0 {
-		funasrConfig.MaxConnections = maxConnections
-	} else if maxConnectionsFloat, ok := config["max_connections"].(float64); ok && maxConnectionsFloat > 0 {
-		funasrConfig.MaxConnections = int(maxConnectionsFloat)
 	}
 	if timeout, ok := config["timeout"].(int); ok && timeout > 0 {
 		funasrConfig.Timeout = timeout
@@ -95,4 +89,14 @@ func (a *FunasrAdapter) StreamingRecognize(ctx context.Context, audioStream <-ch
 	}
 
 	return resultChan, nil
+}
+
+// Close 关闭资源（无状态 Provider，无需关闭）
+func (a *FunasrAdapter) Close() error {
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (a *FunasrAdapter) IsValid() bool {
+	return a != nil && a.engine != nil
 }

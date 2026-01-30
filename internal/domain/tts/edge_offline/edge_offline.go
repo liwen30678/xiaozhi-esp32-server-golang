@@ -14,65 +14,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// WebSocket连接配置
-type WSConnConfig struct {
-	ServerURL        string
-	HandshakeTimeout time.Duration
-}
-
-// wsConnWrapper WebSocket 连接包装器，实现 util.Resource 接口
-type wsConnWrapper struct {
-	conn         *websocket.Conn
-	lastActiveAt time.Time
-	mu           sync.RWMutex
-}
-
-// Close 关闭连接，实现 util.Resource 接口
-func (w *wsConnWrapper) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.conn != nil {
-		return w.conn.Close()
-	}
-	return nil
-}
-
-// IsValid 检查连接是否有效，实现 util.Resource 接口
-func (w *wsConnWrapper) IsValid() bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.conn != nil && time.Since(w.lastActiveAt) < 30*time.Second
-}
-
-// updateLastActive 更新最后活跃时间
-func (w *wsConnWrapper) updateLastActive() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.lastActiveAt = time.Now()
-}
-
-// getConnection 获取底层连接
-func (w *wsConnWrapper) getConnection() *websocket.Conn {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.conn
-}
-
 // EdgeOfflineTTSProvider WebSocket TTS 提供者
 type EdgeOfflineTTSProvider struct {
-	ServerURL string
-	Timeout   time.Duration
-	pool      *util.ResourcePool
-}
+	ServerURL        string
+	Timeout          time.Duration
+	HandshakeTimeout time.Duration
 
-var resourcePool *util.ResourcePool
-var once sync.Once
-var lock sync.RWMutex
+	// 连接管理
+	conn      *websocket.Conn
+	connMutex sync.RWMutex
+	// 发送锁，确保同一时间只有一个请求在使用连接
+	sendMutex sync.Mutex
+}
 
 // NewEdgeOfflineTTSProvider 创建新的 Edge Offline TTS 提供者
 func NewEdgeOfflineTTSProvider(config map[string]interface{}) *EdgeOfflineTTSProvider {
 	serverURL, _ := config["server_url"].(string)
 	timeout, _ := config["timeout"].(float64)
+	handshakeTimeout, _ := config["handshake_timeout"].(float64)
 
 	// 设置默认值
 	if serverURL == "" {
@@ -81,151 +40,99 @@ func NewEdgeOfflineTTSProvider(config map[string]interface{}) *EdgeOfflineTTSPro
 	if timeout == 0 {
 		timeout = 30 // 默认30秒超时
 	}
-
-	if resourcePool == nil {
-		lock.Lock()
-		defer lock.Unlock()
-		if resourcePool == nil {
-			// 创建连接池配置
-			poolConfig := getPoolConfigFromMap(config)
-			if poolConfig == nil {
-				poolConfig = util.DefaultConfig()
-				// 为TTS设置合适的默认值
-				poolConfig.MaxSize = 10
-				poolConfig.MinSize = 1
-				poolConfig.MaxIdle = 5
-				poolConfig.IdleTimeout = 1 * time.Minute
-				poolConfig.ValidateOnBorrow = true
-				poolConfig.ValidateOnReturn = true
-			}
-
-			// 创建WebSocket连接工厂
-			wsConfig := WSConnConfig{
-				ServerURL:        serverURL,
-				HandshakeTimeout: 10 * time.Second,
-			}
-			factory := NewWebSocketConnFactory(wsConfig)
-
-			// 创建资源池
-			var err error
-			resourcePool, err = util.NewResourcePool(poolConfig, factory)
-			if err != nil {
-				log.Errorf("创建WebSocket连接池失败: %v", err)
-				return nil
-			}
-		}
+	if handshakeTimeout == 0 {
+		handshakeTimeout = 10 // 默认10秒握手超时
 	}
 
 	return &EdgeOfflineTTSProvider{
-		ServerURL: serverURL,
-		Timeout:   time.Duration(timeout) * time.Second,
-		pool:      resourcePool,
+		ServerURL:        serverURL,
+		Timeout:          time.Duration(timeout) * time.Second,
+		HandshakeTimeout: time.Duration(handshakeTimeout) * time.Second,
 	}
 }
 
-// getPoolConfigFromMap 从配置映射中获取池配置
-func getPoolConfigFromMap(config map[string]interface{}) *util.PoolConfig {
-	if config == nil {
-		return nil
+// getConnection 获取连接，如果不存在则创建
+func (p *EdgeOfflineTTSProvider) getConnection(ctx context.Context) (*websocket.Conn, error) {
+	// 先尝试读取现有连接
+	p.connMutex.RLock()
+	conn := p.conn
+	p.connMutex.RUnlock()
+
+	if conn != nil {
+		return conn, nil
 	}
 
-	poolConfig := util.DefaultConfig()
+	// 需要创建新连接
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
 
-	if config["pool_min_size"] != nil {
-		if minSize, ok := config["pool_min_size"].(int); ok {
-			poolConfig.MinSize = minSize
-		}
-	}
-	if config["pool_max_size"] != nil {
-		if maxSize, ok := config["pool_max_size"].(int); ok {
-			poolConfig.MaxSize = maxSize
-		}
-	}
-	if config["pool_max_idle"] != nil {
-		if maxIdle, ok := config["pool_max_idle"].(int); ok {
-			poolConfig.MaxIdle = maxIdle
-		}
-	}
-	if config["pool_idle_timeout"] != nil {
-		if idleTimeout, ok := config["pool_idle_timeout"].(float64); ok {
-			poolConfig.IdleTimeout = time.Duration(idleTimeout) * time.Second
-		}
-	}
-	if config["pool_acquire_timeout"] != nil {
-		if acquireTimeout, ok := config["pool_acquire_timeout"].(float64); ok {
-			poolConfig.AcquireTimeout = time.Duration(acquireTimeout) * time.Second
-		}
+	// 双重检查，可能其他 goroutine 已经创建了连接
+	if p.conn != nil {
+		return p.conn, nil
 	}
 
-	return poolConfig
-}
-
-// getConnection 从连接池获取连接
-func (p *EdgeOfflineTTSProvider) getConnection(ctx context.Context) (*wsConnWrapper, error) {
-	if p.pool == nil {
-		return nil, fmt.Errorf("连接池未初始化")
+	// 创建新连接
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: p.HandshakeTimeout,
 	}
-
-	resource, err := p.pool.AcquireWithTimeout(p.Timeout)
+	conn, _, err := dialer.DialContext(ctx, p.ServerURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("从连接池获取连接失败: %v", err)
+		return nil, fmt.Errorf("WebSocket连接失败: %v", err)
 	}
 
-	wrapper, ok := resource.(*wsConnWrapper)
-	if !ok {
-		p.pool.Release(resource)
-		return nil, fmt.Errorf("无效的资源类型")
-	}
-
-	return wrapper, nil
+	p.conn = conn
+	log.Infof("WebSocket 连接已建立")
+	return conn, nil
 }
 
-// returnConnection 归还连接到连接池
-func (p *EdgeOfflineTTSProvider) returnConnection(wrapper *wsConnWrapper) error {
-	if p.pool == nil || wrapper == nil {
-		return fmt.Errorf("连接池或连接为空")
-	}
-	return p.pool.Release(wrapper)
-}
+// clearConnection 清空连接（用于断线重连）
+func (p *EdgeOfflineTTSProvider) clearConnection() {
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
 
-// removeConnection 从连接池中移除连接
-func (p *EdgeOfflineTTSProvider) removeConnection(wrapper *wsConnWrapper) {
-	if wrapper != nil {
-		wrapper.Close()
+	if p.conn != nil {
+		p.conn.Close()
+		p.conn = nil
+		log.Infof("WebSocket 连接已清空，等待下次重连")
 	}
 }
 
-// Close 关闭资源池
-func (p *EdgeOfflineTTSProvider) Close() error {
-	if p.pool != nil {
-		return p.pool.Close()
-	}
-	return nil
-}
+// writeMessage 安全地向 WebSocket 连接写入消息
+func (p *EdgeOfflineTTSProvider) writeMessage(conn *websocket.Conn, messageType int, data []byte) error {
+	// 使用读锁保护连接写入操作，防止并发写入导致数据混乱
+	p.connMutex.RLock()
+	defer p.connMutex.RUnlock()
 
-// Stats 获取资源池统计信息
-func (p *EdgeOfflineTTSProvider) Stats() map[string]interface{} {
-	if p.pool != nil {
-		return p.pool.Stats()
+	// 检查连接是否有效
+	if conn == nil {
+		return fmt.Errorf("连接已关闭")
 	}
-	return nil
+
+	return conn.WriteMessage(messageType, data)
 }
 
 // TextToSpeech 将文本转换为语音，返回音频帧数据
 func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) ([][]byte, error) {
 	var frames [][]byte
 
-	// 获取连接
-	wrapper, err := p.getConnection(ctx)
+	// 使用发送锁保护，确保同一时间只有一个请求在使用连接
+	p.sendMutex.Lock()
+	// 注意：不在函数返回时释放锁，而是在 goroutine 完成时释放
+
+	// 获取连接（复用或创建）
+	conn, err := p.getConnection(ctx)
 	if err != nil {
+		p.sendMutex.Unlock() // 获取连接失败时立即释放锁
 		return nil, err
 	}
 
-	// 发送文本
-	conn := wrapper.getConnection()
-	err = conn.WriteMessage(websocket.TextMessage, []byte(text))
+	// 发送文本（使用受保护的写入方法）
+	err = p.writeMessage(conn, websocket.TextMessage, []byte(text))
 	if err != nil {
-		p.removeConnection(wrapper)
+		// 发送失败，清空连接，下次使用时自动重连
+		log.Errorf("发送文本失败: %v，清空连接", err)
+		p.clearConnection()
+		p.sendMutex.Unlock() // 发送失败时立即释放锁
 		return nil, fmt.Errorf("发送文本失败: %v", err)
 	}
 
@@ -238,6 +145,7 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 	audioDecoder, err := util.CreateAudioDecoder(ctx, pipeReader, outputChan, frameDuration, "mp3")
 	if err != nil {
 		pipeReader.Close()
+		p.sendMutex.Unlock() // 创建解码器失败时立即释放锁
 		return nil, fmt.Errorf("创建音频解码器失败: %v", err)
 	}
 
@@ -248,9 +156,14 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 		}
 	}()
 
+	// 使用 WaitGroup 等待读取 goroutine 完成
+	var wg sync.WaitGroup
+	wg.Add(1)
+
 	// 接收WebSocket数据并写入管道
 	done := make(chan struct{})
 	go func() {
+		defer wg.Done()
 		defer close(done)
 		defer pipeWriter.Close()
 
@@ -260,7 +173,9 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 					return
 				}
-				log.Errorf("读取WebSocket消息失败: %v", err)
+				log.Errorf("读取WebSocket消息失败: %v，清空连接", err)
+				// 连接断开，清空连接，下次使用时自动重连
+				p.clearConnection()
 				return
 			}
 
@@ -280,13 +195,18 @@ func (p *EdgeOfflineTTSProvider) TextToSpeech(ctx context.Context, text string, 
 		}
 	}()
 
+	// 在后台等待 goroutine 完成并释放锁
+	go func() {
+		wg.Wait()
+		p.sendMutex.Unlock()
+		log.Debugf("edge_offline TextToSpeech goroutine 完成，已释放 sendMutex")
+	}()
+
 	// 等待完成或超时
 	select {
 	case <-ctx.Done():
-		p.returnConnection(wrapper)
 		return nil, fmt.Errorf("TTS合成超时或被取消")
 	case <-done:
-		p.returnConnection(wrapper)
 		close(outputChan)
 		return frames, nil
 	}
@@ -297,83 +217,113 @@ func (p *EdgeOfflineTTSProvider) TextToSpeechStream(ctx context.Context, text st
 	outputChan := make(chan []byte, 100)
 
 	go func() {
-		// 获取连接
-		wrapper, err := p.getConnection(ctx)
+		// 使用发送锁保护，确保同一时间只有一个请求在使用连接
+		p.sendMutex.Lock()
+
+		// 获取连接（复用或创建）
+		conn, err := p.getConnection(ctx)
 		if err != nil {
+			p.sendMutex.Unlock()
 			log.Errorf("获取WebSocket连接失败: %v", err)
 			return
 		}
-		defer p.returnConnection(wrapper)
 
-		// 发送文本
-		conn := wrapper.getConnection()
-		err = conn.WriteMessage(websocket.TextMessage, []byte(text))
+		// 发送文本（使用受保护的写入方法）
+		err = p.writeMessage(conn, websocket.TextMessage, []byte(text))
 		if err != nil {
-			p.removeConnection(wrapper)
-			log.Errorf("发送文本失败: %v", err)
+			p.sendMutex.Unlock()
+			log.Errorf("发送文本失败: %v，清空连接", err)
+			// 发送失败，清空连接，下次使用时自动重连
+			p.clearConnection()
 			return
 		}
 
 		// 创建管道用于音频数据传输
 		pipeReader, pipeWriter := io.Pipe()
-
 		defer func() {
-			pipeReader.Close()
 			pipeWriter.Close()
+			// 读取完成后释放锁
+			log.Debugf("TextToSpeechStream read completed, release sendMutex")
+			p.sendMutex.Unlock()
 		}()
 
-		// 启动解码器
+		// 启动解码器（解码器会在 defer 中自动关闭 outputChan）
 		go func() {
+
 			startTs := time.Now().UnixMilli()
 			// 创建音频解码器
-			audioDecoder, err := util.CreateAudioDecoder(ctx, pipeReader, outputChan, frameDuration, "pcm")
+			audioDecoder, err := util.CreateAudioDecoderWithSampleRate(ctx, pipeReader, outputChan, frameDuration, "pcm", sampleRate)
 			if err != nil {
-				pipeReader.Close()
 				log.Errorf("创建音频解码器失败: %v", err)
 				return
 			}
 
 			audioDecoder.WithFormat(beep.Format{
-				SampleRate:  beep.SampleRate(sampleRate),
+				SampleRate:  beep.SampleRate(24000),
 				NumChannels: channels,
 				Precision:   2,
 			})
 
+			// 解码器会在 defer 中自动关闭 outputChan
 			if err := audioDecoder.Run(startTs); err != nil {
 				log.Errorf("音频解码失败: %v", err)
 			}
 		}()
 
-		// 接收WebSocket数据并写入管道
+		// 接收WebSocket数据并写入管道（读取过程中持有锁，确保串行化）
 		for {
 			select {
 			case <-ctx.Done():
 				log.Debugf("TextToSpeechStream context done, exit")
-				p.returnConnection(wrapper)
+				// 关闭 pipeWriter，让解码器自然结束并关闭 channel
 				return
 			default:
 				messageType, data, err := conn.ReadMessage()
 				if err != nil {
+					// 关闭 pipeWriter，让解码器自然结束并关闭 channel
+					pipeWriter.Close()
 					if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 						return
 					}
-					log.Errorf("读取WebSocket消息失败: %v", err)
-					p.removeConnection(wrapper)
+					log.Errorf("读取WebSocket消息失败: %v，清空连接", err)
+					// 连接断开，清空连接，下次使用时自动重连
+					p.clearConnection()
 					return
 				}
 
 				if messageType == websocket.BinaryMessage {
 					if _, err := pipeWriter.Write(data); err != nil {
 						log.Errorf("写入音频数据失败: %v", err)
-						p.removeConnection(wrapper)
 						return
 					}
 					return
 				}
-
 			}
 		}
 	}()
 
 	return outputChan, nil
+}
+
+// SetVoice 设置音色参数（EdgeOffline 不支持动态设置音色，但不报错）
+func (p *EdgeOfflineTTSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	// EdgeOffline 通过 WebSocket 连接，音色由服务端控制，不支持客户端动态设置
+	// 返回 nil 表示操作成功（虽然实际上不执行任何操作）
+	return nil
+}
+
+// Close 关闭资源，释放连接
+func (p *EdgeOfflineTTSProvider) Close() error {
+	p.clearConnection()
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *EdgeOfflineTTSProvider) IsValid() bool {
+	p.connMutex.RLock()
+	conn := p.conn
+	p.connMutex.RUnlock()
+
+	// 检查连接是否存在
+	return conn != nil
 }

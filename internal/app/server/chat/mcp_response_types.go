@@ -82,12 +82,14 @@ type MCPResponse interface {
 	IsTerminal() bool // 是否是终止性操作
 	ToJSON() (string, error)
 	GetContent() []mcp_go.Content
+	GetAction() string // 获取动作类型
 }
 
 // 实现MCPResponse接口
 func (r *MCPActionResponse) GetType() MCPResponseType { return MCPResponseTypeAction }
 func (r *MCPActionResponse) GetSuccess() bool         { return r.Success }
 func (r *MCPActionResponse) IsTerminal() bool         { return r.FinalAction || r.NoFurtherResponse }
+func (r *MCPActionResponse) GetAction() string        { return r.Action }
 func (r *MCPActionResponse) GetContent() []mcp_go.Content {
 	return []mcp_go.Content{
 		mcp_go.TextContent{
@@ -101,6 +103,7 @@ func (r *MCPActionResponse) GetContent() []mcp_go.Content {
 func (r *MCPAudioResponse) GetType() MCPResponseType { return MCPResponseTypeAudio }
 func (r *MCPAudioResponse) GetSuccess() bool         { return r.Success }
 func (r *MCPAudioResponse) IsTerminal() bool         { return r.FinalAction }
+func (r *MCPAudioResponse) GetAction() string        { return r.Action }
 func (r *MCPAudioResponse) GetContent() []mcp_go.Content {
 	return []mcp_go.Content{
 		mcp_go.TextContent{
@@ -118,6 +121,7 @@ func (r *MCPAudioResponse) GetContent() []mcp_go.Content {
 func (r *MCPContentResponse) GetType() MCPResponseType { return MCPResponseTypeContent }
 func (r *MCPContentResponse) GetSuccess() bool         { return r.Success }
 func (r *MCPContentResponse) IsTerminal() bool         { return false } // 内容类通常不终止
+func (r *MCPContentResponse) GetAction() string        { return "" }    // 内容类没有动作
 func (r *MCPContentResponse) GetContent() []mcp_go.Content {
 	return []mcp_go.Content{
 		mcp_go.TextContent{
@@ -130,6 +134,7 @@ func (r *MCPContentResponse) GetContent() []mcp_go.Content {
 func (r *MCPErrorResponse) GetType() MCPResponseType { return MCPResponseTypeError }
 func (r *MCPErrorResponse) GetSuccess() bool         { return r.Success }
 func (r *MCPErrorResponse) IsTerminal() bool         { return false } // 错误类允许后续处理
+func (r *MCPErrorResponse) GetAction() string        { return "" }    // 错误类没有动作
 func (r *MCPErrorResponse) GetContent() []mcp_go.Content {
 	return []mcp_go.Content{
 		mcp_go.TextContent{

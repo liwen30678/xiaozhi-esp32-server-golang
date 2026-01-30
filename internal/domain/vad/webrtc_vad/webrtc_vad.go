@@ -32,30 +32,28 @@ type WebRTCVAD struct {
 	mu             sync.RWMutex // 读写锁
 }
 
-var vadPool *WebRTCVADPool
-var once sync.Once
-
+// AcquireVAD 创建并返回 WebRTC VAD 实例（由全局资源池管理）
 func AcquireVAD(config map[string]interface{}) (inter.VAD, error) {
-	if vadPool == nil {
-		var err error
-		once.Do(func() {
-			poolConfig := getPoolConfigFromMap(config)
-			vadConfig := getVadConfigFromMap(config)
-			vadPool, err = NewWebRTCVADPool(vadConfig, poolConfig)
-			if err != nil {
-				return
-			}
-		})
+	vadConfig := getVadConfigFromMap(config)
+
+	vad := &WebRTCVAD{
+		sampleRate: vadConfig.SampleRate,
+		mode:       vadConfig.Mode,
+		lastUsed:   time.Now(),
 	}
-	if vadPool == nil {
-		return nil, fmt.Errorf("failed to create WebRTC VAD pool")
+
+	// 初始化实例
+	if err := vad.init(); err != nil {
+		return nil, fmt.Errorf("failed to initialize WebRTC VAD: %w", err)
 	}
-	return vadPool.AcquireVAD()
+
+	return vad, nil
 }
 
+// ReleaseVAD 释放 VAD 实例
 func ReleaseVAD(vad inter.VAD) error {
-	if vadPool != nil {
-		return vadPool.ReleaseVAD(vad)
+	if vad != nil {
+		return vad.Close()
 	}
 	return nil
 }

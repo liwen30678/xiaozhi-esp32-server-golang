@@ -65,176 +65,11 @@ const (
 // reserved data: 0x00 (1 byte)
 var defaultHeader = []byte{0x11, 0x10, 0x11, 0x00}
 
-// 全局WebSocket客户端连接池
-var (
-	wsConnPools     = make(map[string]*WSConnPool)
-	wsConnPoolsLock sync.RWMutex
-	// 全局WebSocket Dialer，配置更大的缓冲区以避免slice bounds out of range错误
-	wsDialer = websocket.Dialer{
-		ReadBufferSize:   16384, // 16KB 读取缓冲区
-		WriteBufferSize:  16384, // 16KB 写入缓冲区
-		HandshakeTimeout: 45 * time.Second,
-	}
-)
-
-// WSConnWrapper WebSocket连接包装器，带有最后活跃时间
-type WSConnWrapper struct {
-	Conn         *websocket.Conn
-	LastActiveAt time.Time
-	InUse        bool // 标记连接是否正在使用
-}
-
-// WSConnPool WebSocket连接池
-type WSConnPool struct {
-	connections []*WSConnWrapper
-	maxConns    int
-	minConns    int
-	lock        sync.Mutex
-	wsURL       *url.URL
-	header      http.Header
-	idleTimeout time.Duration
-	maxIdleTime time.Duration
-}
-
-// NewWSConnPool 创建新的WebSocket连接池
-func NewWSConnPool(wsURL *url.URL, header http.Header, maxConns, minConns int) *WSConnPool {
-	if maxConns <= 0 {
-		maxConns = 200 // 默认最大连接数
-	}
-	if minConns < 0 {
-		minConns = 1 // 默认最小连接数
-	}
-	if minConns > maxConns {
-		minConns = maxConns
-	}
-
-	return &WSConnPool{
-		connections: make([]*WSConnWrapper, 0, maxConns),
-		maxConns:    maxConns,
-		minConns:    minConns,
-		wsURL:       wsURL,
-		header:      header,
-		idleTimeout: 30 * time.Second, // 连接空闲超时时间
-		maxIdleTime: 5 * time.Minute,  // 最大空闲时间，超过则关闭连接
-	}
-}
-
-// Get 从连接池获取一个可用连接
-func (pool *WSConnPool) Get() (*websocket.Conn, error) {
-	pool.lock.Lock()
-	defer pool.lock.Unlock()
-
-	// 清理过期连接
-	pool.cleanup()
-
-	// 寻找空闲连接
-	for _, wrapper := range pool.connections {
-		if !wrapper.InUse && pool.isValidConnection(wrapper) {
-			// 标记为使用中
-			wrapper.InUse = true
-			wrapper.LastActiveAt = time.Now()
-			log.Debugf("复用连接池中的空闲连接，当前连接数: %d", len(pool.connections))
-			return wrapper.Conn, nil
-		}
-	}
-
-	// 如果没有空闲连接且未达到最大连接数，创建新连接
-	if len(pool.connections) < pool.maxConns {
-		conn, err := pool.createConnection()
-		if err != nil {
-			return nil, fmt.Errorf("创建新连接失败: %v", err)
-		}
-
-		wrapper := &WSConnWrapper{
-			Conn:         conn,
-			LastActiveAt: time.Now(),
-			InUse:        true,
-		}
-		pool.connections = append(pool.connections, wrapper)
-		log.Debugf("创建新的WebSocket连接，当前连接数: %d/%d", len(pool.connections), pool.maxConns)
-		return conn, nil
-	}
-
-	return nil, fmt.Errorf("连接池已满，无法获取连接")
-}
-
-// Put 将连接归还到连接池
-func (pool *WSConnPool) Put(conn *websocket.Conn) {
-	pool.lock.Lock()
-	defer pool.lock.Unlock()
-
-	// 找到对应的连接包装器并标记为空闲
-	for _, wrapper := range pool.connections {
-		if wrapper.Conn == conn {
-			wrapper.InUse = false
-			wrapper.LastActiveAt = time.Now()
-			log.Debugf("连接已归还到连接池")
-			return
-		}
-	}
-}
-
-// createConnection 创建新的WebSocket连接
-func (pool *WSConnPool) createConnection() (*websocket.Conn, error) {
-	conn, _, err := wsDialer.Dial(pool.wsURL.String(), pool.header)
-	if err != nil {
-		return nil, err
-	}
-
-	// 设置消息读取限制，防止过大的消息
-	conn.SetReadLimit(1024 * 1024) // 1MB 最大消息大小
-
-	// 设置保持连接
-	conn.SetPingHandler(func(appData string) error {
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(1*time.Second))
-	})
-
-	return conn, nil
-}
-
-// isValidConnection 检查连接是否有效
-func (pool *WSConnPool) isValidConnection(wrapper *WSConnWrapper) bool {
-	// 检查连接是否超时
-	if time.Since(wrapper.LastActiveAt) > pool.maxIdleTime {
-		return false
-	}
-
-	// 发送ping检查连接是否有效
-	err := wrapper.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(1*time.Second))
-	return err == nil
-}
-
-// cleanup 清理过期或无效的连接
-func (pool *WSConnPool) cleanup() {
-	validConnections := make([]*WSConnWrapper, 0, len(pool.connections))
-
-	for _, wrapper := range pool.connections {
-		if wrapper.InUse {
-			// 正在使用的连接保留
-			validConnections = append(validConnections, wrapper)
-		} else if pool.isValidConnection(wrapper) {
-			// 空闲且有效的连接保留
-			validConnections = append(validConnections, wrapper)
-		} else {
-			// 关闭无效连接
-			wrapper.Conn.Close()
-			log.Debugf("清理无效连接")
-		}
-	}
-
-	pool.connections = validConnections
-}
-
-// Close 关闭连接池中的所有连接
-func (pool *WSConnPool) Close() {
-	pool.lock.Lock()
-	defer pool.lock.Unlock()
-
-	for _, wrapper := range pool.connections {
-		wrapper.Conn.Close()
-	}
-	pool.connections = pool.connections[:0]
-	log.Debugf("连接池已关闭")
+// 全局WebSocket Dialer，配置更大的缓冲区以避免slice bounds out of range错误
+var wsDialer = websocket.Dialer{
+	ReadBufferSize:   16384, // 16KB 读取缓冲区
+	WriteBufferSize:  16384, // 16KB 写入缓冲区
+	HandshakeTimeout: 45 * time.Second,
 }
 
 // 合成响应结构
@@ -255,6 +90,12 @@ type DoubaoWSProvider struct {
 	UseStream   bool // 是否使用流式合成
 	// 音频片段处理回调函数，仅在流式模式下使用
 	OnAudioChunk func(chunkData []byte, isLast bool) error
+
+	// 连接管理
+	conn      *websocket.Conn
+	connMutex sync.RWMutex
+	// 发送锁，确保同一时间只有一个请求在使用连接
+	sendMutex sync.Mutex
 }
 
 // NewDoubaoWSProvider 创建新的读伴WebSocket TTS提供者
@@ -313,9 +154,14 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 	// 准备请求数据
 	input := p.setupInput(text, p.Voice, operation, sampleRate, channels, frameDuration)
 
-	// 获取或创建WebSocket连接
-	conn, err := p.getWSConnection()
+	// 使用发送锁保护，确保同一时间只有一个请求在使用连接
+	p.sendMutex.Lock()
+	// 注意：不在函数返回时释放锁，而是在 goroutine 完成时释放
+
+	// 获取连接（复用或创建）
+	conn, err := p.getConnection(ctx)
 	if err != nil {
+		p.sendMutex.Unlock() // 获取连接失败时立即释放锁
 		return nil, fmt.Errorf("获取WebSocket连接失败: %v", err)
 	}
 
@@ -333,11 +179,13 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 	clientRequest = append(clientRequest, payloadArr...)
 	clientRequest = append(clientRequest, compressedInput...)
 
-	// 发送请求
-	err = conn.WriteMessage(websocket.BinaryMessage, clientRequest)
+	// 发送请求（使用受保护的写入方法）
+	err = p.writeMessage(conn, websocket.BinaryMessage, clientRequest)
 	if err != nil {
-		// 连接可能已关闭，移除并重试
-		p.removeWSConnection(conn)
+		// 发送失败，清空连接，下次使用时自动重连
+		log.Errorf("发送WebSocket消息失败: %v，清空连接", err)
+		p.clearConnection()
+		p.sendMutex.Unlock() // 发送失败时立即释放锁
 		return nil, fmt.Errorf("发送WebSocket消息失败: %v", err)
 	}
 
@@ -348,6 +196,7 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 
 	outputOpusChan = make(chan []byte, 1000)
 
+	// 启动解码器 goroutine
 	go func() {
 		mp3Decoder, err := util.CreateAudioDecoder(ctx, pipeReader, outputOpusChan, frameDuration, "mp3")
 		if err != nil {
@@ -361,7 +210,14 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 			return
 		}
 	}()
+
+	// 使用 WaitGroup 等待读取 goroutine 完成
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	// 启动读取 goroutine
 	go func() {
+		defer wg.Done()
 		defer func() {
 			pipeReader.Close()
 			pipeWriter.Close()
@@ -372,15 +228,14 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				p.removeWSConnection(conn)
-				log.Errorf("读取WebSocket消息失败: %v", err)
-
+				log.Errorf("读取WebSocket消息失败: %v，清空连接", err)
+				// 连接断开，清空连接，下次使用时自动重连
+				p.clearConnection()
 				return
 			}
 
 			resp, err := parseResponse(message)
 			if err != nil {
-				p.removeWSConnection(conn)
 				log.Errorf("解析响应失败: %v", err)
 				return
 			}
@@ -389,7 +244,6 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 			case <-ctx.Done():
 				if resp.IsLast {
 					log.Debugf("DoubaoWs TextToSpeechStream context done, already read all data, exit")
-					p.returnWSConnection(conn)
 					return
 				} else {
 					log.Debugf("DoubaoWs TextToSpeechStream context done, need to read more data, continue")
@@ -409,13 +263,19 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 				log.Debugf("收到最后一个音频片段，共%d个片段", chunkCount)
 				//将allAudio写到文件中
 				//saveAudioToTmp(allAudio, "mp3")
-				p.returnWSConnection(conn)
 				return
 			}
 
 			// 重置读取超时
 			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		}
+	}()
+
+	// 在后台等待 goroutine 完成并释放锁
+	go func() {
+		wg.Wait()
+		p.sendMutex.Unlock()
+		log.Debugf("doubao_ws TextToSpeechStream goroutine 完成，已释放 sendMutex")
 	}()
 
 	return outputOpusChan, nil
@@ -429,67 +289,69 @@ func (p *DoubaoWSProvider) GetVoiceInfo() map[string]interface{} {
 	}
 }
 
-// 获取WebSocket连接(连接池实现)
-func (p *DoubaoWSProvider) getWSConnection() (*websocket.Conn, error) {
-	connKey := fmt.Sprintf("%s_%s", p.WSHost, p.AccessToken)
+// getConnection 获取连接，如果不存在则创建
+func (p *DoubaoWSProvider) getConnection(ctx context.Context) (*websocket.Conn, error) {
+	// 先尝试读取现有连接
+	p.connMutex.RLock()
+	conn := p.conn
+	p.connMutex.RUnlock()
 
-	// 获取或创建连接池
-	wsConnPoolsLock.RLock()
-	pool, exists := wsConnPools[connKey]
-	wsConnPoolsLock.RUnlock()
-
-	if !exists {
-		// 创建新的连接池
-		wsConnPoolsLock.Lock()
-		// 双重检查避免竞态条件
-		if pool, exists = wsConnPools[connKey]; !exists {
-			pool = NewWSConnPool(p.WSURL, p.Header, 300, 1) // 最大300个连接，最小1个连接
-			wsConnPools[connKey] = pool
-			log.Debugf("为key %s 创建新的连接池", connKey)
-		}
-		wsConnPoolsLock.Unlock()
+	if conn != nil {
+		return conn, nil
 	}
 
-	// 从连接池获取连接
-	return pool.Get()
+	// 需要创建新连接
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
+
+	// 双重检查，可能其他 goroutine 已经创建了连接
+	if p.conn != nil {
+		return p.conn, nil
+	}
+
+	// 创建新连接
+	conn, _, err := wsDialer.DialContext(ctx, p.WSURL.String(), p.Header)
+	if err != nil {
+		return nil, fmt.Errorf("WebSocket连接失败: %v", err)
+	}
+
+	// 设置消息读取限制，防止过大的消息
+	conn.SetReadLimit(1024 * 1024) // 1MB 最大消息大小
+
+	// 设置保持连接
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(1*time.Second))
+	})
+
+	p.conn = conn
+	log.Infof("WebSocket 连接已建立")
+	return conn, nil
 }
 
-// 归还连接到连接池
-func (p *DoubaoWSProvider) returnWSConnection(conn *websocket.Conn) {
-	connKey := fmt.Sprintf("%s_%s", p.WSHost, p.AccessToken)
+// clearConnection 清空连接（用于断线重连）
+func (p *DoubaoWSProvider) clearConnection() {
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
 
-	wsConnPoolsLock.RLock()
-	pool, exists := wsConnPools[connKey]
-	wsConnPoolsLock.RUnlock()
-
-	if exists && pool != nil {
-		pool.Put(conn)
+	if p.conn != nil {
+		p.conn.Close()
+		p.conn = nil
+		log.Infof("WebSocket 连接已清空，等待下次重连")
 	}
 }
 
-// 从连接池中移除连接(发生错误时使用)
-func (p *DoubaoWSProvider) removeWSConnection(conn *websocket.Conn) {
-	connKey := fmt.Sprintf("%s_%s", p.WSHost, p.AccessToken)
+// writeMessage 安全地向 WebSocket 连接写入消息
+func (p *DoubaoWSProvider) writeMessage(conn *websocket.Conn, messageType int, data []byte) error {
+	// 使用读锁保护连接写入操作，防止并发写入导致数据混乱
+	p.connMutex.RLock()
+	defer p.connMutex.RUnlock()
 
-	wsConnPoolsLock.RLock()
-	pool, exists := wsConnPools[connKey]
-	wsConnPoolsLock.RUnlock()
-
-	if exists && pool != nil {
-		// 关闭连接并从连接池中移除
-		pool.lock.Lock()
-		defer pool.lock.Unlock()
-
-		for i, wrapper := range pool.connections {
-			if wrapper.Conn == conn {
-				wrapper.Conn.Close()
-				// 从切片中移除该连接
-				pool.connections = append(pool.connections[:i], pool.connections[i+1:]...)
-				log.Debugf("从连接池中移除无效连接")
-				break
-			}
-		}
+	// 检查连接是否有效
+	if conn == nil {
+		return fmt.Errorf("连接已关闭")
 	}
+
+	return conn.WriteMessage(messageType, data)
 }
 
 // 设置请求输入
@@ -657,4 +519,29 @@ func saveAudioToTmp(audioData []byte, format string) error {
 
 	log.Debugf("音频文件已保存: %s", filename)
 	return nil
+}
+
+// SetVoice 设置音色参数
+func (p *DoubaoWSProvider) SetVoice(voiceConfig map[string]interface{}) error {
+	if voice, ok := voiceConfig["voice"].(string); ok && voice != "" {
+		p.Voice = voice
+		return nil
+	}
+	return fmt.Errorf("无效的音色配置: 缺少 voice")
+}
+
+// Close 关闭资源，释放连接
+func (p *DoubaoWSProvider) Close() error {
+	p.clearConnection()
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (p *DoubaoWSProvider) IsValid() bool {
+	p.connMutex.RLock()
+	conn := p.conn
+	p.connMutex.RUnlock()
+
+	// 检查连接是否存在
+	return conn != nil
 }

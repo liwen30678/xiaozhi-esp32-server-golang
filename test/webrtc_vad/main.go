@@ -101,13 +101,12 @@ func main() {
 		log.Fatalf("WAV转PCM失败: %v", err)
 	}
 
-	_ = pcmFloat32
 	_ = pcmBytes
 
-	fmt.Printf("成功转换为PCM数据，共 %d 帧\n", len(pcmFloat32))
+	fmt.Printf("成功转换为PCM数据，共 %d 帧（每帧20ms）\n", len(pcmFloat32))
 
 	// 创建WebRTC VAD实例
-	vadImpl, err := webrtc_vad.NewWebRTCVADWithConfig(sampleRate, 2) // 模式3：高敏感度
+	vadImpl, err := webrtc_vad.NewWebRTCVADWithConfig(sampleRate, 2) // 模式2：中等敏感度
 	if err != nil {
 		log.Fatalf("创建WebRTC VAD失败: %v", err)
 	}
@@ -120,37 +119,94 @@ func main() {
 		log.Fatalf("没有PCM数据可供处理")
 	}
 
+	// WebRTC VAD 需要 320 样本（20ms @ 16000Hz）的帧
+	// Wav2Pcm 已经按 20ms 分帧，每帧正好是 320 样本
+	frameSize := 320 // 20ms @ 16000Hz
+
+	// 将所有帧合并成连续的音频数据，然后按 frameSize 重新分帧
+	// 这样可以确保每帧都是完整的 frameSize
+	totalSamples := 0
+	for _, frame := range pcmFloat32 {
+		totalSamples += len(frame)
+	}
+	allPcmData := make([]float32, 0, totalSamples)
+	for _, frame := range pcmFloat32 {
+		allPcmData = append(allPcmData, frame...)
+	}
+
+	fmt.Printf("合并后的音频数据: %d 个样本 (%.2f 秒)\n", len(allPcmData), float64(len(allPcmData))/float64(sampleRate))
+
+	// 检查音频数据范围（用于调试）
+	if len(allPcmData) > 0 {
+		minVal := allPcmData[0]
+		maxVal := allPcmData[0]
+		for _, v := range allPcmData {
+			if v < minVal {
+				minVal = v
+			}
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+		fmt.Printf("音频数据范围: [%.6f, %.6f]\n", minVal, maxVal)
+		// 如果数据不在 [-1.0, 1.0] 范围内，可能需要归一化
+		if maxVal > 1.0 || minVal < -1.0 {
+			fmt.Printf("警告: 音频数据超出 [-1.0, 1.0] 范围，可能需要归一化\n")
+		}
+	}
+
 	fmt.Println("开始进行语音活动检测...")
 
-	// 对每一帧PCM数据进行VAD检测
-
-	detectVoice := func(voiceFloat32 [][]float32) {
+	// 按 frameSize 分帧进行检测
+	detectVoice := func(pcmData []float32) {
 		speechFrames := 0
-		totalFrames := len(voiceFloat32)
-		for i, pcmFrame := range voiceFloat32 {
+		totalFrames := 0
+
+		// 按 frameSize 分帧处理
+		for i := 0; i < len(pcmData); i += frameSize {
+			end := i + frameSize
+			if end > len(pcmData) {
+				end = len(pcmData)
+			}
+
+			frame := pcmData[i:end]
+
+			// 如果帧长度不足 frameSize，填充零
+			if len(frame) < frameSize {
+				// 填充零到 frameSize 长度
+				paddedFrame := make([]float32, frameSize)
+				copy(paddedFrame, frame)
+				frame = paddedFrame
+			}
+
+			totalFrames++
+
 			// 进行VAD检测
-			isVoice, err := vadImpl.IsVADExt(pcmFrame, sampleRate, 320)
+			isVoice, err := vadImpl.IsVADExt(frame, sampleRate, frameSize)
 			if err != nil {
-				log.Printf("第%d帧VAD检测失败: %v", i+1, err)
+				log.Printf("第%d帧VAD检测失败: %v", totalFrames, err)
 				// 如果是第一帧就失败，说明VAD未正确初始化
-				if i == 0 {
-					log.Fatalf("VAD初始化失败，请检查WebRTC VAD配置")
+				if totalFrames == 1 {
+					log.Fatalf("VAD初始化失败，请检查WebRTC VAD配置和库文件")
 				}
 				continue
 			}
 
 			if isVoice {
 				speechFrames++
-				fmt.Printf("第%d帧: 检测到语音活动\n", i+1)
+				fmt.Printf("第%d帧: 检测到语音活动 (样本范围: %d-%d)\n", totalFrames, i, end-1)
 			} else {
-				fmt.Printf("第%d帧: 无语音活动\n", i+1)
+				fmt.Printf("第%d帧: 无语音活动 (样本范围: %d-%d)\n", totalFrames, i, end-1)
 			}
 		}
+
 		// 输出统计结果
 		speechPercentage := float64(speechFrames) / float64(totalFrames) * 100
-		fmt.Printf("\n=== VAD检测结果统计 ===\n")
-		fmt.Printf("总帧数: %d\n", totalFrames)
+		nonSpeechFrames := totalFrames - speechFrames
+		fmt.Printf("\n=== WebRTC VAD检测结果统计 ===\n")
+		fmt.Printf("总帧数: %d (每帧 %d 样本, %.2f ms)\n", totalFrames, frameSize, float64(frameSize)/float64(sampleRate)*1000)
 		fmt.Printf("语音帧数: %d\n", speechFrames)
+		fmt.Printf("非语音帧数: %d\n", nonSpeechFrames)
 		fmt.Printf("语音活动比例: %.2f%%\n", speechPercentage)
 
 		if speechFrames > 0 {
@@ -160,10 +216,8 @@ func main() {
 		}
 	}
 
-	//emptyFrame := make([]float32, 50)
-	//pcmFloat32 = [][]float32{emptyFrame}
-	pcmFloat32 = genOpusFloat32Empty(sampleRate, 20, channels, 1000)
-	detectVoice(pcmFloat32)
+	// 使用实际的WAV文件数据进行测试
+	detectVoice(allPcmData)
 }
 
 func float32ToByte(pcmFrame []float32) []byte {

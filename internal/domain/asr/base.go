@@ -21,12 +21,20 @@ type AsrProvider interface {
 	// 当 audioStream 被关闭时，表示输入结束，最终结果将会通过返回的通道发送，然后关闭该通道
 	// 可以通过 ctx 控制识别过程的取消和超时
 	StreamingRecognize(ctx context.Context, audioStream <-chan []float32) (chan types.StreamingResult, error)
+	// Close 关闭资源，释放连接等
+	Close() error
+	// IsValid 检查资源是否有效
+	IsValid() bool
 }
 
 // NewAsrProvider 创建一个新的ASR实例
 // asrType: ASR引擎类型，目前支持 "funasr"
 // config: ASR引擎配置，为 map[string]interface{} 类型
 func NewAsrProvider(asrType string, config map[string]interface{}) (AsrProvider, error) {
+	// 优先使用 config 中的 provider，否则使用参数中的 provider
+	if configProvider, ok := config["provider"].(string); ok && configProvider != "" {
+		asrType = configProvider
+	}
 	switch asrType {
 	case constants.AsrTypeFunAsr:
 		return NewFunasrAdapter(config)

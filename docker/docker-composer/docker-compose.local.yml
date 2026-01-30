@@ -28,8 +28,9 @@ services:
     build:
       context: ../..
       dockerfile: docker/Dockerfile.main
+      platform: linux/amd64
       args:
-        TARGETARCH: ${TARGETARCH:-amd64}
+        TARGETARCH: amd64
     container_name: xiaozhi-main-server
     command: ["/workspace/bin/xiaozhi_server", "-c", "/workspace/config/config.personal.yaml"]
     ports:

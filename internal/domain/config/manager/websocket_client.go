@@ -11,10 +11,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	cmap "github.com/orcaman/concurrent-map/v2"
-	"github.com/spf13/viper"
 
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
+	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
@@ -28,6 +28,7 @@ type WebSocketClient struct {
 	callbacks      map[string]func(*WebSocketResponse)
 	requestHandler func(*WebSocketRequest) // 处理收到的请求
 	mu             sync.RWMutex
+	writeMu        sync.Mutex // 保护WebSocket写入操作，防止并发写入
 	isConnected    bool
 	connectMu      sync.Mutex
 	messageQueue   chan *WebSocketRequest
@@ -35,6 +36,13 @@ type WebSocketClient struct {
 
 	messageHandle cmap.ConcurrentMap[string, MessageHandleFunc]
 	uuid          string
+
+	// 重连相关字段
+	retryStopChan  chan struct{}  // 重连协程停止信号
+	retryWg        sync.WaitGroup // 重连协程等待组
+	retryMu        sync.Mutex     // 保护重连相关操作
+	isRetrying     bool           // 是否正在重连
+	isShuttingDown bool           // 是否正在关闭（主动断开，不重连）
 }
 
 type WebSocketRequest struct {
@@ -66,7 +74,8 @@ func GetDefaultClient() *WebSocketClient {
 }
 
 func NewWebSocketClient() *WebSocketClient {
-	baseURL := viper.GetString("manager.backend_url")
+	// 优先从环境变量获取，如果环境变量不存在则从配置获取
+	baseURL := util.GetBackendURL()
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}
@@ -79,6 +88,8 @@ func NewWebSocketClient() *WebSocketClient {
 		messageQueue:   make(chan *WebSocketRequest, 100),
 		messageHandle:  cmap.New[MessageHandleFunc](),
 		uuid:           uuid.New().String(),
+		retryStopChan:  make(chan struct{}),
+		isRetrying:     false,
 	}
 }
 
@@ -111,17 +122,32 @@ func (c *WebSocketClient) Connect(ctx context.Context) error {
 	c.conn = conn
 	c.isConnected = true
 
+	// 设置ping处理器
+	conn.SetPongHandler(func(appData string) error {
+		log.Debugf("收到pong消息")
+		return nil
+	})
+
 	// 启动消息处理循环
 	go c.handleMessages()
 
 	// 启动消息发送工作线程
 	c.startWorkers()
 
+	// 启动心跳检测
+	go c.startHeartbeat()
+
 	log.Debugf("WebSocket客户端已连接到: %s", wsURL)
 	return nil
 }
 
 func (c *WebSocketClient) Disconnect() error {
+	return c.disconnect(false)
+}
+
+// disconnect 内部断开连接方法
+// manualDisconnect: true表示主动断开（不触发重连），false表示错误断开（触发重连）
+func (c *WebSocketClient) disconnect(manualDisconnect bool) error {
 	c.connectMu.Lock()
 	defer c.connectMu.Unlock()
 
@@ -129,8 +155,15 @@ func (c *WebSocketClient) Disconnect() error {
 		return nil
 	}
 
-	if err := c.conn.Close(); err != nil {
-		return err
+	if manualDisconnect {
+		c.isShuttingDown = true
+	}
+
+	if c.conn != nil {
+		if err := c.conn.Close(); err != nil {
+			log.Debugf("关闭WebSocket连接时出错: %v", err)
+		}
+		c.conn = nil
 	}
 
 	c.isConnected = false
@@ -190,8 +223,11 @@ func (c *WebSocketClient) SendRequest(ctx context.Context, method, path string, 
 		close(responseChan)
 	}()
 
-	// 发送请求
-	if err := c.conn.WriteJSON(request); err != nil {
+	// 发送请求（使用写入锁保护）
+	c.writeMu.Lock()
+	err := c.conn.WriteJSON(request)
+	c.writeMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
 	}
 
@@ -211,6 +247,8 @@ func (c *WebSocketClient) Ping() error {
 	if !c.IsConnected() {
 		return fmt.Errorf("WebSocket未连接")
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
 }
 
@@ -230,7 +268,9 @@ func ConnectManagerWebSocket(ctx context.Context) error {
 }
 
 func DisconnectManagerWebSocket() error {
-	return GetDefaultClient().Disconnect()
+	client := GetDefaultClient()
+	client.StopReconnect()
+	return client.disconnect(true) // 主动断开，不触发重连
 }
 
 func SendManagerRequest(ctx context.Context, method, path string, body map[string]interface{}) (*WebSocketResponse, error) {
@@ -274,11 +314,14 @@ func (c *WebSocketClient) startWorkers() {
 					continue
 				}
 
-				// 发送请求
-				if err := c.conn.WriteJSON(request); err != nil {
+				// 发送请求（使用写入锁保护）
+				c.writeMu.Lock()
+				err := c.conn.WriteJSON(request)
+				c.writeMu.Unlock()
+				if err != nil {
 					log.Debugf("工作线程 %d: 发送请求失败: %v", workerID, err)
 					// 连接可能已断开，触发重连
-					go c.handleConnectionError()
+					c.handleConnectionError()
 					continue
 				}
 
@@ -294,7 +337,159 @@ func (c *WebSocketClient) startWorkers() {
 func (c *WebSocketClient) handleConnectionError() {
 	if c.IsConnected() {
 		log.Warn("检测到WebSocket连接错误，正在断开连接...")
-		c.Disconnect()
+		c.disconnect(false) // 错误断开，会触发重连
+		// 触发重连
+		c.triggerReconnect()
+	}
+}
+
+// startHeartbeat 启动心跳检测
+func (c *WebSocketClient) startHeartbeat() {
+	ticker := time.NewTicker(30 * time.Second) // 每30秒发送一次ping
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !c.IsConnected() {
+				return
+			}
+
+			// 发送ping消息
+			c.writeMu.Lock()
+			err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
+			c.writeMu.Unlock()
+
+			if err != nil {
+				log.Warnf("发送ping失败，连接可能已断开: %v", err)
+				c.disconnect(false) // 错误断开，会触发重连
+				// 触发重连
+				c.triggerReconnect()
+				return
+			}
+			log.Debugf("发送ping消息成功")
+
+		case <-c.retryStopChan:
+			return
+		}
+	}
+}
+
+// triggerReconnect 触发重连（非阻塞）
+func (c *WebSocketClient) triggerReconnect() {
+	c.retryMu.Lock()
+	defer c.retryMu.Unlock()
+
+	// 如果正在关闭，不触发重连
+	if c.isShuttingDown {
+		log.Debug("正在关闭中，不触发重连")
+		return
+	}
+
+	// 如果已经在重连，不重复触发
+	if c.isRetrying {
+		return
+	}
+
+	c.isRetrying = true
+	// 启动重连协程
+	c.retryWg.Add(1)
+	go c.startReconnectLoop()
+}
+
+// startReconnectLoop 启动重连循环（使用指数退避算法）
+func (c *WebSocketClient) startReconnectLoop() {
+	defer func() {
+		c.retryMu.Lock()
+		c.isRetrying = false
+		c.retryMu.Unlock()
+		c.retryWg.Done()
+	}()
+
+	// 硬编码的退避算法参数
+	initialDelay := 3 * time.Second // 初始延迟3秒
+	maxDelay := 1 * time.Minute     // 最大延迟1分钟
+	backoffMultiplier := 2.0        // 退避倍数
+
+	delay := initialDelay
+	retryCount := 0
+
+	log.Infof("Manager WebSocket连接重试协程已启动")
+
+	for {
+		// 检查是否应该停止重连
+		select {
+		case <-c.retryStopChan:
+			log.Info("收到停止信号，停止重连")
+			return
+		default:
+		}
+
+		// 如果正在关闭，停止重连
+		c.retryMu.Lock()
+		shuttingDown := c.isShuttingDown
+		c.retryMu.Unlock()
+		if shuttingDown {
+			log.Info("正在关闭中，停止重连")
+			return
+		}
+
+		// 如果已经连接，停止重连
+		if c.IsConnected() {
+			log.Info("Manager WebSocket连接已恢复，停止重连")
+			return
+		}
+
+		retryCount++
+		log.Warnf("Manager WebSocket连接失败 (第%d次)，等待 %v 后重试连接...", retryCount, delay)
+
+		// 等待延迟时间
+		select {
+		case <-time.After(delay):
+			// 继续重连
+		case <-c.retryStopChan:
+			log.Info("收到停止信号，停止重连")
+			return
+		}
+
+		// 尝试连接
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := c.Connect(ctx)
+		cancel()
+
+		if err != nil {
+			log.Warnf("Manager WebSocket连接失败 (第%d次): %v", retryCount, err)
+			// 计算下一次延迟时间（指数退避）
+			delay = time.Duration(float64(delay) * backoffMultiplier)
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			continue
+		}
+
+		// 连接成功
+		log.Info("Manager WebSocket连接成功")
+		return
+	}
+}
+
+// StopReconnect 停止重连协程
+func (c *WebSocketClient) StopReconnect() {
+	c.retryMu.Lock()
+	c.isShuttingDown = true
+	shouldClose := c.retryStopChan != nil
+	c.retryMu.Unlock()
+
+	if shouldClose {
+		// 使用 select 避免重复关闭通道
+		select {
+		case <-c.retryStopChan:
+			// 通道已经关闭
+		default:
+			close(c.retryStopChan)
+		}
+		c.retryWg.Wait()
+		log.Info("Manager WebSocket重连协程已优雅关闭")
 	}
 }
 
@@ -410,7 +605,9 @@ func (c *WebSocketClient) handleMessages() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Debugf("WebSocket读取错误: %v", err)
 			}
-			c.Disconnect()
+			c.disconnect(false) // 错误断开，会触发重连
+			// 触发重连
+			c.triggerReconnect()
 			return
 		}
 
@@ -436,9 +633,12 @@ func (c *WebSocketClient) handleMessages() {
 			}
 
 		case websocket.PingMessage:
-			// 处理ping消息，自动回复pong
+			// 处理ping消息，自动回复pong（使用写入锁保护）
 			log.Debugf("收到ping消息，自动回复pong")
-			if err := c.conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
+			c.writeMu.Lock()
+			err := c.conn.WriteControl(websocket.PongMessage, []byte{}, time.Now().Add(10*time.Second))
+			c.writeMu.Unlock()
+			if err != nil {
 				log.Errorf("发送pong失败: %v", err)
 			}
 
@@ -449,7 +649,9 @@ func (c *WebSocketClient) handleMessages() {
 		case websocket.CloseMessage:
 			// 处理关闭消息
 			log.Debugf("收到关闭消息")
-			c.Disconnect()
+			c.disconnect(false) // 错误断开，会触发重连
+			// 触发重连
+			c.triggerReconnect()
 			return
 
 		default:
@@ -591,7 +793,11 @@ func (c *WebSocketClient) SendResponse(requestID string, status int, body map[st
 		Error:  errorMsg,
 	}
 
-	if err := c.conn.WriteJSON(response); err != nil {
+	// 使用写入锁保护
+	c.writeMu.Lock()
+	err := c.conn.WriteJSON(response)
+	c.writeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("发送响应失败: %v", err)
 	}
 
@@ -729,26 +935,37 @@ func SendMcpToolListRequestWithCallback(ctx context.Context, agentID string, cal
 }
 
 // Init 初始化Manager配置提供者
-// 包括WebSocket连接的初始化
+// 包括WebSocket连接的初始化和重连机制
 func Init(ctx context.Context) error {
 	log.Infof("Initializing Manager config provider with WebSocket client")
 
 	// 创建WebSocket客户端
 	client := GetDefaultClient()
 
-	// 连接到WebSocket服务器
+	// 尝试连接到WebSocket服务器
 	if err := client.Connect(ctx); err != nil {
-		return fmt.Errorf("failed to connect WebSocket: %v", err)
+		log.Warnf("初始连接Manager WebSocket失败: %v，将启动重连机制", err)
+		// 即使初始连接失败，也启动重连机制
+		client.triggerReconnect()
+	} else {
+		log.Infof("Manager config provider initialized successfully")
 	}
 
-	log.Infof("Manager config provider initialized successfully")
 	return nil
 }
 
 // Close 关闭Manager配置提供者，清理资源
 func Close() error {
 	log.Infof("Closing Manager config provider")
-	return DisconnectManagerWebSocket()
+
+	// 停止重连协程
+	client := GetDefaultClient()
+	client.StopReconnect()
+
+	// 主动断开连接（不触发重连）
+	client.disconnect(true)
+
+	return nil
 }
 
 // IsConnected 检查Manager配置提供者是否已连接

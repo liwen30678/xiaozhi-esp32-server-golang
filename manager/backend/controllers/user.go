@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
+
 	"xiaozhi/manager/backend/models"
 
 	"github.com/gin-gonic/gin"
@@ -234,6 +236,7 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		CustomPrompt string  `json:"custom_prompt"`
 		LLMConfigID  *string `json:"llm_config_id"`
 		TTSConfigID  *string `json:"tts_config_id"`
+		Voice        *string `json:"voice"`
 		ASRSpeed     string  `json:"asr_speed"`
 	}
 
@@ -253,6 +256,7 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		CustomPrompt: req.CustomPrompt,
 		LLMConfigID:  req.LLMConfigID,
 		TTSConfigID:  req.TTSConfigID,
+		Voice:        req.Voice,
 		ASRSpeed:     req.ASRSpeed,
 		Status:       "active",
 	}
@@ -318,6 +322,7 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 		CustomPrompt string  `json:"custom_prompt"`
 		LLMConfigID  *string `json:"llm_config_id"`
 		TTSConfigID  *string `json:"tts_config_id"`
+		Voice        *string `json:"voice"`
 		ASRSpeed     string  `json:"asr_speed"`
 	}
 
@@ -331,6 +336,7 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	agent.CustomPrompt = req.CustomPrompt
 	agent.LLMConfigID = req.LLMConfigID
 	agent.TTSConfigID = req.TTSConfigID
+	agent.Voice = req.Voice
 
 	if req.ASRSpeed != "" {
 		agent.ASRSpeed = req.ASRSpeed
@@ -479,13 +485,48 @@ func (uc *UserController) GetRoleTemplates(c *gin.Context) {
 
 // 获取音色选项
 func (uc *UserController) GetVoiceOptions(c *gin.Context) {
-	var configs []models.Config
-	if err := uc.DB.Where("type = ? AND enabled = ?", "tts", true).Find(&configs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取音色选项失败"})
+	provider := c.Query("provider")
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider参数必填"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": configs})
+	// 特殊处理：阿里云千问，根据配置中的模型过滤音色
+	if provider == "aliyun_qwen" {
+		configID := c.Query("config_id")
+		// 如果没有提供 config_id，则返回不区分模型的基础音色列表（用于管理员配置页等场景）
+		if configID == "" {
+			voices := GetVoiceOptionsByProvider("aliyun_qwen")
+			c.JSON(http.StatusOK, gin.H{"data": voices})
+		} else {
+			// 查找对应的 TTS 配置（type=tts）
+			var cfg models.Config
+			if err := uc.DB.Where("type = ? AND config_id = ?", "tts", configID).First(&cfg).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "未找到对应的TTS配置"})
+				return
+			}
+
+			// 解析 json_data 获取 model
+			type qwenConfig struct {
+				Model string `json:"model"`
+			}
+			var qc qwenConfig
+			if cfg.JsonData != "" {
+				_ = json.Unmarshal([]byte(cfg.JsonData), &qc)
+			}
+			if qc.Model == "" {
+				qc.Model = "qwen3-tts-flash"
+			}
+
+			voices := GetAliyunQwenVoicesByModel(qc.Model)
+			c.JSON(http.StatusOK, gin.H{"data": voices})
+		}
+		return
+	}
+
+	// 其他 provider：根据provider获取固定音色列表
+	voices := GetVoiceOptionsByProvider(provider)
+	c.JSON(http.StatusOK, gin.H{"data": voices})
 }
 
 // 获取LLM配置列表

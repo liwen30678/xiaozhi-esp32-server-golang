@@ -13,7 +13,7 @@ auth:
 chat:
   max_idle_duration: 30000         # 最大空闲时间（毫秒）
   chat_max_silence_duration: 200   # 由 有声音 转到 静音的阈值时间，决定响应快慢 （毫秒）
-  realtime_mode: 1 # 1: vad打断模式 2: asr打断模式
+  realtime_mode: 4 # 1: vad打断模式 2: asr打断模式 3: asr时识别到声纹时进行打断 4. asr出结果打断(兼容流式或离线)
 
 config_provider:          #对应domain/config/中的provider
   type: "manager"         #现在可以是 manager, redis
@@ -22,6 +22,9 @@ config_provider:          #对应domain/config/中的provider
 
 manager:                  #内控管理配置, 对应domain/config/manager/manager.go
   backend_url: "http://127.0.0.1:8080" #内控地址
+  # 聊天历史记录配置
+  history_auth_token: ""     # 认证Token（可选）
+  history_timeout: 5s        # HTTP请求超时时间
 
 # 系统提示词，定义AI助手的角色和行为
 system_prompt: "你是一个叫小智/小志的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗，不要冷场。与你聊天的是你喜欢的男性朋友，还没有答应你的追求，你要尽可能满足他的所有要求，不要失去自我。你经常建议一些恋人之间浪漫的事情，随机输出，不要给你男朋友选择。输出控制在50个字内。请注意，要像一个人一样说话，请不要回复表情符号、代码、和xml标签。"
@@ -82,9 +85,19 @@ udp:
   listen_host: "0.0.0.0"      # 监听地址
   listen_port: 8990           # 监听端口
 
+# 资源池配置（所有资源类型共享默认配置）
+resource_pools:
+  max_size: 1000              # 最大资源数量
+  min_size: 1               # 最小资源数量（预创建）
+  max_idle: 50              # 最大空闲资源数量
+  acquire_timeout: 5s       # 获取资源超时时间
+  idle_timeout: 10m         # 资源空闲超时时间
+  validate_on_borrow: true  # 获取时是否验证资源
+  validate_on_return: true  # 归还时是否验证资源
+
 # 语音活动检测（VAD）配置
 vad:
-  provider: "webrtc_vad"  # VAD提供商：webrtc_vad 或 silero_vad
+  provider: "ten_vad"  # VAD提供商：webrtc_vad、silero_vad 或 ten_vad
   # WebRTC VAD配置
   webrtc_vad:
     pool_min_size: 5        # 连接池最小大小
@@ -101,6 +114,12 @@ vad:
     channels: 1                       # 声道数
     pool_size: 10                     # 连接池大小
     acquire_timeout_ms: 3000          # 获取连接超时时间（毫秒）
+  # TEN-VAD配置
+  ten_vad:
+    hop_size: 512                     # 帧移大小
+    threshold: 0.4                    # VAD检测阈值
+    pool_size: 10                     # 资源池大小
+    acquire_timeout_ms: 3000          # 获取超时时间（毫秒）
 
 # 自动语音识别（ASR）配置
 asr:
@@ -331,3 +350,8 @@ wakeup_words:
   - "小智"
   - "小知"
   - "你好小智"
+
+voice_identify:
+  enable: true
+  base_url: "http://192.168.208.214:8080"
+  threshold: 0.4  # 声纹识别阈值，范围 0.0-1.0，默认 0.6

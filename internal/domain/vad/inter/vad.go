@@ -10,4 +10,6 @@ type VAD interface {
 	Reset() error
 	// Close 关闭并释放资源
 	Close() error
+	// IsValid 检查资源是否有效
+	IsValid() bool
 }

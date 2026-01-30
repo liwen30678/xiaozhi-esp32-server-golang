@@ -13,6 +13,7 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
 ## ✨ 主要特性 | Key Features
 
 - 🚀 **端到端全流式 AI 语音链路**：ASR（自动语音识别）、LLM（大语言模型）、TTS（语音合成）全流程流式处理，极致低延迟，适配实时语音交互场景。
+- 🎤 **声纹识别与动态TTS切换**：支持说话人身份识别，根据识别结果动态切换TTS音色，实现个性化语音交互体验。
 - 🧩 **主逻辑代码梳理与优化**：对主流程代码结构进行系统性梳理与重构，提升可读性、可维护性与扩展性。
 - 🛠️ **Transport 接口层抽象**：将 WebSocket、MQTT、UDP 等协议统一抽象为 Transport 接口层，灵活注入主逻辑，便于协议扩展与切换。
 - 📬 **LLM/TTS 消息队列化处理**：LLM 与 TTS 处理流程采用消息队列方式，支持异步处理与新业务逻辑的灵活注入。
@@ -43,7 +44,7 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
       - 安装 Opus 相关依赖：
         ```bash
         sudo apt-get update
-        sudo apt-get install -y libopus0 libopusfile-dev
+        sudo apt-get install -y pkg-config libopus0 libopusfile-dev
         ```
       - 安装 ONNX Runtime：
         ```bash
@@ -54,12 +55,22 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
         sudo cp -r onnxruntime-linux-x64-1.21.0/lib/* /usr/local/lib/
         sudo ldconfig
         ```
-      - 设置环境变量（可写入 `~/.bashrc` 或 `~/.zshrc`）：
+      - 安装 ten_vad 依赖：
+        ```bash
+        # 安装 C++ 运行时依赖（ten_vad 需要）
+        sudo apt install libc++1 libc++abi1
+        ```
+        > **注意**：ten_vad 库文件位于 `lib/ten-vad/lib/Linux/x64/` 目录，CGO 配置已通过 rpath 自动处理运行时库路径，无需手动复制到系统目录。
+      - 设置环境变量（可写入 `~/.bashrc` 或 `~/.zshrc`，可选）：
         ```bash
         export ONNXRUNTIME_DIR=/usr/local
-        export CGO_CFLAGS="-I${ONNXRUNTIME_DIR}/include/onnxruntime"
-        export CGO_LDFLAGS="-L${ONNXRUNTIME_DIR}/lib -lonnxruntime"
+        # 如果需要在项目根目录外编译，可以设置以下环境变量（通常不需要，CGO 已自动处理）
+        # export CGO_CFLAGS="-I${ONNXRUNTIME_DIR}/include/onnxruntime"
+        # export CGO_LDFLAGS="-L${ONNXRUNTIME_DIR}/lib -lonnxruntime"
+        # 运行时库路径（如果二进制文件不在项目目录中运行，需要设置）
+        # export LD_LIBRARY_PATH=/path/to/project/lib/ten-vad/lib/Linux/x64:$LD_LIBRARY_PATH
         ```
+        > **说明**：CGO 配置已通过 `${SRCDIR}` 和 `-Wl,-rpath` 自动处理编译和运行时路径，通常无需手动设置环境变量。仅在特殊场景（如跨目录编译或部署）下才需要设置。
 
    2. **部署 FunASR 服务**
       - 参考 [FunASR 官方文档](https://github.com/modelscope/FunASR/blob/main/runtime/docs/SDK_advanced_guide_online_zh.md) 部署并启动服务。
@@ -85,13 +96,16 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
    - [MQTT+UDP 服务器配置流程 »](doc/mqtt_udp.md)
    - [MQTT UDP 协议与数据流程 »](doc/mqtt_udp_protocol.md)
    - [Vision 视觉识别 »](doc/vision.md)
+   - [声纹识别功能说明 »](doc/speaker_identification.md)
    - [MCP 架构 »](doc/mcp.md)
    - [MCP 音频服务说明(支持分页获取资源) »](doc/mcp_resource.md)
+   - [ESP32 小智AI后端部署与使用指南 »](doc/esp32_xiaozhi_backend_guide.md)
 
    ---
 
    > ⚠️ 推荐在 Ubuntu 22.04 环境下操作，确保依赖一致。
    > 若遇到 ONNX Runtime 相关的 CGO 编译问题，请检查环境变量和依赖路径。
+   > 如果使用 ten_vad，需要确保 lib/ten-vad 目录存在且包含相应的库文件。
    > 日志和配置目录建议与 Docker 保持一致（`logs/`、`config/`）。
 
 ---
@@ -100,12 +114,13 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
 
 | 模块      | 功能简介                       | 技术栈/说明                |
 |-----------|-------------------------------|----------------------------|
-| VAD       | 声音活动检测（Silero VAD）    | Silero VAD, Webrtc vad                    |
+| VAD       | 声音活动检测（Silero VAD / ten_vad）    | Silero VAD, Webrtc vad, ten_vad                    |
 | ASR       | 语音识别（FunASR对接）        | FunASR, Doubao Asr       |
 | LLM       | 大语言模型（OpenAI兼容接口）  | Eino框架兼容的 LLM, openai, ollama       |
 | TTS       | 语音合成（多引擎支持）        | Doubao, EdgeTTS, CosyVoice |
 | MCP       | 多协议接入 | 支持全局MCP、MCP接入点、端侧MCP Server）       |
 | 视觉      | 视觉处理相关能力                                    |  支持 doubao, aliyun 视觉模型      |
+| 声纹识别  | 说话人身份识别与动态TTS切换    | sherpa-onnx, Qdrant 向量数据库      |
 
 ---
 

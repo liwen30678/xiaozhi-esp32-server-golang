@@ -10,8 +10,11 @@ import (
 	"xiaozhi-esp32-server-golang/internal/app/server/mqtt_udp"
 	"xiaozhi-esp32-server-golang/internal/app/server/types"
 	"xiaozhi-esp32-server-golang/internal/app/server/websocket"
+	"xiaozhi-esp32-server-golang/internal/data/history"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
+	"xiaozhi-esp32-server-golang/internal/pool"
+	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -64,12 +67,36 @@ func (a *App) Run() {
 
 	a.initEventHandle()
 
+	// 启动资源池统计监控（每5分钟输出一次到日志）
+	ctx := context.Background()
+	pool.StartStatsMonitor(ctx, 5*time.Minute)
+
+	// 启动资源池统计上报（每5秒上报一次到 manager backend）
+	pool.StartStatsReporter(ctx)
+
 	select {} // 阻塞主线程
 }
 
 func (app *App) initEventHandle() {
-	eventHandle := NewEventHandle()
-	eventHandle.Start()
+	eventHandle, err := NewEventHandle(app)
+	if err != nil {
+		log.Errorf("初始化 EventHandle 失败: %v", err)
+		return
+	}
+	if err := eventHandle.Start(); err != nil {
+		log.Errorf("启动 EventHandle 失败: %v", err)
+		return
+	}
+
+	// 初始化消息处理器（总是启用，统一处理Redis+MemoryProvider+History）
+	historyCfg := history.HistoryClientConfig{
+		BaseURL:   util.GetBackendURL(),
+		AuthToken: viper.GetString("manager.history_auth_token"),
+		Timeout:   viper.GetDuration("manager.history_timeout"),
+		Enabled:   true, // 总是启用
+	}
+	NewMessageWorker(historyCfg)
+	log.Info("消息处理器已初始化")
 }
 
 func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {

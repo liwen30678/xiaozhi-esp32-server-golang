@@ -143,7 +143,7 @@
             type="textarea"
             :rows="4"
             placeholder="请输入角色介绍/系统提示词，这将影响AI的回答风格和个性"
-            :maxlength="1000"
+            :maxlength="10000"
             show-word-limit
           />
         </el-form-item>

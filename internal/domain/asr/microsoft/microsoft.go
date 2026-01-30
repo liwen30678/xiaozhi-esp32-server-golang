@@ -67,6 +67,16 @@ func NewMicrosoftASRProvider(config map[string]interface{}) (*MicrosoftASRProvid
 	}, nil
 }
 
+// Close 关闭资源。Microsoft ASR 使用全局配置池，实例本身无长连接，故为空实现。
+func (p *MicrosoftASRProvider) Close() error {
+	return nil
+}
+
+// IsValid 检查配置是否有效（必填项非空）。
+func (p *MicrosoftASRProvider) IsValid() bool {
+	return p != nil && p.SubscriptionKey != "" && p.Region != ""
+}
+
 // getOrCreateConfig 获取或创建 SpeechConfig（复用连接池）
 func getOrCreateConfig(subscriptionKey, region, language string) (*speech.SpeechConfig, error) {
 	key := fmt.Sprintf("%s_%s_%s", subscriptionKey, region, language)

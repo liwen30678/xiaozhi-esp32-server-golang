@@ -132,10 +132,21 @@ func main1() {
 	fmt.Println("解密后的数据:", string(dec_data))
 }
 
+var listenMode = "manual" // 全局变量，用于存储拾音模式
+
 func main() {
 	otaUrl := flag.String("ota", "https://api.tenclass.net/xiaozhi/ota/", "OTA服务器地址")
 	deviceID := flag.String("device", "ba:8f:17:de:94:94", "设备ID")
+	mode := flag.String("mode", "manual", "拾音模式: manual(手动) 或 auto(自动)")
 	flag.Parse()
+
+	// 验证模式参数
+	if *mode != "manual" && *mode != "auto" {
+		fmt.Printf("❌ 无效的模式: %s，只支持 manual 或 auto\n", *mode)
+		os.Exit(1)
+	}
+	listenMode = *mode
+	fmt.Printf("📋 拾音模式: %s\n", listenMode)
 
 	clientID := "e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d"
 	boardName := "lc-esp32-s3"
@@ -528,7 +539,7 @@ func sendListenStart(mqttClient mqtt.Client, sessionID string) error {
 	message := ClientMessage{
 		Type:      "listen",
 		State:     "start",
-		Mode:      "manual",
+		Mode:      listenMode,
 		SessionID: sessionID,
 	}
 	jsonData, err := json.Marshal(message)
@@ -548,7 +559,7 @@ func sendListenStop(mqttClient mqtt.Client, sessionID string) error {
 	message := ClientMessage{
 		Type:      "listen",
 		State:     "stop",
-		Mode:      "manual",
+		Mode:      listenMode,
 		SessionID: sessionID,
 	}
 	jsonData, err := json.Marshal(message)
@@ -570,7 +581,7 @@ func sendListenDetect(mqttClient mqtt.Client, sessionID string, text string) err
 		Type:      "listen",
 		State:     "detect",
 		Text:      text,
-		Mode:      "manual",
+		Mode:      listenMode,
 		SessionID: sessionID,
 	}
 	jsonData, err := json.Marshal(message)
@@ -669,8 +680,8 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 	}
 	_ = edgeConfig
 	//调用tts服务生成语音
-	//ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
-	ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
+	ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	//ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
 	if err != nil {
 		return fmt.Errorf("获取tts服务失败: %v", err)
 	}
@@ -713,7 +724,9 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 		sendListenStart(mqttClient, sessionID)
 		defer func() {
 			isStart = true
-			sendListenStop(mqttClient, sessionID)
+			if listenMode == "manual" {
+				sendListenStop(mqttClient, sessionID)
+			}
 			startTs = time.Now().UnixMilli()
 		}()
 		audioChan, err := ttsProvider.TextToSpeechStream(context.Background(), msg, 16000, 1, 60)

@@ -3,9 +3,12 @@ package chat
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
+	"xiaozhi-esp32-server-golang/internal/domain/tts"
+	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -27,6 +30,10 @@ type TTSManager struct {
 	clientState     *ClientState
 	serverTransport *ServerTransport
 	ttsQueue        *util.Queue[TTSQueueItem]
+
+	// 聊天历史音频缓存：持续累积多段TTS音频（Opus帧数组）
+	audioHistoryBuffer [][]byte
+	audioMutex         sync.Mutex
 }
 
 // NewTTSManager 只接受WithClientState
@@ -56,6 +63,9 @@ func (t *TTSManager) processTTSQueue(ctx context.Context) {
 			}
 			continue
 		}
+
+		log.Debugf("processTTSQueue start, text: %s", item.llmResponse.Text)
+
 		if item.onStartFunc != nil {
 			item.onStartFunc()
 		}
@@ -63,6 +73,8 @@ func (t *TTSManager) processTTSQueue(ctx context.Context) {
 		if item.onEndFunc != nil {
 			item.onEndFunc(err)
 		}
+		log.Debugf("processTTSQueue end, text: %s", item.llmResponse.Text)
+
 	}
 }
 
@@ -103,15 +115,96 @@ func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_com
 	return nil
 }
 
+// getTTSProviderInstance 获取TTS Provider实例（使用provider+音色作为资源池唯一key）
+func (t *TTSManager) getTTSProviderInstance() (*pool.ResourceWrapper[tts.TTSProvider], error) {
+	// 获取TTS配置和provider
+	var ttsConfig map[string]interface{}
+	var ttsProvider string
+
+	if t.clientState.SpeakerTTSConfig != nil && len(t.clientState.SpeakerTTSConfig) > 0 {
+		// 使用声纹TTS配置
+		if provider, ok := t.clientState.SpeakerTTSConfig["provider"].(string); ok {
+			ttsProvider = provider
+		} else {
+			log.Warnf("声纹TTS配置中缺少 provider，使用默认配置")
+			ttsProvider = t.clientState.DeviceConfig.Tts.Provider
+			ttsConfig = t.clientState.DeviceConfig.Tts.Config
+		}
+		// 深拷贝配置
+		ttsConfig = make(map[string]interface{})
+		for k, v := range t.clientState.SpeakerTTSConfig {
+			ttsConfig[k] = v
+		}
+	} else {
+		// 使用默认TTS配置
+		ttsProvider = t.clientState.DeviceConfig.Tts.Provider
+		ttsConfig = t.clientState.DeviceConfig.Tts.Config
+	}
+
+	// 提取音色ID用于组合资源池key
+	voiceID := extractVoiceID(ttsConfig)
+
+	// 组合资源池key：provider:voiceID（如果有音色ID）
+	poolKey := ttsProvider
+	if voiceID != "" {
+		poolKey = fmt.Sprintf("%s:%s", ttsProvider, voiceID)
+	}
+
+	// 从资源池获取TTS资源（使用provider+音色作为唯一key）
+	ttsWrapper, err := pool.Acquire[tts.TTSProvider]("tts", poolKey, ttsConfig)
+	if err != nil {
+		log.Errorf("获取TTS资源失败: %v", err)
+		return nil, fmt.Errorf("获取TTS资源失败: %v", err)
+	}
+
+	return ttsWrapper, nil
+}
+
+// extractVoiceID 从配置中提取音色ID
+func extractVoiceID(config map[string]interface{}) string {
+	if config == nil {
+		return ""
+	}
+
+	// 尝试从config中获取provider类型
+	provider, _ := config["provider"].(string)
+
+	// cosyvoice使用spk_id字段
+	if provider == "cosyvoice" {
+		if spkID, ok := config["spk_id"].(string); ok && spkID != "" {
+			return spkID
+		}
+		return ""
+	}
+
+	// minimax和其他provider：使用voice
+	if voice, ok := config["voice"].(string); ok && voice != "" {
+		return voice
+	}
+
+	return ""
+}
+
 // 同步 TTS 处理
 func (t *TTSManager) handleTts(ctx context.Context, llmResponse llm_common.LLMResponseStruct) error {
 	log.Debugf("handleTts start, text: %s", llmResponse.Text)
+	defer log.Debugf("handleTts end, text: %s", llmResponse.Text)
 	if llmResponse.Text == "" {
 		return nil
 	}
 
+	// 获取TTS Provider实例
+	ttsWrapper, err := t.getTTSProviderInstance()
+	if err != nil {
+		log.Errorf("获取TTS Provider实例失败: %v", err)
+		return err
+	}
+	defer pool.Release(ttsWrapper)
+
+	ttsProviderInstance := ttsWrapper.GetProvider()
+
 	// 使用带上下文的TTS处理
-	outputChan, err := t.clientState.TTSProvider.TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
+	outputChan, err := ttsProviderInstance.TextToSpeechStream(ctx, llmResponse.Text, t.clientState.OutputAudioFormat.SampleRate, t.clientState.OutputAudioFormat.Channels, t.clientState.OutputAudioFormat.FrameDuration)
 	if err != nil {
 		log.Errorf("生成 TTS 音频失败: %v", err)
 		return fmt.Errorf("生成 TTS 音频失败: %v", err)
@@ -191,6 +284,7 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 					log.Debugf("SendTTSAudio 等待客户端播放剩余缓冲: %v (totalFrames=%d, frameDuration=%v)", waitDuration, totalFrames, frameDuration)
 					time.Sleep(waitDuration)
 				}
+
 				log.Debugf("SendTTSAudio audioChan closed, exit, 总共发送 %d 帧", totalFrames)
 				return nil
 			}
@@ -199,6 +293,14 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 				log.Errorf("发送 TTS 音频失败: 第 %d 帧, len: %d, 错误: %v", totalFrames, len(frame), err)
 				return fmt.Errorf("发送 TTS 音频 len: %d 失败: %v", len(frame), err)
 			}
+
+			// 累积音频数据到历史缓存（每一帧作为独立的[]byte）
+			t.audioMutex.Lock()
+			// 复制帧数据，避免引用问题
+			frameCopy := make([]byte, len(frame))
+			copy(frameCopy, frame)
+			t.audioHistoryBuffer = append(t.audioHistoryBuffer, frameCopy)
+			t.audioMutex.Unlock()
 
 			totalFrames++
 			if totalFrames%100 == 0 {
@@ -212,4 +314,20 @@ func (t *TTSManager) SendTTSAudio(ctx context.Context, audioChan chan []byte, is
 			}
 		}
 	}
+}
+
+// ClearAudioHistory 清空TTS音频历史缓存
+func (t *TTSManager) ClearAudioHistory() {
+	t.audioMutex.Lock()
+	defer t.audioMutex.Unlock()
+	t.audioHistoryBuffer = nil
+}
+
+// GetAndClearAudioHistory 获取并清空TTS音频历史缓存
+func (t *TTSManager) GetAndClearAudioHistory() [][]byte {
+	t.audioMutex.Lock()
+	defer t.audioMutex.Unlock()
+	data := t.audioHistoryBuffer
+	t.audioHistoryBuffer = nil
+	return data
 }

@@ -79,3 +79,16 @@ func (d *DoubaoV2Adapter) Process(pcmData []float32) (string, error) {
 func (d *DoubaoV2Adapter) StreamingRecognize(ctx context.Context, audioStream <-chan []float32) (chan types.StreamingResult, error) {
 	return d.engine.StreamingRecognize(ctx, audioStream)
 }
+
+// Close 关闭资源，释放连接等
+func (d *DoubaoV2Adapter) Close() error {
+	if d.engine != nil {
+		return d.engine.Close()
+	}
+	return nil
+}
+
+// IsValid 检查资源是否有效
+func (d *DoubaoV2Adapter) IsValid() bool {
+	return d != nil && d.engine != nil
+}

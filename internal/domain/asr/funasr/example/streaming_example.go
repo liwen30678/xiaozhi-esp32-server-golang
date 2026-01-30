@@ -98,15 +98,14 @@ func main() {
 	}
 
 	config := funasr.FunasrConfig{
-		Host:           *host,
-		Port:           *port,
-		Mode:           *mode,
-		SampleRate:     16000,
-		ChunkSize:      []int{5, 10, 5},
-		ChunkInterval:  10,
-		MaxConnections: 5,
-		Timeout:        30,
-		AutoEnd:        false,
+		Host:          *host,
+		Port:          *port,
+		Mode:          *mode,
+		SampleRate:    16000,
+		ChunkSize:     []int{5, 10, 5},
+		ChunkInterval: 10,
+		Timeout:       30,
+		AutoEnd:       false,
 	}
 
 	// 使用配置创建ASR实例

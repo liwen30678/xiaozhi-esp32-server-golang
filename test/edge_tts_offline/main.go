@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -40,9 +41,12 @@ func createWAVHeader(dataSize uint32) []byte {
 }
 
 func main() {
+	// 解析命令行参数
+	url := flag.String("url", "ws://192.168.208.214:8081", "WebSocket服务器地址")
+	flag.Parse()
+
 	// 连接到 WebSocket 服务器
-	url := "ws://192.168.208.214:8081"
-	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+	c, _, err := websocket.DefaultDialer.Dial(*url, nil)
 	if err != nil {
 		log.Fatal("连接失败:", err)
 	}
