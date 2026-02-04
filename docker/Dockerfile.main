@@ -62,6 +62,9 @@ WORKDIR /app
 COPY lib ./lib
 COPY . .
 
+# 校验 asr_server 子模块内容已带入构建上下文（CI 需 checkout 使用 submodules: recursive）
+RUN test -f asr_server/server/setup.go || (echo "ERROR: asr_server 子模块内容缺失，构建上下文中无 voice_server/server 包。CI 请确保 checkout 使用 submodules: recursive。" && exit 1)
+
 # 下载Go模块
 RUN go mod tidy
 

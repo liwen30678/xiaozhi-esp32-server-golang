@@ -25,7 +25,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify asr_server submodule
+        run: |
+          if [ ! -f asr_server/server/setup.go ]; then
+            echo "::error::asr_server 子模块未拉取，binary 构建需要 voice_server 包"
+            ls -la asr_server 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -118,7 +128,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify asr_server submodule
+        run: |
+          if [ ! -f asr_server/server/setup.go ]; then
+            echo "::error::asr_server 子模块未拉取，binary 构建需要 voice_server 包"
+            ls -la asr_server 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
