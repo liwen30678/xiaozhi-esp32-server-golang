@@ -91,19 +91,9 @@ jobs:
         run: |
           upx --lzma xiaozhi_server.exe || true
 
-      - name: Set version for package name
-        id: version
+      - name: Pack Windows release (扁平 zip：解压后 exe/配置/dll 直接在当前目录)
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=snapshot" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Pack Windows release (exe + build/common + build/windows)
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          PACK_DIR="xiaozhi_server_windows_amd64_${VERSION}"
+          PACK_DIR="pack_win"
           mkdir -p "$PACK_DIR"/data "$PACK_DIR"/logs
 
           cp xiaozhi_server.exe "$PACK_DIR/"
@@ -113,14 +103,13 @@ jobs:
           cp build/windows/start.bat build/windows/README.md "$PACK_DIR/"
           cp build/windows/onnxruntime.dll build/windows/sherpa-onnx-c-api.dll build/windows/sherpa-onnx-cxx-api.dll build/windows/ten_vad.dll "$PACK_DIR/"
 
-          zip -r "${PACK_DIR}.zip" "$PACK_DIR"
-          echo "PACK_ZIP=${PACK_DIR}.zip" >> $GITHUB_ENV
+          cd "$PACK_DIR" && zip -r ../windows-amd64.zip . && cd ..
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
           name: windows-amd64-binaries
-          path: ${{ env.PACK_ZIP }}
+          path: windows-amd64.zip
 
   build-linux-amd64:
     runs-on: ubuntu-latest
@@ -184,33 +173,29 @@ jobs:
           # ten_vad 为 .so 动态库，不加 -static；rpath 已在 cgo 中指定；含 asr_server 与 Windows 一致
           go build -v -tags "nolibopusfile asr_server manager embed_ui" \
             -ldflags "-s -w" \
-            -o xiaozhi_server_linux_amd64 ./cmd/server
+            -o xiaozhi_server ./cmd/server
 
-      - name: Compress with UPX (optional)
+      - name: UPX 压缩（仅保留此二进制，文件名不带 upx）
         run: |
-          cp xiaozhi_server_linux_amd64 xiaozhi_server_linux_amd64-upx
-          upx --lzma xiaozhi_server_linux_amd64-upx || true
+          upx --lzma xiaozhi_server -o xiaozhi_server.upx && mv xiaozhi_server.upx xiaozhi_server || true
 
-      - name: Pack Linux release (binary + build/common + build/linux .so)
+      - name: Pack Linux release（单层目录 linux-amd64/，bin 名为 xiaozhi_server）
         run: |
-          mkdir -p release_linux_amd64/ten-vad/lib/Linux/x64
-          cp xiaozhi_server_linux_amd64 xiaozhi_server_linux_amd64-upx release_linux_amd64/
-          patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' release_linux_amd64/xiaozhi_server_linux_amd64 release_linux_amd64/xiaozhi_server_linux_amd64-upx 2>/dev/null || true
-          cp build/linux/libten_vad.so build/linux/libsherpa-onnx-c-api.so build/linux/libonnxruntime.so release_linux_amd64/ten-vad/lib/Linux/x64/
-          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json release_linux_amd64/
-          cp -r build/common/models build/common/data release_linux_amd64/
-          mkdir -p release_linux_amd64/logs
-          chmod +x release_linux_amd64/xiaozhi_server_linux_amd64*
-          zip -r linux-amd64.zip release_linux_amd64/
+          mkdir -p linux-amd64/ten-vad/lib/Linux/x64
+          cp xiaozhi_server linux-amd64/
+          patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' linux-amd64/xiaozhi_server 2>/dev/null || true
+          cp build/linux/libten_vad.so build/linux/libsherpa-onnx-c-api.so build/linux/libonnxruntime.so linux-amd64/ten-vad/lib/Linux/x64/
+          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json linux-amd64/
+          cp -r build/common/models build/common/data linux-amd64/
+          mkdir -p linux-amd64/logs
+          chmod +x linux-amd64/xiaozhi_server
+          zip -r linux-amd64.zip linux-amd64/
 
-      - name: Upload Linux binaries
+      - name: Upload Linux package
         uses: actions/upload-artifact@v4
         with:
           name: linux-amd64-binaries
-          path: |
-            release_linux_amd64/xiaozhi_server_linux_amd64
-            release_linux_amd64/xiaozhi_server_linux_amd64-upx
-            linux-amd64.zip
+          path: linux-amd64.zip
 
   release:
     needs:
@@ -225,15 +210,11 @@ jobs:
           name: windows-amd64-binaries
           path: release
 
-      - name: Download Linux binaries
+      - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
           name: linux-amd64-binaries
           path: release
-
-      - name: Prepare release assets
-        run: |
-          mv release/xiaozhi_server_windows_amd64_*.zip release/windows-amd64.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -244,8 +225,6 @@ jobs:
           prerelease: false
           files: |
             release/windows-amd64.zip
-            release/release_linux_amd64/xiaozhi_server_linux_amd64
-            release/release_linux_amd64/xiaozhi_server_linux_amd64-upx
             release/linux-amd64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
