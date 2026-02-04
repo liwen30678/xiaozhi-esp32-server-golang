@@ -254,11 +254,11 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm, vision
 func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	// 一次性获取所有相关配置（包括启用和未启用的）
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision"}).Find(&allConfigs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
 		return
 	}
@@ -651,6 +651,46 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		}
 		if len(llmConfigMap) > 0 {
 			response["llm"] = llmConfigMap
+		}
+	}
+
+	// 处理 Vision 配置：与 config.yaml 结构一致，vision_base + vllm（顶层 provider + 子项仅业务字段）
+	if visionConfigs, exists := configsByType["vision"]; exists && len(visionConfigs) > 0 {
+		visionResponse := make(gin.H)
+		vllmMap := make(gin.H)
+		var defaultVisionConfigID string
+		for _, config := range visionConfigs {
+			if config.ConfigID == "vision_base" {
+				if config.JsonData != "" {
+					var baseData map[string]interface{}
+					if err := json.Unmarshal([]byte(config.JsonData), &baseData); err == nil {
+						for k, v := range baseData {
+							visionResponse[k] = v
+						}
+					}
+				}
+				continue
+			}
+			if config.Enabled {
+				configData := make(map[string]interface{})
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+				if config.IsDefault {
+					defaultVisionConfigID = config.ConfigID
+				}
+				// 与 YAML 一致：子项只存业务配置，不含 name/provider/is_default
+				vllmMap[config.ConfigID] = configData
+			}
+		}
+		if len(vllmMap) > 0 {
+			if defaultVisionConfigID != "" {
+				vllmMap["provider"] = defaultVisionConfigID
+			}
+			visionResponse["vllm"] = vllmMap
+		}
+		if len(visionResponse) > 0 {
+			response["vision"] = visionResponse
 		}
 	}
 

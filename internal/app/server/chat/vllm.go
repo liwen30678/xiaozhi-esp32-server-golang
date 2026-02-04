@@ -21,6 +21,7 @@ func HandleVllm(deviceId string, file []byte, text string) (string, error) {
 
 	llmProvider, err := llm.GetLLMProvider(provider, vllmConfig)
 	if err != nil {
+		log.Errorf("获取VLLM Provider失败: %v", err)
 		return "", err
 	}
 	responseText, err := llmProvider.ResponseWithVllm(context.Background(), file, text, mimeType)

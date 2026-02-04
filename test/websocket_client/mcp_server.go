@@ -156,7 +156,10 @@ func jokeHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToo
 func visionHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	image := "1.jpg"
 	question := "图片中有什么？"
-	url := "http://192.168.208.214:8989/xiaozhi/api/vision"
+	url := GetServerVisionURL()
+	if url == "" {
+		url = "http://192.168.208.214:8989/xiaozhi/api/vision" // 未收到服务器下发时使用默认
+	}
 	deviceId := "shijingbo"
 	responseText, err := requestVllm(image, question, url, deviceId)
 	if err != nil {
