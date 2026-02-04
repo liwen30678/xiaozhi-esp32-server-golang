@@ -91,9 +91,9 @@ jobs:
         run: |
           upx --lzma xiaozhi_server.exe || true
 
-      - name: Pack Windows release (扁平 zip：解压后 exe/配置/dll 直接在当前目录)
+      - name: Pack Windows release（解压后一层目录 windows-amd64/）
         run: |
-          PACK_DIR="pack_win"
+          PACK_DIR="windows-amd64"
           mkdir -p "$PACK_DIR"/data "$PACK_DIR"/logs
 
           cp xiaozhi_server.exe "$PACK_DIR/"
@@ -103,7 +103,7 @@ jobs:
           cp build/windows/start.bat build/windows/README.md "$PACK_DIR/"
           cp build/windows/onnxruntime.dll build/windows/sherpa-onnx-c-api.dll build/windows/sherpa-onnx-cxx-api.dll build/windows/ten_vad.dll "$PACK_DIR/"
 
-          cd "$PACK_DIR" && zip -r ../windows-amd64.zip . && cd ..
+          zip -r windows-amd64.zip "$PACK_DIR"
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
@@ -179,23 +179,23 @@ jobs:
         run: |
           upx --lzma xiaozhi_server -o xiaozhi_server.upx && mv xiaozhi_server.upx xiaozhi_server || true
 
-      - name: Pack Linux release（单层目录 linux-amd64/，bin 名为 xiaozhi_server）
+      - name: Pack Linux release（扁平 zip：解压后 xiaozhi_server、ten-vad/、配置等直接在当前目录）
         run: |
-          mkdir -p linux-amd64/ten-vad/lib/Linux/x64
-          cp xiaozhi_server linux-amd64/
-          patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' linux-amd64/xiaozhi_server 2>/dev/null || true
-          cp build/linux/libten_vad.so build/linux/libsherpa-onnx-c-api.so build/linux/libonnxruntime.so linux-amd64/ten-vad/lib/Linux/x64/
-          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json linux-amd64/
-          cp -r build/common/models build/common/data linux-amd64/
-          mkdir -p linux-amd64/logs
-          chmod +x linux-amd64/xiaozhi_server
-          zip -r linux-amd64.zip linux-amd64/
+          PACK_DIR="pack_linux"
+          mkdir -p "$PACK_DIR"/ten-vad/lib/Linux/x64 "$PACK_DIR"/logs
+          cp xiaozhi_server "$PACK_DIR/"
+          patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' "$PACK_DIR/xiaozhi_server" 2>/dev/null || true
+          cp build/linux/libten_vad.so build/linux/libsherpa-onnx-c-api.so build/linux/libonnxruntime.so "$PACK_DIR/ten-vad/lib/Linux/x64/"
+          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/"
+          cp -r build/common/models build/common/data "$PACK_DIR/"
+          chmod +x "$PACK_DIR/xiaozhi_server"
+          cd "$PACK_DIR" && zip -r ../linux-amd64.zip . && cd ..
 
-      - name: Upload Linux package
+      - name: Upload Linux package（传目录内容，artifact 名 linux-amd64，下载解压后仅一层 linux-amd64/）
         uses: actions/upload-artifact@v4
         with:
-          name: linux-amd64-binaries
-          path: linux-amd64.zip
+          name: linux-amd64
+          path: pack_linux
 
   release:
     needs:
@@ -213,8 +213,12 @@ jobs:
       - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
-          name: linux-amd64-binaries
-          path: release
+          name: linux-amd64
+          path: release/linux-amd64
+
+      - name: 打 Linux zip 供 Release 附件（解压后一层目录 linux-amd64/）
+        run: |
+          cd release && zip -r linux-amd64.zip linux-amd64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
