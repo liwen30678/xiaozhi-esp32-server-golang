@@ -93,7 +93,7 @@ jobs:
 
       - name: Pack Windows release（目录 windows-amd64/，artifact 传目录不传 zip，避免下载后再解压一层 zip）
         run: |
-          PACK_DIR="windows-amd64"
+          PACK_DIR="windows-amd64/xiaozhi-server-windows-amd64"
           mkdir -p "$PACK_DIR"/data "$PACK_DIR"/logs
 
           cp xiaozhi_server.exe "$PACK_DIR/"
@@ -106,7 +106,7 @@ jobs:
       - name: Upload Windows package（传目录，下载解压后为 windows-amd64/ 一层）
         uses: actions/upload-artifact@v4
         with:
-          name: windows-amd64-binaries
+          name: xiaozhi-server-windows-amd64
           path: windows-amd64
 
   build-linux-amd64:
@@ -181,7 +181,6 @@ jobs:
       - name: Pack Linux release（目录 linux-amd64/，解压/下载后一层目录）
         run: |
           PACK_DIR="linux-amd64/xiaozhi_server-linux-amd64"
-          mkdir -p "$PACK_DIR"
           mkdir -p "$PACK_DIR"/ten-vad/lib/Linux/x64 "$PACK_DIR"/logs
           cp xiaozhi_server "$PACK_DIR/"
           patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' "$PACK_DIR/xiaozhi_server" 2>/dev/null || true
