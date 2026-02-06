@@ -55,6 +55,12 @@ const routes = [
         meta: { requiresAuth: true, requiresAdmin: true },
         children: [
           {
+            path: 'config-wizard',
+            name: 'ConfigWizard',
+            component: () => import('../views/admin/ConfigWizard.vue'),
+            meta: { title: '配置向导' }
+          },
+          {
             path: 'vad-config',
             name: 'VADConfig',
             component: () => import('../views/admin/VADConfig.vue'),

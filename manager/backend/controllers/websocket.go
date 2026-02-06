@@ -147,6 +147,16 @@ func (ctrl *WebSocketController) IsClientConnected(uuid string) bool {
 	return false
 }
 
+// GetFirstConnectedClientUUID 返回第一个已连接客户端的 UUID，用于配置测试等场景
+func (ctrl *WebSocketController) GetFirstConnectedClientUUID() string {
+	for item := range ctrl.clientsMap.IterBuffered() {
+		if client := item.Val; client.isConnected {
+			return client.ID
+		}
+	}
+	return ""
+}
+
 // 向指定UUID的客户端发送消息
 func (ctrl *WebSocketController) SendToClient(uuid string, message interface{}) error {
 	if client, exists := ctrl.clientsMap.Get(uuid); exists && client.isConnected {

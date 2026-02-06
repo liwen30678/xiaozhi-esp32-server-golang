@@ -244,6 +244,8 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				// 配置导入导出
 				admin.GET("/configs/export", adminController.ExportConfigs)
 				admin.POST("/configs/import", adminController.ImportConfigs)
+				// 一键测试配置（OTA 在 manager 内，VAD/ASR/LLM/TTS 经 WebSocket 发主程序）
+				admin.POST("/configs/test", adminController.TestConfigs)
 
 				// 资源池统计
 				admin.GET("/pool/stats", poolStatsController.GetPoolStats)

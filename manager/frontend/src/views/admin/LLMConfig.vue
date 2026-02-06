@@ -39,9 +39,17 @@
           {{ formatDate(scope.row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180">
+      <el-table-column label="操作" width="260">
         <template #default="scope">
           <el-button size="small" @click="editConfig(scope.row)">编辑</el-button>
+          <el-button
+            size="small"
+            type="warning"
+            :loading="testingId === scope.row.config_id"
+            @click="testConfig(scope.row, 'llm')"
+          >
+            测试
+          </el-button>
           <el-button
             size="small"
             type="danger"
@@ -60,68 +68,7 @@
       width="600px"
       @close="handleDialogClose"
     >
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="120px"
-      >
-        <el-form-item label="提供商" prop="provider">
-          <el-select v-model="form.provider" placeholder="请选择提供商" style="width: 100%" @change="handleProviderChange">
-            <el-option label="OpenAI" value="openai" />
-            <el-option label="Azure OpenAI" value="azure" />
-            <el-option label="Anthropic" value="anthropic" />
-            <el-option label="智谱AI" value="zhipu" />
-            <el-option label="阿里云" value="aliyun" />
-            <el-option label="豆包" value="doubao" />
-            <el-option label="SiliconFlow" value="siliconflow" />
-            <el-option label="DeepSeek" value="deepseek" />
-          </el-select>
-        </el-form-item>
-        
-        <el-form-item label="配置名称" prop="name">
-          <el-input v-model="form.name" placeholder="请输入配置名称" />
-        </el-form-item>
-        
-        <el-form-item label="配置ID" prop="config_id">
-          <el-input v-model="form.config_id" placeholder="请输入唯一的配置ID" />
-        </el-form-item>
-        
-        <!-- 移除是否默认开关，现在在列表页操作 -->
-        
-        <!-- 通用配置字段 -->
-        <el-form-item label="模型类型" prop="type">
-          <el-select v-model="form.type" placeholder="请选择模型类型" style="width: 100%">
-            <el-option label="OpenAI" value="openai" />
-            <el-option label="Ollama" value="ollama" />
-          </el-select>
-        </el-form-item>
-        
-        <el-form-item label="模型名称" prop="model_name">
-          <el-input v-model="form.model_name" placeholder="请输入模型名称" />
-        </el-form-item>
-        
-        <el-form-item label="API密钥" prop="api_key">
-          <el-input v-model="form.api_key" type="password" placeholder="请输入API密钥" show-password />
-        </el-form-item>
-        
-        <el-form-item label="基础URL" prop="base_url">
-          <el-input v-model="form.base_url" placeholder="请输入基础URL" style="width: 100%;" />
-        </el-form-item>
-        
-        <el-form-item label="max_tokens" prop="max_tokens">
-          <el-input-number v-model="form.max_tokens" :min="1" :max="100000" placeholder="max_tokens" style="width: 100%" />
-        </el-form-item>
-        
-        <!-- 可选的高级配置 -->
-        <el-form-item label="温度" prop="temperature">
-          <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1" placeholder="温度" style="width: 100%" />
-        </el-form-item>
-        
-        <el-form-item label="Top P" prop="top_p">
-          <el-input-number v-model="form.top_p" :min="0" :max="1" :step="0.1" placeholder="Top P" style="width: 100%" />
-        </el-form-item>
-      </el-form>
+      <LLMConfigForm ref="formRef" :model="form" :rules="rules" />
       
       <template #footer>
         <el-button @click="handleDialogClose">取消</el-button>
@@ -138,8 +85,11 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../../utils/api'
+import { testSingleConfig } from '../../utils/configTest'
+import LLMConfigForm from './forms/LLMConfigForm.vue'
 
 const configs = ref([])
+const testingId = ref(null)
 const loading = ref(false)
 const saving = ref(false)
 const showDialog = ref(false)
@@ -160,45 +110,6 @@ const form = reactive({
   temperature: 0.7,
   top_p: 0.9
 })
-
-// 快捷URL填写功能
-const quickUrls = {
-  openai: 'https://api.openai.com/v1',
-  azure: 'https://your-resource-name.openai.azure.com',
-  anthropic: 'https://api.anthropic.com',
-  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
-  aliyun: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  doubao: 'https://ark.cn-beijing.volces.com/api/v3',
-  siliconflow: 'https://api.siliconflow.cn/v1',
-  deepseek: 'https://api.deepseek.com/v1'
-}
-
-const handleProviderChange = (value) => {
-  if (quickUrls[value]) {
-    form.base_url = quickUrls[value]
-  }
-}
-
-// 生成配置JSON字符串
-const generateConfig = () => {
-  const config = {
-    type: form.type,
-    model_name: form.model_name,
-    api_key: form.api_key,
-    base_url: form.base_url,
-    max_tokens: form.max_tokens
-  }
-  
-  // 添加可选的高级配置
-  if (form.temperature !== undefined && form.temperature !== null) {
-    config.temperature = form.temperature
-  }
-  if (form.top_p !== undefined && form.top_p !== null) {
-    config.top_p = form.top_p
-  }
-  
-  return JSON.stringify(config, null, 2)
-}
 
 const rules = {
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
@@ -266,7 +177,7 @@ const handleSave = async () => {
           provider: form.provider,
           is_default: isFirstConfig || form.is_default, // 首次添加自动设为默认
           enabled: form.enabled !== undefined ? form.enabled : true,
-          json_data: generateConfig()
+          json_data: formRef.value.getJsonData()
         }
         
         if (editingConfig.value) {
@@ -330,6 +241,22 @@ const toggleDefault = async (config) => {
 
 const getEnabledConfigs = () => {
   return configs.value.filter(config => config.enabled)
+}
+
+const testConfig = async (row, type) => {
+  testingId.value = row.config_id
+  try {
+    const result = await testSingleConfig(type, row.config_id)
+    if (result.ok) {
+      ElMessage.success(`${row.name || row.config_id}：${result.message}`)
+    } else {
+      ElMessage.warning(`${row.name || row.config_id}：${result.message}`)
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    testingId.value = null
+  }
 }
 
 const deleteConfig = async (id) => {

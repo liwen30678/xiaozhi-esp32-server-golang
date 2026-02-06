@@ -67,6 +67,14 @@
         </div>
       </template>
       <div class="config-actions">
+        <el-button
+          type="primary"
+          @click="$router.push('/admin/config-wizard')"
+          class="config-btn"
+        >
+          <el-icon><Guide /></el-icon>
+          配置向导
+        </el-button>
         <el-button 
           type="primary" 
           @click="exportConfig"
@@ -75,16 +83,56 @@
           <el-icon><Download /></el-icon>
           导出配置
         </el-button>
-                 <el-button 
-           type="success" 
-           @click="importConfig"
-           class="config-btn"
-         >
+        <el-button 
+          type="success" 
+          @click="importConfig"
+          class="config-btn"
+        >
            <el-icon><Upload /></el-icon>
            导入配置
            <div class="btn-tip">支持YAML/JSON</div>
          </el-button>
+        <el-button
+          type="warning"
+          @click="runConfigTest"
+          class="config-btn"
+          :loading="configTestLoading"
+        >
+          <el-icon><CircleCheck /></el-icon>
+          一键测试配置
+        </el-button>
       </div>
+      <!-- 配置测试结果弹窗 -->
+      <el-dialog
+        v-model="configTestDialogVisible"
+        title="配置测试结果"
+        width="700px"
+        destroy-on-close
+      >
+        <div v-if="configTestResult" class="config-test-result">
+          <template v-for="(typeLabel, typeKey) in configTestTypeLabels" :key="typeKey">
+            <template v-if="configTestResult[typeKey] && Object.keys(configTestResult[typeKey]).length">
+              <div class="test-type-section">
+                <div class="test-type-title">{{ typeLabel }}</div>
+                <el-table :data="formatTestRows(configTestResult[typeKey], typeKey)" size="small" border stripe>
+                  <el-table-column prop="configId" label="配置" width="180" />
+                  <el-table-column prop="ok" label="结果" width="80" align="center">
+                    <template #default="{ row }">
+                      <el-tag :type="row.ok ? 'success' : 'danger'" size="small">
+                        {{ row.ok ? '通过' : '失败' }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="message" label="说明" />
+                </el-table>
+              </div>
+            </template>
+          </template>
+        </div>
+        <template #footer>
+          <el-button @click="configTestDialogVisible = false">关闭</el-button>
+        </template>
+      </el-dialog>
       <input
         ref="fileInput"
         type="file"
@@ -176,10 +224,49 @@ import {
   Plus,
   Download,
   Upload,
-  Cpu
+  Cpu,
+  Guide,
+  CircleCheck
 } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
+
+// 一键测试配置
+const configTestLoading = ref(false)
+const configTestDialogVisible = ref(false)
+const configTestResult = ref(null)
+const configTestTypeLabels = {
+  ota: 'OTA',
+  vad: 'VAD',
+  asr: 'ASR',
+  llm: 'LLM',
+  tts: 'TTS'
+}
+function formatTestRows(map, typeKey) {
+  if (!map || typeof map !== 'object') return []
+  return Object.entries(map).map(([configId, val]) => {
+    const item = val && typeof val === 'object' && 'ok' in val ? val : { ok: false, message: String(val) }
+    const displayId = configId.startsWith('_') ? (configId === '_error' ? '请求异常' : configId === '_no_client' ? '无主程序连接' : configId === '_none' ? '未配置' : configId) : configId
+    return { configId: displayId, ok: !!item.ok, message: item.message || '' }
+  })
+}
+async function runConfigTest() {
+  configTestLoading.value = true
+  configTestResult.value = null
+  try {
+    const res = await api.post('/admin/configs/test', {}, { timeout: 30000 })
+    configTestResult.value = res.data?.data ?? res.data ?? null
+    configTestDialogVisible.value = true
+    if (!configTestResult.value) {
+      ElMessage.warning('未返回测试结果')
+    }
+  } catch (err) {
+    console.error('配置测试失败:', err)
+    ElMessage.error(err.response?.data?.error || '配置测试请求失败')
+  } finally {
+    configTestLoading.value = false
+  }
+}
 
 const stats = ref({
   totalUsers: 0,
@@ -443,5 +530,21 @@ const handleFileChange = async (event) => {
 
 .quick-actions .el-button {
   justify-content: flex-start;
+}
+
+.config-test-result {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.test-type-section {
+  margin-bottom: 16px;
+}
+.test-type-section:last-child {
+  margin-bottom: 0;
+}
+.test-type-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #303133;
 }
 </style>

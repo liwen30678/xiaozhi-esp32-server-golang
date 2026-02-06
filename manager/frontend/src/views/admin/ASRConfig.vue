@@ -39,9 +39,17 @@
           {{ formatDate(scope.row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180">
+      <el-table-column label="操作" width="260">
         <template #default="scope">
           <el-button size="small" @click="editConfig(scope.row)">编辑</el-button>
+          <el-button
+            size="small"
+            type="warning"
+            :loading="testingId === scope.row.config_id"
+            @click="testConfig(scope.row, 'asr')"
+          >
+            测试
+          </el-button>
           <el-button
             size="small"
             type="danger"
@@ -60,147 +68,7 @@
       width="600px"
       @close="handleDialogClose"
     >
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="120px"
-      >
-        <el-form-item label="提供商" prop="provider">
-          <el-select v-model="form.provider" placeholder="请选择提供商" style="width: 100%" @change="onProviderChange">
-            <el-option label="FunASR" value="funasr" />
-            <el-option label="豆包" value="doubao" />
-          </el-select>
-        </el-form-item>
-        
-        <el-form-item label="配置名称" prop="name">
-          <el-input v-model="form.name" placeholder="请输入配置名称" />
-        </el-form-item>
-        
-        <el-form-item label="配置ID" prop="config_id">
-          <el-input v-model="form.config_id" placeholder="请输入唯一的配置ID" />
-        </el-form-item>
-        
-        <!-- 移除是否默认开关，现在在列表页操作 -->
-        
-        <!-- FunASR配置字段 -->
-        <div v-if="form.provider === 'funasr'">
-          <el-form-item label="主机地址" prop="funasr.host">
-            <el-input v-model="form.funasr.host" placeholder="请输入主机地址" />
-          </el-form-item>
-          
-          <el-form-item label="端口" prop="funasr.port">
-            <el-input-number v-model="form.funasr.port" :min="1" :max="65535" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="模式" prop="funasr.mode">
-            <el-select v-model="form.funasr.mode" placeholder="请选择模式" style="width: 100%">
-              <el-option label="2pass" value="2pass" />
-              <el-option label="offline" value="offline" />
-              <el-option label="online" value="online" />
-            </el-select>
-          </el-form-item>
-          
-          <el-form-item label="采样率" prop="funasr.sample_rate">
-            <el-select v-model="form.funasr.sample_rate" placeholder="请选择采样率" style="width: 100%">
-              <el-option label="8000" :value="8000" />
-              <el-option label="16000" :value="16000" />
-              <el-option label="44100" :value="44100" />
-              <el-option label="48000" :value="48000" />
-            </el-select>
-          </el-form-item>
-          
-          <el-form-item label="块大小" prop="funasr.chunk_size">
-            <div style="display: flex; gap: 8px; width: 100%">
-              <el-input-number 
-                v-model="form.funasr.chunk_size[0]" 
-                :min="1" 
-                placeholder="前向块大小"
-                style="flex: 1"
-              />
-              <el-input-number 
-                v-model="form.funasr.chunk_size[1]" 
-                :min="1" 
-                placeholder="中间块大小"
-                style="flex: 1"
-              />
-              <el-input-number 
-                v-model="form.funasr.chunk_size[2]" 
-                :min="1" 
-                placeholder="后向块大小"
-                style="flex: 1"
-              />
-            </div>
-            <div class="form-tip">
-              <el-icon><InfoFilled /></el-icon>
-              格式：[前向, 中间, 后向]，例如：[5, 10, 5]
-            </div>
-          </el-form-item>
-          
-          <el-form-item label="块间隔" prop="funasr.chunk_interval">
-            <el-input-number v-model="form.funasr.chunk_interval" :min="1" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="最大连接数" prop="funasr.max_connections">
-            <el-input-number v-model="form.funasr.max_connections" :min="1" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="超时时间(秒)" prop="funasr.timeout">
-            <el-input-number v-model="form.funasr.timeout" :min="1" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="自动结束" prop="funasr.auto_end">
-            <el-switch v-model="form.funasr.auto_end" />
-            <div class="form-tip">
-              <el-icon><InfoFilled /></el-icon>
-              确保FunASR已进行相应配置
-            </div>
-          </el-form-item>
-        </div>
-
-        <!-- 豆包ASR配置字段 -->
-        <div v-if="form.provider === 'doubao'">
-          <el-form-item label="应用ID" prop="doubao.appid">
-            <el-input v-model="form.doubao.appid" placeholder="请输入应用ID" />
-          </el-form-item>
-          
-          <el-form-item label="访问令牌" prop="doubao.access_token">
-            <el-input v-model="form.doubao.access_token" type="password" placeholder="请输入访问令牌" show-password />
-          </el-form-item>
-          
-          <el-form-item label="WebSocket URL" prop="doubao.ws_url">
-            <el-input v-model="form.doubao.ws_url" placeholder="请输入WebSocket URL" />
-          </el-form-item>
-          
-          <el-form-item label="模型名称" prop="doubao.model_name">
-            <el-input v-model="form.doubao.model_name" placeholder="请输入模型名称" />
-          </el-form-item>
-          
-          <el-form-item label="结束窗口大小" prop="doubao.end_window_size">
-            <el-input-number v-model="form.doubao.end_window_size" :min="1" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="启用标点符号" prop="doubao.enable_punc">
-            <el-switch v-model="form.doubao.enable_punc" />
-          </el-form-item>
-          
-          <el-form-item label="启用反向文本标准化" prop="doubao.enable_itn">
-            <el-switch v-model="form.doubao.enable_itn" />
-          </el-form-item>
-          
-          <el-form-item label="启用数字检测修正" prop="doubao.enable_ddc">
-            <el-switch v-model="form.doubao.enable_ddc" />
-          </el-form-item>
-          
-          <el-form-item label="分块时长(毫秒)" prop="doubao.chunk_duration">
-            <el-input-number v-model="form.doubao.chunk_duration" :min="1" style="width: 100%" />
-          </el-form-item>
-          
-          <el-form-item label="超时时间(秒)" prop="doubao.timeout">
-            <el-input-number v-model="form.doubao.timeout" :min="1" style="width: 100%" />
-          </el-form-item>
-        </div>
-      </el-form>
+      <ASRConfigForm ref="formRef" :model="form" :rules="rules" />
       
       <template #footer>
         <el-button @click="handleDialogClose">取消</el-button>
@@ -215,10 +83,13 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, InfoFilled } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import api from '../../utils/api'
+import { testSingleConfig } from '../../utils/configTest'
+import ASRConfigForm from './forms/ASRConfigForm.vue'
 
 const configs = ref([])
+const testingId = ref(null)
 const loading = ref(false)
 const saving = ref(false)
 const showDialog = ref(false)
@@ -256,35 +127,39 @@ const form = reactive({
   }
 })
 
-// 根据provider生成配置JSON
-const generateConfig = () => {
-  if (form.provider === 'funasr') {
-    return JSON.stringify(form.funasr)
-  } else if (form.provider === 'doubao') {
-    return JSON.stringify(form.doubao)
+// 按当前 provider 动态规则，避免未显示的 doubao/funasr 字段触发必填导致保存不发请求
+const rules = computed(() => {
+  const base = {
+    name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
+    config_id: [{ required: true, message: '请输入配置ID', trigger: 'blur' }],
+    provider: [{ required: true, message: '请选择提供商', trigger: 'change' }]
   }
-  return '{}'
-}
-
-const rules = {
-  name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
-  config_id: [{ required: true, message: '请输入配置ID', trigger: 'blur' }],
-  provider: [{ required: true, message: '请选择提供商', trigger: 'change' }],
-  'funasr.host': [{ required: true, message: '请输入主机地址', trigger: 'blur' }],
-  'funasr.port': [{ required: true, message: '请输入端口', trigger: 'blur' }],
-  'funasr.mode': [{ required: true, message: '请选择模式', trigger: 'change' }],
-  'funasr.sample_rate': [{ required: true, message: '请选择采样率', trigger: 'change' }],
-  'funasr.chunk_size': [{ required: true, message: '请输入块大小', trigger: 'blur' }],
-  'funasr.chunk_interval': [{ required: true, message: '请输入块间隔', trigger: 'blur' }],
-  'funasr.max_connections': [{ required: true, message: '请输入最大连接数', trigger: 'blur' }],
-  'funasr.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }],
-  'doubao.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
-  'doubao.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
-  'doubao.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
-  'doubao.model_name': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
-  'doubao.end_window_size': [{ required: true, message: '请输入结束窗口大小', trigger: 'blur' }],
-  'doubao.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
-}
+  if (form.provider === 'funasr') {
+    return {
+      ...base,
+      'funasr.host': [{ required: true, message: '请输入主机地址', trigger: 'blur' }],
+      'funasr.port': [{ required: true, message: '请输入端口', trigger: 'blur' }],
+      'funasr.mode': [{ required: true, message: '请选择模式', trigger: 'change' }],
+      'funasr.sample_rate': [{ required: true, message: '请选择采样率', trigger: 'change' }],
+      'funasr.chunk_size': [{ required: true, message: '请输入块大小', trigger: 'blur' }],
+      'funasr.chunk_interval': [{ required: true, message: '请输入块间隔', trigger: 'blur' }],
+      'funasr.max_connections': [{ required: true, message: '请输入最大连接数', trigger: 'blur' }],
+      'funasr.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
+    }
+  }
+  if (form.provider === 'doubao') {
+    return {
+      ...base,
+      'doubao.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+      'doubao.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
+      'doubao.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+      'doubao.model_name': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+      'doubao.end_window_size': [{ required: true, message: '请输入结束窗口大小', trigger: 'blur' }],
+      'doubao.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
+    }
+  }
+  return base
+})
 
 const loadConfigs = async () => {
   loading.value = true
@@ -346,8 +221,10 @@ const editConfig = (config) => {
 }
 
 const handleSave = async () => {
-  if (!formRef.value) return
-  
+  if (!formRef.value) {
+    ElMessage.warning('表单未就绪，请稍后重试')
+    return
+  }
   await formRef.value.validate(async (valid) => {
     if (valid) {
       saving.value = true
@@ -361,7 +238,7 @@ const handleSave = async () => {
           provider: form.provider,
           is_default: isFirstConfig || form.is_default, // 首次添加时自动设为默认
           enabled: form.enabled !== undefined ? form.enabled : true, // 确保enabled字段存在
-          json_data: generateConfig()
+          json_data: formRef.value.getJsonData()
         }
         
         if (editingConfig.value) {
@@ -375,7 +252,8 @@ const handleSave = async () => {
         showDialog.value = false
         loadConfigs()
       } catch (error) {
-        ElMessage.error('保存失败: ' + (error.response?.data?.message || error.message))
+        const msg = error.response?.data?.error || error.response?.data?.message || error.message
+        ElMessage.error('保存失败: ' + msg)
       } finally {
         saving.value = false
       }
@@ -427,6 +305,22 @@ const getEnabledConfigs = () => {
   return configs.value.filter(config => config.enabled)
 }
 
+const testConfig = async (row, type) => {
+  testingId.value = row.config_id
+  try {
+    const result = await testSingleConfig(type, row.config_id)
+    if (result.ok) {
+      ElMessage.success(`${row.name || row.config_id}：${result.message}`)
+    } else {
+      ElMessage.warning(`${row.name || row.config_id}：${result.message}`)
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    testingId.value = null
+  }
+}
+
 const deleteConfig = async (id) => {
   try {
     await ElMessageBox.confirm('确定要删除这个配置吗？', '提示', {
@@ -442,13 +336,6 @@ const deleteConfig = async (id) => {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
     }
-  }
-}
-
-const onProviderChange = () => {
-  // 当选择funasr时，设置默认模式为offline
-  if (form.provider === 'funasr') {
-    form.funasr.mode = 'offline'
   }
 }
 
@@ -521,17 +408,4 @@ onMounted(() => {
   color: #333;
 }
 
-.form-tip {
-  margin-top: 8px;
-  font-size: 12px;
-  color: #909399;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.form-tip .el-icon {
-  font-size: 14px;
-  color: #409eff;
-}
 </style>

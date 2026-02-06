@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -714,6 +715,283 @@ func (ac *AdminController) notifySystemConfigChanged() {
 		}
 		ac.WebSocketController.BroadcastSystemConfig(data)
 	}()
+}
+
+// TestConfigs 一键测试配置：OTA 在 manager 内测，VAD/ASR/LLM/TTS 经 WebSocket 发主程序测，结果按 config_id 对应
+func (ac *AdminController) TestConfigs(c *gin.Context) {
+	var body struct {
+		Types      []string            `json:"types"`       // 要测试的类型：ota, vad, asr, llm, tts
+		ConfigIDs  map[string][]string `json:"config_ids"`  // 按类型指定 config_id 列表，不传则测该类型全部已启用
+		ClientUUID string              `json:"client_uuid"` // 指定主程序连接，不传则任选一个
+	}
+	_ = c.ShouldBindJSON(&body)
+	if len(body.Types) == 0 {
+		body.Types = []string{"ota", "vad", "asr", "llm", "tts"}
+	}
+	if body.ConfigIDs == nil {
+		body.ConfigIDs = make(map[string][]string)
+	}
+
+	result := gin.H{
+		"ota": gin.H{},
+		"vad": gin.H{},
+		"asr": gin.H{},
+		"llm": gin.H{},
+		"tts": gin.H{},
+	}
+
+	// OTA：在 manager 内对每条 OTA 配置做 URL 连通性检查，支持 config_ids 过滤
+	if contains(body.Types, "ota") {
+		q := ac.DB.Where("type = ? AND enabled = ?", "ota", true)
+		if ids := body.ConfigIDs["ota"]; len(ids) > 0 {
+			q = q.Where("config_id IN ?", ids)
+		}
+		var otaConfigs []models.Config
+		if err := q.Find(&otaConfigs).Error; err != nil {
+			result["ota"] = gin.H{"_error": gin.H{"ok": false, "message": "获取OTA配置失败"}}
+		} else if len(otaConfigs) == 0 {
+			result["ota"] = gin.H{"_none": gin.H{"ok": false, "message": "未配置或未启用OTA"}}
+		} else {
+			for _, cfg := range otaConfigs {
+				ok, msg := ac.testOTAConfig(cfg)
+				result["ota"].(gin.H)[cfg.ConfigID] = gin.H{"ok": ok, "message": msg}
+			}
+		}
+	}
+
+	// VAD/ASR/LLM/TTS：经 WebSocket 发主程序
+	needMainProgram := contains(body.Types, "vad") || contains(body.Types, "asr") || contains(body.Types, "llm") || contains(body.Types, "tts")
+	if needMainProgram && ac.WebSocketController != nil {
+		clientUUID := body.ClientUUID
+		if clientUUID == "" {
+			clientUUID = ac.WebSocketController.GetFirstConnectedClientUUID()
+		}
+		if clientUUID == "" {
+			noClient := gin.H{"ok": false, "message": "无主程序连接，无法测试"}
+			if contains(body.Types, "vad") {
+				result["vad"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "asr") {
+				result["asr"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "llm") {
+				result["llm"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "tts") {
+				result["tts"] = gin.H{"_no_client": noClient}
+			}
+		} else {
+			fullData, err := ac.getSystemConfigsData()
+			if err != nil {
+				fillResultError(result, body.Types, "vad", "asr", "llm", "tts", "获取系统配置失败")
+			} else {
+				for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+					if v, ok := fullData[typ]; ok {
+						if m, ok := v.(map[string]interface{}); ok {
+							log.Printf("[config_test] fullData[%s] keys: %v", typ, getMapKeys(m))
+						}
+					} else {
+						log.Printf("[config_test] fullData[%s] 不存在", typ)
+					}
+				}
+				// 只取请求的类型，并按 config_ids 过滤；指定了 config_ids 时，若 fullData 中无该条（如未启用），则从 DB 按 id 补查
+				subset := gin.H{}
+				for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+					if !contains(body.Types, typ) {
+						continue
+					}
+					var typeMap map[string]interface{}
+					if v, ok := fullData[typ]; ok {
+						typeMap, _ = v.(map[string]interface{})
+					}
+					ids := body.ConfigIDs[typ]
+					if len(ids) > 0 {
+						filtered := make(map[string]interface{})
+						for _, id := range ids {
+							if typeMap != nil {
+								if val, exists := typeMap[id]; exists {
+									filtered[id] = val
+									continue
+								}
+							}
+							// fullData 中无该 id（如未启用），从 DB 按 type+config_id 查一条并加入
+							item := ac.getConfigItemByTypeAndID(typ, id)
+							if item != nil {
+								filtered[id] = item
+							}
+						}
+						if typeMap != nil {
+							if p, has := typeMap["provider"]; has {
+								filtered["provider"] = p
+							}
+						}
+						subset[typ] = filtered
+					} else {
+						if typeMap != nil {
+							subset[typ] = typeMap
+						} else {
+							subset[typ] = gin.H{}
+						}
+					}
+				}
+				reqBody := map[string]interface{}{
+					"data":      subset,
+					"test_text": "配置测试",
+				}
+				// 发送前打印下发的配置摘要，便于 debug
+				log.Printf("[config_test] 发送请求 client=%s data 各类型条目数: vad=%d asr=%d llm=%d tts=%d",
+					clientUUID,
+					countSubsetKeys(subset["vad"]), countSubsetKeys(subset["asr"]),
+					countSubsetKeys(subset["llm"]), countSubsetKeys(subset["tts"]))
+				ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
+				defer cancel()
+				resp, err := ac.WebSocketController.SendRequestToClient(ctx, clientUUID, "POST", "/api/config/test", reqBody)
+				if err != nil {
+					fillResultError(result, body.Types, "vad", "asr", "llm", "tts", "主程序测试请求失败: "+err.Error())
+				} else if resp.Status != 200 {
+					errMsg := resp.Error
+					if errMsg == "" && resp.Body != nil {
+						if e, _ := resp.Body["error"].(string); e != "" {
+							errMsg = e
+						}
+					}
+					fillResultError(result, body.Types, "vad", "asr", "llm", "tts", errMsg)
+				} else if resp.Status == 200 {
+					if resp.Body == nil {
+						for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+							if contains(body.Types, typ) {
+								result[typ] = gin.H{"_error": gin.H{"ok": false, "message": "主程序未返回测试数据"}}
+							}
+						}
+					} else {
+						for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+							if r, ok := resp.Body[typ].(map[string]interface{}); ok {
+								result[typ] = r
+							} else if contains(body.Types, typ) && resp.Body[typ] != nil {
+								result[typ] = gin.H{"_error": gin.H{"ok": false, "message": "响应格式异常"}}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+func contains(s []string, x string) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// countSubsetKeys 统计 subset 中除 provider 外的 config 条目数，用于 debug 日志
+func countSubsetKeys(v interface{}) int {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	n := 0
+	for k := range m {
+		if k != "provider" {
+			n++
+		}
+	}
+	return n
+}
+
+// getConfigItemByTypeAndID 按 type+config_id 从 DB 查一条配置，返回与 getSystemConfigsData 一致的 configItem 结构（供测试请求指定 config_ids 时补全）
+func (ac *AdminController) getConfigItemByTypeAndID(typ, configID string) map[string]interface{} {
+	var config models.Config
+	if err := ac.DB.Where("type = ? AND config_id = ?", typ, configID).First(&config).Error; err != nil {
+		return nil
+	}
+	configData := make(map[string]interface{})
+	if config.JsonData != "" {
+		_ = json.Unmarshal([]byte(config.JsonData), &configData)
+	}
+	item := gin.H{
+		"name":       config.Name,
+		"is_default": config.IsDefault,
+	}
+	for k, v := range configData {
+		item[k] = v
+	}
+	return item
+}
+
+func fillResultError(result gin.H, types []string, keys ...string) {
+	msg := gin.H{"ok": false, "message": "请求异常"}
+	for _, k := range keys {
+		if contains(types, k) {
+			result[k] = gin.H{"_error": msg}
+		}
+	}
+}
+
+// testOTAConfig 对单条 OTA 配置检查 URL 连通性
+func (ac *AdminController) testOTAConfig(cfg models.Config) (ok bool, message string) {
+	if cfg.JsonData == "" {
+		return false, "配置为空"
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(cfg.JsonData), &data); err != nil {
+		return false, "配置解析失败"
+	}
+	var wsURL string
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			if u, _ := ws["url"].(string); u != "" {
+				wsURL = u
+			}
+		}
+	}
+	if wsURL == "" {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				if u, _ := ws["url"].(string); u != "" {
+					wsURL = u
+				}
+			}
+		}
+	}
+	if wsURL == "" {
+		return false, "未配置 WebSocket URL"
+	}
+	// 用 HTTP GET 同 host 做连通性检查（避免真正建 WS）
+	parsed, err := url.Parse(wsURL)
+	if err != nil {
+		return false, "URL 解析失败"
+	}
+	scheme := "http"
+	if parsed.Scheme == "wss" {
+		scheme = "https"
+	}
+	checkURL := scheme + "://" + parsed.Host + "/"
+	req, err := http.NewRequest(http.MethodGet, checkURL, nil)
+	if err != nil {
+		return false, "创建请求失败"
+	}
+	req.Header.Set("Device-ID", "ota-test-device")
+	req.Header.Set("Client-ID", "ota-test-client")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, "连接失败: " + err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 && len(body) > 0 {
+		return true, "连接成功"
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return false, "响应为空"
+	}
+	return false, "HTTP " + strconv.Itoa(resp.StatusCode)
 }
 
 // GetConfigs 获取所有配置列表
@@ -1855,6 +2133,16 @@ func (ac *AdminController) createConfigWithType(c *gin.Context, config *models.C
 	c.JSON(http.StatusCreated, gin.H{"data": *config})
 }
 
+// configUpdateBody 用于 updateConfigWithType，json_data 兼容前端传 string 或 object
+type configUpdateBody struct {
+	Name      string      `json:"name"`
+	ConfigID  string      `json:"config_id"`
+	Provider  string      `json:"provider"`
+	JsonData  interface{} `json:"json_data"`
+	Enabled   bool        `json:"enabled"`
+	IsDefault bool        `json:"is_default"`
+}
+
 func (ac *AdminController) updateConfigWithType(c *gin.Context, configType string) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	var config models.Config
@@ -1864,7 +2152,7 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 		return
 	}
 
-	var updateData models.Config
+	var updateData configUpdateBody
 	if err := c.ShouldBindJSON(&updateData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1878,9 +2166,23 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 	// 更新配置
 	config.Name = updateData.Name
 	config.Provider = updateData.Provider
-	config.JsonData = updateData.JsonData
 	config.Enabled = updateData.Enabled
 	config.IsDefault = updateData.IsDefault
+
+	// json_data：兼容 string 或 object，避免前端传对象时绑定失败
+	switch v := updateData.JsonData.(type) {
+	case string:
+		config.JsonData = v
+	case nil:
+		// 未传则保持原值
+	default:
+		bytes, err := json.Marshal(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "json_data 格式无效"})
+			return
+		}
+		config.JsonData = string(bytes)
+	}
 
 	// 如果提供了新的config_id，则更新它
 	if updateData.ConfigID != "" {
@@ -1888,7 +2190,7 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 	}
 
 	if err := ac.DB.Save(&config).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败: " + err.Error()})
 		return
 	}
 

@@ -190,6 +190,15 @@
             <el-icon><Check /></el-icon>
             保存配置
           </el-button>
+          <el-button
+            type="warning"
+            :loading="otaTesting"
+            size="large"
+            @click="testOtaConfig"
+          >
+            <el-icon><CircleCheck /></el-icon>
+            测试OTA
+          </el-button>
         </div>
       </el-form>
     </div>
@@ -201,12 +210,14 @@ import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
   Setting, Tools, Monitor, Platform, Connection, Message, 
-  Edit, Key, Link, User, Lock, Check, QuestionFilled 
+  Edit, Key, Link, User, Lock, Check, QuestionFilled, CircleCheck 
 } from '@element-plus/icons-vue'
 import api from '@/utils/api'
+import { testSingleConfig } from '@/utils/configTest'
 
 const loading = ref(false)
 const saving = ref(false)
+const otaTesting = ref(false)
 const configId = ref(null)
 const formRef = ref()
 
@@ -372,7 +383,21 @@ const saveConfig = async () => {
   }
 }
 
-
+const testOtaConfig = async () => {
+  otaTesting.value = true
+  try {
+    const result = await testSingleConfig('ota', 'ota_ota_config')
+    if (result.ok) {
+      ElMessage.success('OTA：' + result.message)
+    } else {
+      ElMessage.warning('OTA：' + result.message)
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    otaTesting.value = false
+  }
+}
 
 // 监听provider变化，重置表单为默认值
 watch(() => form.provider, (newProvider) => {
