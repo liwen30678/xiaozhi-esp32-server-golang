@@ -387,8 +387,11 @@ const saveConfig = async () => {
   }
 }
 
-// env: 'test' | 'external'，只测对应环境的 WebSocket 地址（后端优先取 external，无则取 test）
+// env: 'test' | 'external'，测试对应环境的 WebSocket 和 MQTT UDP（如果启用）
 const testOtaEnv = async (env) => {
+  const envConfig = env === 'test' ? form.test : form.external
+  const mqttEnabled = envConfig.mqtt.enable
+
   const payload = {
     signature_key: form.signature_key,
     test: {
@@ -403,13 +406,63 @@ const testOtaEnv = async (env) => {
   const loadingRef = env === 'test' ? otaTestingTest : otaTestingExternal
   loadingRef.value = true
   try {
-    const result = await testWithData('ota', { ota_ota_config: payload })
+    // 直接调用API获取原始响应，包含完整的websocket和mqtt_udp结果
+    const body = { types: ['ota'], data: { ota: { ota_ota_config: payload } } }
+    const res = await api.post('/admin/configs/test', body, { timeout: 30000 })
+    const data = res.data?.data ?? res.data
+    const otaResult = data?.ota?.ota_ota_config
+
     const label = env === 'test' ? 'Test 环境' : 'External 环境'
-    const msg = result.first_packet_ms != null ? `${result.message || ''} ${result.first_packet_ms}ms` : (result.message || '')
-    if (result.ok) {
-      ElMessage.success(`${label}：${msg}`.trim())
+
+    if (!otaResult) {
+      ElMessage.error(`${label}：未返回测试结果`)
+      return
+    }
+
+    // 解析WebSocket结果
+    const wsResult = otaResult.websocket || {}
+    const wsOk = wsResult.ok || false
+    const wsMsg = wsResult.message || 'WebSocket测试失败'
+    const wsMs = wsResult.first_packet_ms
+
+    // 解析MQTT UDP结果
+    const mqttResult = otaResult.mqtt_udp
+    let mqttOk = true
+    let mqttMsg = ''
+    let mqttMs = 0
+
+    if (mqttEnabled && mqttResult) {
+      mqttOk = mqttResult.ok || false
+      mqttMsg = mqttResult.message || 'MQTT UDP测试失败'
+      mqttMs = mqttResult.first_packet_ms || 0
+    } else if (mqttEnabled) {
+      mqttOk = false
+      mqttMsg = 'MQTT UDP未返回结果'
+    }
+
+    // 构建结果显示
+    let message = ''
+    if (wsOk) {
+      message += `WebSocket: ${wsMsg}`
+      if (wsMs != null) message += ` (${wsMs}ms)`
     } else {
-      ElMessage.warning(`${label}：${result.message}`)
+      message += `WebSocket: ${wsMsg}`
+    }
+
+    if (mqttEnabled) {
+      message += ' | '
+      if (mqttOk) {
+        message += `MQTT UDP: ${mqttMsg}`
+        if (mqttMs != null) message += ` (${mqttMs}ms)`
+      } else {
+        message += `MQTT UDP: ${mqttMsg}`
+      }
+    }
+
+    if (wsOk && (!mqttEnabled || mqttOk)) {
+      ElMessage.success(`${label}：${message}`)
+    } else {
+      ElMessage.warning(`${label}：${message}`)
     }
   } catch (err) {
     ElMessage.error(err.response?.data?.error || '测试请求失败')

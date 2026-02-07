@@ -23,6 +23,10 @@ type ChatManager struct {
 	session     *ChatSession
 	ctx         context.Context
 	cancel      context.CancelFunc
+
+	// Close 保护，防止多次关闭
+	closeOnce sync.Once
+	closed    bool
 }
 
 type ChatManagerOption func(*ChatManager)
@@ -144,17 +148,18 @@ func (c *ChatManager) Start() error {
 
 // 主动关闭断开连接
 func (c *ChatManager) Close() error {
-	if c.clientState != nil {
-		log.Infof("主动关闭断开连接, 设备 %s", c.clientState.DeviceID)
-	}
-	// 先关闭会话级别的资源
-	if c.session != nil {
-		c.session.Close()
-	}
+	c.closeOnce.Do(func() {
+		if c.clientState != nil {
+			log.Infof("主动关闭断开连接, 设备 %s", c.clientState.DeviceID)
+		}
+		// 先关闭会话级别的资源
+		if c.session != nil {
+			c.session.Close()
+		}
 
-	// 最后取消管理器级别的上下文
-	c.cancel()
-
+		// 最后取消管理器级别的上下文
+		c.cancel()
+	})
 	return nil
 }
 

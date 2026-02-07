@@ -54,6 +54,10 @@ type ChatSession struct {
 	speakerResultMu      sync.RWMutex
 	pendingSpeakerResult *speaker.IdentifyResult
 	speakerResultReady   chan struct{} // 仅用于通知就绪，不传数据
+
+	// Close 保护，防止多次关闭
+	closeOnce sync.Once
+	closed    bool
 }
 
 type ChatSessionOption func(*ChatSession)
@@ -913,39 +917,41 @@ func (s *ChatSession) DoExitChat() {
 }
 
 func (s *ChatSession) Close() {
-	// 清理ASR资源（资源管理在 ASRManager 内部）
-	if s.asrManager != nil {
-		s.asrManager.Cleanup()
-	}
-	deviceID := ""
-	if s.clientState != nil {
-		deviceID = s.clientState.DeviceID
-	}
-	log.Debugf("ChatSession.Close() 开始清理会话资源, 设备 %s", deviceID)
+	s.closeOnce.Do(func() {
+		// 清理ASR资源（资源管理在 ASRManager 内部）
+		if s.asrManager != nil {
+			s.asrManager.Cleanup()
+		}
+		deviceID := ""
+		if s.clientState != nil {
+			deviceID = s.clientState.DeviceID
+		}
+		log.Debugf("ChatSession.Close() 开始清理会话资源, 设备 %s", deviceID)
 
-	// 停止说话和清理音频相关资源
-	s.StopSpeaking(true)
+		// 停止说话和清理音频相关资源
+		s.StopSpeaking(true)
 
-	// 清理聊天文本队列
-	s.ClearChatTextQueue()
+		// 清理聊天文本队列
+		s.ClearChatTextQueue()
 
-	// 关闭服务端传输
-	if s.serverTransport != nil {
-		s.serverTransport.Close()
-	}
+		// 关闭服务端传输
+		if s.serverTransport != nil {
+			s.serverTransport.Close()
+		}
 
-	// 取消会话级别的上下文
-	s.cancel()
+		// 取消会话级别的上下文
+		s.cancel()
 
-	if s.speakerManager != nil {
-		s.speakerManager.Close()
-	}
+		if s.speakerManager != nil {
+			s.speakerManager.Close()
+		}
 
-	if s.clientState != nil {
-		eventbus.Get().Publish(eventbus.TopicSessionEnd, s.clientState)
-	}
+		if s.clientState != nil {
+			eventbus.Get().Publish(eventbus.TopicSessionEnd, s.clientState)
+		}
 
-	log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", deviceID)
+		log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", deviceID)
+	})
 }
 
 func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResult *speaker.IdentifyResult) error {

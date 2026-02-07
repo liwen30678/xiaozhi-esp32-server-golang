@@ -54,6 +54,10 @@ func (h *AuthHook) OnConnectAuthenticate(cl *mqttServer.Client, pk packets.Packe
 	signatureKey := viper.GetString("mqtt_server.signature_key")
 	if signatureKey != "" {
 		credentialInfo, err := util.ValidateMqttCredentials(clientId, username, password, signatureKey)
+		//log.Infof("MQTT用户验证开始: clientId=%s, username=%s, password=%s, signatureKey=%s",
+		//	clientId, username, password, signatureKey)
+		//log.Infof("MQTT用户验证开始: credentialInfo=%+v", credentialInfo)
+
 		if err != nil {
 			log.Warnf("MQTT凭据验证失败: %v", err)
 			return false

@@ -3,11 +3,16 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +22,7 @@ import (
 
 	"xiaozhi/manager/backend/models"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
@@ -756,8 +762,16 @@ func (ac *AdminController) TestConfigs(c *gin.Context) {
 					continue
 				}
 				cfg := models.Config{ConfigID: configID, JsonData: string(jsonBytes)}
-				ok, msg, ms, otaBody := ac.testOTAConfig(cfg)
-				result["ota"].(gin.H)[configID] = gin.H{"ok": ok, "message": msg, "first_packet_ms": ms, "ota_response": otaBody}
+				otaResult := ac.testOTAConfigWithMQTTUDP(cfg)
+				// 将OTATestResult转换为gin.H格式，保持向后兼容
+				result["ota"].(gin.H)[configID] = gin.H{
+					"ok":              otaResult.WebSocket.Ok && (otaResult.MQTTUDP == nil || otaResult.MQTTUDP.Ok),
+					"message":         otaResult.WebSocket.Message,
+					"first_packet_ms": otaResult.WebSocket.FirstPacketMs,
+					"websocket":       otaResult.WebSocket,
+					"mqtt_udp":        otaResult.MQTTUDP,
+					"ota_response":    otaResult.OTAResponse, // 添加OTA响应体
+				}
 			}
 		} else {
 			q := ac.DB.Where("type = ? AND enabled = ?", "ota", true)
@@ -771,8 +785,16 @@ func (ac *AdminController) TestConfigs(c *gin.Context) {
 				result["ota"] = gin.H{"_none": gin.H{"ok": false, "message": "未配置或未启用OTA"}}
 			} else {
 				for _, cfg := range otaConfigs {
-					ok, msg, ms, otaBody := ac.testOTAConfig(cfg)
-					result["ota"].(gin.H)[cfg.ConfigID] = gin.H{"ok": ok, "message": msg, "first_packet_ms": ms, "ota_response": otaBody}
+					otaResult := ac.testOTAConfigWithMQTTUDP(cfg)
+					// 将OTATestResult转换为gin.H格式，保持向后兼容
+					result["ota"].(gin.H)[cfg.ConfigID] = gin.H{
+						"ok":              otaResult.WebSocket.Ok && (otaResult.MQTTUDP == nil || otaResult.MQTTUDP.Ok),
+						"message":         otaResult.WebSocket.Message,
+						"first_packet_ms": otaResult.WebSocket.FirstPacketMs,
+						"websocket":       otaResult.WebSocket,
+						"mqtt_udp":        otaResult.MQTTUDP,
+						"ota_response":    otaResult.OTAResponse, // 添加OTA响应体
+					}
 				}
 			}
 		}
@@ -966,11 +988,283 @@ func fillResultError(result gin.H, types []string, keys ...string) {
 	}
 }
 
+// OTATestResult OTA测试结果结构
+type OTATestResult struct {
+	WebSocket   OTATestItem `json:"websocket"`
+	MQTTUDP     *OTATestItem `json:"mqtt_udp,omitempty"`
+	OTAResponse string       `json:"ota_response,omitempty"` // OTA接口响应内容
+}
+
+// OTATestItem 单个测试项结果
+type OTATestItem struct {
+	Ok            bool   `json:"ok"`
+	Message       string `json:"message"`
+	FirstPacketMs int64  `json:"first_packet_ms"`
+}
+
+// MQTTUDPTestConfig MQTT UDP测试配置
+type MQTTUDPTestConfig struct {
+	Endpoint       string `json:"endpoint"`
+	ClientID       string `json:"client_id"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	PublishTopic   string `json:"publish_topic"`
+	SubscribeTopic string `json:"subscribe_topic"`
+}
+
+// UDPConfig UDP配置（从hello响应中获取）
+type UDPConfig struct {
+	Server     string `json:"server"`
+	Port       int    `json:"port"`
+	Encryption string `json:"encryption"`
+	Key        string `json:"key"`
+	Nonce      string `json:"nonce"`
+}
+
+// helloMessage MQTT hello消息结构
+type helloMessage struct {
+	Type      string      `json:"type"`
+	Version   int         `json:"version"`
+	Transport string      `json:"transport"`
+	AudioParams interface{} `json:"audio_params,omitempty"`
+}
+
+// helloResponse MQTT hello响应结构（与test/mqtt_udp保持一致）
+type helloResponse struct {
+	Type      string    `json:"type"`
+	SessionID string    `json:"session_id"`
+	Transport string    `json:"transport"`
+	UDP       UDPConfig `json:"udp"`
+	Version   int       `json:"version"`
+	AudioParams struct {
+		Format        string `json:"format"`
+		SampleRate    int    `json:"sample_rate"`
+		Channels      int    `json:"channels"`
+		FrameDuration int    `json:"frame_duration"`
+	} `json:"audio_params"`
+}
+
 const (
 	otaTestDeviceID = "ota-test-device"
 	otaTestClientID = "ota-test-client"
 	otaHTTPPath     = "/xiaozhi/ota/"
 )
+
+// testMQTTUDPConfig 测试MQTT UDP连接
+// 参考 test/mqtt_udp 逻辑：设置默认消息处理器，发送hello，等待响应
+// 返回 ok, message, 耗时(ms)
+func testMQTTUDPConfig(mqttConfig MQTTUDPTestConfig) (bool, string, int64) {
+	t0 := time.Now()
+
+	// 验证MQTT配置完整性
+	if mqttConfig.Endpoint == "" {
+		return false, "MQTT endpoint为空，请检查配置", 0
+	}
+	if mqttConfig.ClientID == "" {
+		return false, "MQTT ClientID为空", 0
+	}
+	if mqttConfig.PublishTopic == "" {
+		return false, "MQTT发布主题为空", 0
+	}
+	// 注意：不需要校验 subscribe_topic，也不需要主动订阅
+
+	// 解析endpoint
+	endpoint := mqttConfig.Endpoint
+	port := "1883"
+	protocol := "tcp"
+	if strings.Contains(endpoint, ":") {
+		parts := strings.Split(endpoint, ":")
+		if len(parts) != 2 {
+			return false, "MQTT endpoint格式错误，应为 host:port", 0
+		}
+		endpoint = parts[0]
+		port = parts[1]
+		// 验证端口号
+		if _, err := strconv.Atoi(port); err != nil {
+			return false, "MQTT端口号无效: " + port, 0
+		}
+	}
+	if port == "8883" || port == "8884" {
+		protocol = "tls"
+	}
+	brokerURL := fmt.Sprintf("%s://%s:%s", protocol, endpoint, port)
+
+	// 等待hello响应的channel
+	helloChan := make(chan *helloResponse, 1)
+	errChan := make(chan error, 1)
+
+	// 创建MQTT客户端选项
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerURL)
+	opts.SetClientID(mqttConfig.ClientID)
+	opts.SetUsername(mqttConfig.Username)
+	opts.SetPassword(mqttConfig.Password)
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetConnectTimeout(5 * time.Second)
+	opts.SetCleanSession(true)
+	opts.SetAutoReconnect(false) // 测试时禁用自动重连
+
+	// 设置默认消息处理器（参考 test/mqtt_udp）
+	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+		// 解析消息
+		var message map[string]interface{}
+		if err := json.Unmarshal(msg.Payload(), &message); err != nil {
+			errChan <- fmt.Errorf("解析消息失败: %v", err)
+			return
+		}
+		// 根据消息类型处理
+		msgType, ok := message["type"].(string)
+		if !ok {
+			return
+		}
+		if msgType == "hello" {
+			var resp helloResponse
+			if err := json.Unmarshal(msg.Payload(), &resp); err != nil {
+				errChan <- fmt.Errorf("解析hello响应失败: %v", err)
+				return
+			}
+			helloChan <- &resp
+		}
+	})
+
+	// 设置TLS配置（如果是SSL/TLS）
+	if protocol == "tls" {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true, // 测试环境跳过证书验证
+		}
+		opts.SetTLSConfig(tlsConfig)
+	}
+
+	// 连接MQTT
+	client := mqtt.NewClient(opts)
+	connectToken := client.Connect()
+	if connectToken.Wait() && connectToken.Error() != nil {
+		errMsg := connectToken.Error().Error()
+		// 提供更详细的错误信息
+		if strings.Contains(errMsg, "connection refused") {
+			return false, fmt.Sprintf("MQTT服务器拒绝连接 (%s:%s)，请检查服务器是否启动", endpoint, port), time.Since(t0).Milliseconds()
+		} else if strings.Contains(errMsg, "i/o timeout") {
+			return false, fmt.Sprintf("MQTT连接超时 (%s:%s)，请检查网络和防火墙", endpoint, port), time.Since(t0).Milliseconds()
+		} else if strings.Contains(errMsg, "authentication") || strings.Contains(errMsg, "not authorized") {
+			return false, "MQTT认证失败，请检查用户名和密码（由签名密钥生成）", time.Since(t0).Milliseconds()
+		}
+		return false, "MQTT连接失败: " + errMsg, time.Since(t0).Milliseconds()
+	}
+	defer client.Disconnect(250)
+
+	mqttConnectMs := time.Since(t0).Milliseconds()
+
+	// 创建hello消息并发送
+	helloMsg := helloMessage{
+		Type:      "hello",
+		Version:   3,
+		Transport: "udp",
+		AudioParams: map[string]interface{}{
+			"format":         "opus",
+			"sample_rate":    16000,
+			"channels":       1,
+			"frame_duration": 60,
+		},
+	}
+	helloData, err := json.Marshal(helloMsg)
+	if err != nil {
+		return false, "构建hello消息失败: " + err.Error(), mqttConnectMs
+	}
+
+	// 发布hello消息（不需要主动订阅，等待默认消息处理器接收响应）
+	pubToken := client.Publish(mqttConfig.PublishTopic, 0, false, helloData)
+	if pubToken.Wait() && pubToken.Error() != nil {
+		return false, "发布hello消息失败 (" + mqttConfig.PublishTopic + "): " + pubToken.Error().Error(), mqttConnectMs
+	}
+
+	// 等待hello响应（超时5秒）
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	select {
+	case resp := <-helloChan:
+		// 收到hello响应，检查UDP配置是否完整
+		if resp.UDP.Server == "" {
+			return false, "服务器未返回UDP server地址", mqttConnectMs
+		}
+		if resp.UDP.Port <= 0 || resp.UDP.Port > 65535 {
+			return false, fmt.Sprintf("服务器返回的UDP端口无效: %d", resp.UDP.Port), mqttConnectMs
+		}
+		// 测试UDP连接
+		udpOK, udpMsg, udpMs := testUDPConnection(resp.UDP)
+		totalMs := mqttConnectMs + udpMs
+		if udpOK {
+			return true, fmt.Sprintf("MQTT(%dms)与UDP(%dms)均正常", mqttConnectMs, udpMs), totalMs
+		} else {
+			return false, "MQTT正常但UDP失败: " + udpMsg, totalMs
+		}
+	case err := <-errChan:
+		return false, err.Error(), mqttConnectMs
+	case <-ctx.Done():
+		return false, fmt.Sprintf("等待hello响应超时(5s)，已发送hello到 %s", mqttConfig.PublishTopic), mqttConnectMs
+	}
+}
+
+// testUDPConnection 测试UDP连接
+func testUDPConnection(udpConfig UDPConfig) (bool, string, int64) {
+	t0 := time.Now()
+
+	// 验证UDP配置
+	if udpConfig.Server == "" {
+		return false, "UDP server地址为空", 0
+	}
+	if udpConfig.Port <= 0 || udpConfig.Port > 65535 {
+		return false, fmt.Sprintf("UDP端口无效: %d", udpConfig.Port), 0
+	}
+
+	// 解析UDP地址
+	udpAddr := fmt.Sprintf("%s:%d", udpConfig.Server, udpConfig.Port)
+	addr, err := net.ResolveUDPAddr("udp", udpAddr)
+	if err != nil {
+		return false, "解析UDP地址失败 (" + udpAddr + "): " + err.Error(), 0
+	}
+
+	// 创建UDP连接
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") {
+			return false, fmt.Sprintf("UDP服务器拒绝连接 (%s)，请检查UDP服务器是否启动", udpAddr), time.Since(t0).Milliseconds()
+		} else if strings.Contains(err.Error(), "no route to host") || strings.Contains(err.Error(), "network is unreachable") {
+			return false, fmt.Sprintf("无法路由到UDP服务器 (%s)，请检查网络连接", udpAddr), time.Since(t0).Milliseconds()
+		} else if strings.Contains(err.Error(), "timeout") {
+			return false, fmt.Sprintf("UDP连接超时 (%s)，请检查防火墙设置", udpAddr), time.Since(t0).Milliseconds()
+		}
+		return false, "UDP连接失败 (" + udpAddr + "): " + err.Error(), time.Since(t0).Milliseconds()
+	}
+	defer conn.Close()
+
+	// 设置读写超时
+	deadline := time.Now().Add(2 * time.Second)
+	err = conn.SetReadDeadline(deadline)
+	if err != nil {
+		return false, "设置UDP超时失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	// 发送测试数据包（模拟音频数据）
+	testData := []byte("ping")
+	_, err = conn.Write(testData)
+	if err != nil {
+		return false, "UDP发送数据失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	// 尝试读取响应（超时返回也认为连接成功，因为UDP可能不返回响应）
+	buf := make([]byte, 1024)
+	_, err = conn.Read(buf)
+	if err != nil {
+		// UDP读取超时也算成功，因为已经证明连接可以发送数据
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return true, "UDP连接正常（无响应，超时）", time.Since(t0).Milliseconds()
+		}
+		return false, "UDP读取失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	return true, "UDP连接正常", time.Since(t0).Milliseconds()
+}
 
 // testOTAConfig 两段式检查：1）POST OTA 地址取 JSON 中的 websocket.url；2）对 WebSocket URL 建连验证。
 // 返回 ok, message, first_packet_ms, ota_response（OTA 接口响应 body，便于前端展示）
@@ -1058,7 +1352,214 @@ func (ac *AdminController) testOTAConfig(cfg models.Config) (ok bool, message st
 		return false, "WebSocket 连接失败: " + err.Error(), firstPacketMs + time.Since(wsT0).Milliseconds(), otaResponseBody
 	}
 	conn.Close()
-	return true, "OTA 与 WebSocket 均正常", firstPacketMs + time.Since(wsT0).Milliseconds(), otaResponseBody
+	wsTotalMs := firstPacketMs + time.Since(wsT0).Milliseconds()
+	return true, "OTA 与 WebSocket 均正常", wsTotalMs, otaResponseBody
+}
+
+// testOTAConfigWithMQTTUDP 扩展的OTA测试，支持WebSocket和MQTT UDP双测试
+// 返回完整的测试结果结构
+func (ac *AdminController) testOTAConfigWithMQTTUDP(cfg models.Config) OTATestResult {
+	result := OTATestResult{
+		WebSocket: OTATestItem{Ok: false, Message: "测试失败", FirstPacketMs: 0},
+	}
+
+	// 解析配置
+	if cfg.JsonData == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "配置为空", FirstPacketMs: 0}
+		return result
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(cfg.JsonData), &data); err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "配置解析失败", FirstPacketMs: 0}
+		return result
+	}
+
+	// 获取WebSocket URL（优先external，为空则尝试test）
+	wsURLFromConfig := ""
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			wsURLFromConfig, _ = ws["url"].(string)
+		}
+	}
+	if wsURLFromConfig == "" {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				wsURLFromConfig, _ = ws["url"].(string)
+			}
+		}
+	}
+	if wsURLFromConfig == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "未配置 WebSocket URL", FirstPacketMs: 0}
+		return result
+	}
+
+	// 确定使用哪个环境的配置（根据WebSocket URL来源）
+	var envConfig map[string]interface{}
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			if url, _ := ws["url"].(string); url == wsURLFromConfig && url != "" {
+				envConfig = ext
+			}
+		}
+	}
+	if envConfig == nil {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				if url, _ := ws["url"].(string); url == wsURLFromConfig {
+					envConfig = test
+				}
+			}
+		}
+	}
+
+	// 检查是否启用MQTT UDP测试
+	var mqttEnabled bool
+	if envConfig != nil {
+		if mqtt, _ := envConfig["mqtt"].(map[string]interface{}); mqtt != nil {
+			if enable, ok := mqtt["enable"].(bool); ok && enable {
+				mqttEnabled = true
+			}
+		}
+	}
+
+	// 构建OTA HTTP URL
+	parsed, err := url.Parse(wsURLFromConfig)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "URL 解析失败", FirstPacketMs: 0}
+		return result
+	}
+	scheme := "http"
+	if parsed.Scheme == "wss" {
+		scheme = "https"
+	}
+	otaHTTPURL := scheme + "://" + parsed.Host + otaHTTPPath
+
+	// 第一阶段：POST OTA HTTP接口
+	t0 := time.Now()
+	req, err := http.NewRequest(http.MethodPost, otaHTTPURL, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "创建 OTA 请求失败", FirstPacketMs: time.Since(t0).Milliseconds()}
+		return result
+	}
+	req.Header.Set("Device-ID", otaTestDeviceID)
+	req.Header.Set("Client-ID", otaTestClientID)
+	req.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 请求失败: " + err.Error(), FirstPacketMs: time.Since(t0).Milliseconds()}
+		return result
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	httpMs := time.Since(t0).Milliseconds()
+
+	if resp.StatusCode != http.StatusOK {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 返回 HTTP " + strconv.Itoa(resp.StatusCode), FirstPacketMs: httpMs}
+		return result
+	}
+
+	var otaResp map[string]interface{}
+	if err := json.Unmarshal(body, &otaResp); err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应非 JSON", FirstPacketMs: httpMs}
+		return result
+	}
+
+	// 第二阶段：WebSocket测试
+	wsObj, _ := otaResp["websocket"].(map[string]interface{})
+	if wsObj == nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应中无 websocket 字段", FirstPacketMs: httpMs}
+		return result
+	}
+	wsURL, _ := wsObj["url"].(string)
+	if wsURL == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应中无 websocket.url", FirstPacketMs: httpMs}
+		return result
+	}
+
+	wsT0 := time.Now()
+	header := http.Header{}
+	header.Set("Device-ID", otaTestDeviceID)
+	header.Set("Client-ID", otaTestClientID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "WebSocket 连接失败: " + err.Error(), FirstPacketMs: httpMs + time.Since(wsT0).Milliseconds()}
+		return result
+	}
+	conn.Close()
+	wsTotalMs := httpMs + time.Since(wsT0).Milliseconds()
+	result.WebSocket = OTATestItem{Ok: true, Message: "WebSocket 连接正常", FirstPacketMs: wsTotalMs}
+
+	// 保存OTA响应体（用于前端显示）
+	result.OTAResponse = string(body)
+
+	// 第三阶段：MQTT UDP测试（如果启用）
+	// 参考 test/mqtt_udp 逻辑：从OTA响应获取MQTT配置，发送hello，等待响应，测试UDP
+	if mqttEnabled {
+		// 从OTA响应中获取MQTT配置
+		mqttObj, hasMQTT := otaResp["mqtt"].(map[string]interface{})
+		if !hasMQTT {
+			result.MQTTUDP = &OTATestItem{
+				Ok:            false,
+				Message:       "OTA响应未返回MQTT配置，无法测试MQTT UDP",
+				FirstPacketMs: 0,
+			}
+			return result
+		}
+
+		// 解析MQTT配置字段
+		endpoint, _ := mqttObj["endpoint"].(string)
+		clientID, _ := mqttObj["client_id"].(string)
+		username, _ := mqttObj["username"].(string)
+		password, _ := mqttObj["password"].(string)
+		publishTopic, _ := mqttObj["publish_topic"].(string)
+		subscribeTopic, _ := mqttObj["subscribe_topic"].(string)
+
+		// 验证必要字段（不需要校验 subscribe_topic）
+		if endpoint == "" {
+			result.MQTTUDP = &OTATestItem{Ok: false, Message: "OTA响应中MQTT endpoint为空", FirstPacketMs: 0}
+			return result
+		}
+		if publishTopic == "" {
+			result.MQTTUDP = &OTATestItem{Ok: false, Message: "OTA响应中MQTT publish_topic为空", FirstPacketMs: 0}
+			return result
+		}
+
+		// 构建MQTT测试配置
+		otaMqttConfig := &MQTTUDPTestConfig{
+			Endpoint:       endpoint,
+			ClientID:       clientID,
+			Username:       username,
+			Password:       password,
+			PublishTopic:   publishTopic,
+			SubscribeTopic: subscribeTopic, // 保留但不校验，可能用于日志
+		}
+
+		mqttOK, mqttMsg, mqttMs := testMQTTUDPConfig(*otaMqttConfig)
+		result.MQTTUDP = &OTATestItem{
+			Ok:            mqttOK,
+			Message:       mqttMsg,
+			FirstPacketMs: mqttMs,
+		}
+	}
+
+	return result
+}
+
+// generateMQTTUsername 生成MQTT用户名
+func generateMQTTUsername(deviceID, signatureKey string) string {
+	h := hmac.New(sha256.New, []byte(signatureKey))
+	h.Write([]byte(deviceID + "-username"))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// generateMQTTPassword 生成MQTT密码
+func generateMQTTPassword(deviceID, signatureKey string) string {
+	h := hmac.New(sha256.New, []byte(signatureKey))
+	h.Write([]byte(deviceID + "-password"))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // GetConfigs 获取所有配置列表

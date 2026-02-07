@@ -302,36 +302,54 @@ async function loadServiceAddress() {
     const config = otaList.find(c => c.is_default) || otaList[0]
     if (config?.json_data) {
       const data = JSON.parse(config.json_data || '{}')
-      const wsUrl = data.external?.websocket?.url || data.test?.websocket?.url || ''
-      if (wsUrl) {
-        const m = wsUrl.match(/^(wss?):\/\/([^:/]+):?(\d+)?/)
-        if (m) {
-          const proto = m[1] === 'wss' ? 'https' : 'http'
-          const port = m[3] || (m[1] === 'wss' ? '443' : '80')
-          serviceAddress.value.otaUrl = `${proto}://${m[2]}:${port}`
-        }
-        serviceAddress.value.wsUrl = wsUrl
+      console.log('[Dashboard] OTA配置数据:', data)
+
+      // 选择环境配置：优先 external，如果为空则使用 test
+      let envData = data.external || {}
+      const hasExternalWs = envData.websocket?.url
+      const hasExternalOta = envData.ota_url
+      if (!hasExternalWs && !hasExternalOta) {
+        envData = data.test || {}
       }
-      const mqttEnabled = data.external?.mqtt?.enable || data.test?.mqtt?.enable
-      const endpoint = data.external?.mqtt?.endpoint || data.test?.mqtt?.endpoint || ''
+
+      // OTA URL：优先使用配置中的 ota_url，没有则从 websocket.url 解析
+      let otaUrl = envData.ota_url || ''
+      if (!otaUrl) {
+        const wsUrl = envData.websocket?.url || ''
+        if (wsUrl) {
+          const m = wsUrl.match(/^(wss?):\/\/([^:/]+)(?::(\d+))?/)
+          if (m) {
+            const proto = m[1] === 'wss' ? 'https' : 'http'
+            const port = m[3] || (m[1] === 'wss' ? '443' : '80')
+            otaUrl = `${proto}://${m[2]}:${port}/xiaozhi/ota/`
+          }
+        }
+      }
+      serviceAddress.value.otaUrl = otaUrl
+
+      // WebSocket URL
+      serviceAddress.value.wsUrl = envData.websocket?.url || ''
+
+      // MQTT endpoint
+      const mqttEnabled = envData.mqtt?.enable
+      const endpoint = envData.mqtt?.endpoint || ''
       if (mqttEnabled && endpoint) {
         serviceAddress.value.mqttEndpoint = endpoint
       }
     }
-    if (serviceAddress.value.mqttEndpoint) {
-      const udpList = udpRes.data?.data || []
-      const udpConfig = udpList.find(c => c.is_default) || udpList[0]
-      if (udpConfig?.json_data) {
-        const udpData = JSON.parse(udpConfig.json_data || '{}')
-        const host = udpData.external_host || ''
-        const port = udpData.external_port
-        if (host && port != null) {
-          serviceAddress.value.udpAddress = `${host}:${port}`
-        }
+    // UDP address
+    const udpList = udpRes.data?.data || []
+    const udpConfig = udpList.find(c => c.is_default) || udpList[0]
+    if (udpConfig?.json_data) {
+      const udpData = JSON.parse(udpConfig.json_data || '{}')
+      const host = udpData.external_host || ''
+      const port = udpData.external_port
+      if (host && port != null) {
+        serviceAddress.value.udpAddress = `${host}:${port}`
       }
     }
-  } catch (_) {
-    // 忽略错误，保持空
+  } catch (err) {
+    console.error('加载服务地址失败:', err)
   } finally {
     addressLoading.value = false
   }
@@ -372,13 +390,46 @@ async function runOtaTest() {
       const entry = Object.entries(ota).find(([k]) => !k.startsWith('_'))
       if (entry) {
         const [, v] = entry
-        if (v?.ota_response !== undefined && v.ota_response !== '') {
-          otaTestResult.value = formatOtaResponseDisplay(v.ota_response)
-        } else {
-          otaTestResult.value = '未获取到 OTA 接口响应'
+
+        // 格式化显示结果
+        let displayText = ''
+
+        // WebSocket 结果
+        if (v.websocket) {
+          const ws = v.websocket
+          displayText += `WebSocket: ${ws.ok ? '✓' : '✗'} ${ws.message}`
+          if (ws.first_packet_ms != null) {
+            displayText += ` (${ws.first_packet_ms}ms)\n`
+          } else {
+            displayText += '\n'
+          }
         }
-        if (v?.ok) ElMessage.success(v.message || 'OTA 测试通过')
-        else ElMessage.warning(v?.message || 'OTA 测试未通过')
+
+        // MQTT UDP 结果
+        if (v.mqtt_udp) {
+          const mqtt = v.mqtt_udp
+          displayText += `MQTT UDP: ${mqtt.ok ? '✓' : '✗'} ${mqtt.message}`
+          if (mqtt.first_packet_ms != null) {
+            displayText += ` (${mqtt.first_packet_ms}ms)\n`
+          } else {
+            displayText += '\n'
+          }
+        }
+
+        // OTA 响应内容（如果有）
+        if (v.ota_response !== undefined && v.ota_response !== '') {
+          displayText += `\n--- OTA 响应 ---\n${formatOtaResponseDisplay(v.ota_response)}`
+        }
+
+        otaTestResult.value = displayText.trim() || '未获取到详细信息'
+
+        // 根据整体结果显示消息
+        const overallOk = v.ok
+        if (overallOk) {
+          ElMessage.success(v.message || 'OTA 测试通过')
+        } else {
+          ElMessage.warning(v.message || 'OTA 测试未通过')
+        }
       } else {
         otaTestResult.value = '未获取到 OTA 测试结果'
       }
@@ -386,9 +437,10 @@ async function runOtaTest() {
       otaTestResult.value = typeof data === 'string' ? data : JSON.stringify(data || {}, null, 2)
     }
   } catch (e) {
-    otaTestResult.value = (e.response?.data && typeof e.response.data === 'object')
+    const errorMsg = (e.response?.data && typeof e.response.data === 'object')
       ? JSON.stringify(e.response.data, null, 2)
       : (e.response?.data?.message || e.message || '请求失败')
+    otaTestResult.value = errorMsg
     ElMessage.error('OTA 测试请求失败')
   } finally {
     otaTestLoading.value = false

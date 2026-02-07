@@ -953,13 +953,46 @@ async function runOtaTest() {
       const entry = Object.entries(ota).find(([k]) => !k.startsWith('_'))
       if (entry) {
         const [, v] = entry
-        if (v?.ota_response !== undefined && v.ota_response !== '') {
-          otaTestResult.value = formatOtaResponseDisplay(v.ota_response)
-        } else {
-          otaTestResult.value = '未获取到 OTA 接口响应'
+
+        // 格式化显示结果
+        let displayText = ''
+
+        // WebSocket 结果
+        if (v.websocket) {
+          const ws = v.websocket
+          displayText += `WebSocket: ${ws.ok ? '✓' : '✗'} ${ws.message}`
+          if (ws.first_packet_ms != null) {
+            displayText += ` (${ws.first_packet_ms}ms)\n`
+          } else {
+            displayText += '\n'
+          }
         }
-        if (v?.ok) ElMessage.success(v.message || 'OTA 测试通过')
-        else ElMessage.warning(v?.message || 'OTA 测试未通过')
+
+        // MQTT UDP 结果
+        if (v.mqtt_udp) {
+          const mqtt = v.mqtt_udp
+          displayText += `MQTT UDP: ${mqtt.ok ? '✓' : '✗'} ${mqtt.message}`
+          if (mqtt.first_packet_ms != null) {
+            displayText += ` (${mqtt.first_packet_ms}ms)\n`
+          } else {
+            displayText += '\n'
+          }
+        }
+
+        // OTA 响应内容（如果有）
+        if (v.ota_response !== undefined && v.ota_response !== '') {
+          displayText += `\n--- OTA 响应 ---\n${formatOtaResponseDisplay(v.ota_response)}`
+        }
+
+        otaTestResult.value = displayText.trim() || '未获取到详细信息'
+
+        // 根据整体结果显示消息
+        const overallOk = v.ok
+        if (overallOk) {
+          ElMessage.success(v.message || 'OTA 测试通过')
+        } else {
+          ElMessage.warning(v.message || 'OTA 测试未通过')
+        }
       } else {
         otaTestResult.value = '未获取到 OTA 测试结果'
       }
@@ -967,9 +1000,10 @@ async function runOtaTest() {
       otaTestResult.value = typeof data === 'string' ? data : JSON.stringify(data || {}, null, 2)
     }
   } catch (e) {
-    otaTestResult.value = (e.response?.data && typeof e.response.data === 'object')
+    const errorMsg = (e.response?.data && typeof e.response.data === 'object')
       ? JSON.stringify(e.response.data, null, 2)
       : (e.response?.data?.message || e.message || '请求失败')
+    otaTestResult.value = errorMsg
     ElMessage.error('OTA 测试请求失败')
   } finally {
     otaTestLoading.value = false
