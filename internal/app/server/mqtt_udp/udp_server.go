@@ -69,12 +69,36 @@ func (s *UdpServer) Start() error {
 	return nil
 }
 
+// Close 关闭 UDP 服务器，使 handlePackets 退出
+func (s *UdpServer) Close() error {
+	s.Lock()
+	conn := s.conn
+	s.conn = nil
+	s.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
+}
+
 // handlePackets 处理接收到的数据包
 func (s *UdpServer) handlePackets() {
 	buffer := make([]byte, 4096) // 使用默认的缓冲区大小
 	for {
-		n, addr, err := s.conn.ReadFromUDP(buffer)
+		s.RLock()
+		conn := s.conn
+		s.RUnlock()
+		if conn == nil {
+			return
+		}
+		n, addr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
+			s.RLock()
+			closed := s.conn == nil
+			s.RUnlock()
+			if closed {
+				return
+			}
 			Errorf("读取UDP数据失败: %v", err)
 			continue
 		}

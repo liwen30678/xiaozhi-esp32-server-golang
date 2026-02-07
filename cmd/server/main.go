@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 	"xiaozhi-esp32-server-golang/internal/app/server"
+	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	log "xiaozhi-esp32-server-golang/logger"
 
 	"github.com/spf13/viper"
@@ -56,6 +58,61 @@ func main() {
 
 	// 创建服务器
 	appInstance := server.NewApp()
+	// 注册 system_config 热更：用 viper 当前配置与推送配置对比，仅当内容变更时合并并触发热更
+	user_config.RegisterManagerSystemConfigHandler(func(data map[string]interface{}) {
+		current := viper.AllSettings()
+		oldMqttServer := current["mqtt_server"]
+		oldMqtt := current["mqtt"]
+		oldUdp := current["udp"]
+		oldMcp := current["mcp"]
+		oldLocalMcp := current["local_mcp"]
+
+		var doMqttServer, doMqttUdp, doMcpReload bool
+		if data["mqtt_server"] != nil {
+
+			if !SystemConfigEqual(data["mqtt_server"], oldMqttServer) {
+				doMqttServer = true
+			}
+		}
+		if data["mqtt"] != nil {
+			if !SystemConfigEqual(data["mqtt"], oldMqtt) {
+				doMqttUdp = true
+			}
+		}
+		if data["udp"] != nil {
+			if !SystemConfigEqual(data["udp"], oldUdp) {
+				doMqttUdp = true
+			}
+		}
+		if data["mcp"] != nil {
+			if !SystemConfigEqual(data["mcp"], oldMcp) {
+				doMcpReload = true
+			}
+		}
+		if data["local_mcp"] != nil {
+			oldJS, _ := json.Marshal(oldLocalMcp)
+			newJS, _ := json.Marshal(data["local_mcp"])
+			log.Debugf("[local_mcp] 当前配置: %s", string(oldJS))
+			log.Debugf("[local_mcp] 新推送配置: %s", string(newJS))
+			if !SystemConfigEqual(data["local_mcp"], oldLocalMcp) {
+				doMcpReload = true
+			}
+		}
+
+		log.Debugf("before mqtt server : %+v", viper.Get("mqtt_server"))
+		ApplySystemConfigToViper(data)
+		log.Debugf("after mqtt server: %+v", viper.Get("mqtt_server"))
+
+		if doMqttServer {
+			go appInstance.ReloadMqttServer()
+		}
+		if doMqttUdp {
+			go appInstance.ReloadMqttUdp()
+		}
+		if doMcpReload {
+			go appInstance.ReloadMCP()
+		}
+	})
 	appInstance.Run()
 
 	// 阻塞监听退出信号

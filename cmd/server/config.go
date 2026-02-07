@@ -16,6 +16,7 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
+	"github.com/mitchellh/hashstructure/v2"
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/spf13/viper"
@@ -41,8 +42,8 @@ func Init(configFile string) error {
 	initLog()
 
 	// 初始化配置系统（包括WebSocket连接）
+	// 注意：不要在此处单独注册 ApplySystemConfigToViper，否则会先于 main 的回调执行，导致 main 里读取的「当前配置」已是合并后的新配置；合并应在 main 的回调中、在读取 current 并比较之后再执行。
 	ctx := context.Background()
-	user_config.RegisterManagerSystemConfigHandler(ApplySystemConfigToViper)
 	if err := user_config.InitConfigSystem(ctx); err != nil {
 		fmt.Printf("初始化配置系统失败: %v\n", err)
 	}
@@ -141,6 +142,27 @@ func ApplySystemConfigToViper(data map[string]interface{}) {
 		return
 	}
 	log.Info("已从 WebSocket 推送合并系统配置到 viper")
+}
+
+// SystemConfigEqual 比较两段系统配置是否语义相同（使用 hashstructure 指纹，与 map key 顺序无关）
+func SystemConfigEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		log.Debugf("[SystemConfigEqual] 结果: true (均为 nil)")
+		return true
+	}
+	if a == nil || b == nil {
+		log.Debugf("[SystemConfigEqual] 结果: false (一方为 nil)")
+		return false
+	}
+	ha, err1 := hashstructure.Hash(a, hashstructure.FormatV2, nil)
+	hb, err2 := hashstructure.Hash(b, hashstructure.FormatV2, nil)
+	if err1 != nil || err2 != nil {
+		log.Debugf("[SystemConfigEqual] 结果: false (Hash 失败 err1=%v err2=%v)", err1, err2)
+		return false
+	}
+	equal := ha == hb
+	log.Debugf("[SystemConfigEqual] 结果: %t (ha=%d hb=%d)", equal, ha, hb)
+	return equal
 }
 
 // updateConfigFromAPI 从接口获取配置并更新viper配置

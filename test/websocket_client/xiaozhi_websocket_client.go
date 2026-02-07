@@ -528,17 +528,7 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 		"instruct_text":  "你好",
 	}
 	_ = cosyVoiceConfig
-	/**
-		    "edge": {
-	      "voice": "zh-CN-XiaoxiaoNeural",
-	      "rate": "+0%",
-	      "volume": "+0%",
-	      "pitch": "+0Hz",
-	      "connect_timeout": 10,
-	      "receive_timeout": 60
-	    }
-	*/
-	/*edgeConfig := map[string]interface{}{
+	edgeConfig := map[string]interface{}{
 		"voice":           "zh-CN-XiaoxiaoNeural",
 		"rate":            "+0%",
 		"volume":          "+0%",
@@ -546,16 +536,22 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 		"connect_timeout": 10,
 		"receive_timeout": 60,
 	}
+	edgeOfflineConfig := map[string]interface{}{
+		"server_url":        "ws://192.168.208.214:8081/tts",
+		"timeout":           30.0,
+		"handshake_timeout": 10.0,
+	}
 	_ = edgeConfig
-	//调用tts服务生成语音
-	ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
-	if err != nil {
-		return fmt.Errorf("获取tts服务失败: %v", err)
-	}*/
-	ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	_ = edgeOfflineConfig
+	//调用tts服务生成语音（可改为 "edge_offline", edgeOfflineConfig 使用本地 TTS 服务）
+	ttsProvider, err := tts.GetTTSProvider("edge_offline", edgeOfflineConfig)
 	if err != nil {
 		return fmt.Errorf("获取tts服务失败: %v", err)
 	}
+	/*ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	if err != nil {
+		return fmt.Errorf("获取tts服务失败: %v", err)
+	}*/
 
 	/*
 		audioData, err := ttsProvider.TextToSpeech(context.Background(), "你叫什么名字?")

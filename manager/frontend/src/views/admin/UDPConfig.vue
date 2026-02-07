@@ -44,10 +44,6 @@
           </template>
           
           <div class="form-grid basic-form-grid">
-            <el-form-item label="是否启用" prop="enabled" class="form-item">
-              <el-switch v-model="form.enabled" />
-            </el-form-item>
-            
             <el-form-item label="监听主机" prop="listen_host" class="form-item">
               <el-input v-model="form.listen_host" placeholder="请输入监听主机地址" />
             </el-form-item>
@@ -114,7 +110,6 @@ const formRef = ref(null)
 const form = ref({
   name: 'UDP配置',
   is_default: true,
-  enabled: true,
   external_host: '192.168.0.208',
   external_port: 8990,
   listen_host: '0.0.0.0',
@@ -123,7 +118,6 @@ const form = ref({
 
 const generateConfig = () => {
   return JSON.stringify({
-    enabled: form.enabled,
     external_host: form.external_host,
     external_port: form.external_port,
     listen_host: form.listen_host,
@@ -165,7 +159,6 @@ const loadConfig = async () => {
       form.value = {
         name: config.name,
         is_default: config.is_default,
-        enabled: configData.enabled !== undefined ? configData.enabled : true,
         external_host: configData.external_host || '192.168.0.208',
         external_port: configData.external_port || 8990,
         listen_host: configData.listen_host || '0.0.0.0',
@@ -193,7 +186,6 @@ const handleSave = async () => {
   
   try {
     const configData = {
-      enabled: form.value.enabled,
       external_host: form.value.external_host,
       external_port: form.value.external_port,
       listen_host: form.value.listen_host,

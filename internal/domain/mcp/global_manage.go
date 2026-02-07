@@ -86,6 +86,15 @@ func GetGlobalMCPManager() *GlobalMCPManager {
 
 // Start 启动全局MCP管理器
 func (g *GlobalMCPManager) Start() error {
+	// 热更场景：Stop 后 ctx 已取消，需重建以便重启后监控与重连正常
+	if g.ctx != nil && g.ctx.Err() != nil {
+		g.ctx, g.cancel = context.WithCancel(context.Background())
+		g.reconnectConf = ReconnectConfig{
+			Interval:    time.Duration(viper.GetInt("mcp.global.reconnect_interval")) * time.Second,
+			MaxAttempts: viper.GetInt("mcp.global.max_reconnect_attempts"),
+		}
+	}
+
 	// 首先检查配置
 	CheckMCPConfig()
 

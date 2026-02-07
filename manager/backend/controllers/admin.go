@@ -270,58 +270,57 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 		configsByType[config.Type] = append(configsByType[config.Type], config)
 	}
 
-	// 为每种类型选择最佳配置并解析json_data
-	selectAndParseConfig := func(configs []models.Config) interface{} {
-		var selectedConfig models.Config
-		// 优先选择默认配置
-		for _, config := range configs {
-			if config.IsDefault {
-				selectedConfig = config
-				break
+	// 从 configs 中选出“当前使用”的一条：默认配置优先，否则第一条
+	getSelectedConfig := func(configs []models.Config) *models.Config {
+		if len(configs) == 0 {
+			return nil
+		}
+		for i := range configs {
+			if configs[i].IsDefault {
+				return &configs[i]
 			}
 		}
+		return &configs[0]
+	}
 
-		// 如果没有默认配置，选择第一个配置
-		if selectedConfig.ID == 0 {
-			selectedConfig = configs[0]
+	// 为每种类型选择最佳配置并解析json_data
+	selectAndParseConfig := func(configs []models.Config) interface{} {
+		selected := getSelectedConfig(configs)
+		if selected == nil {
+			return nil
 		}
 
 		// 解析json_data
-		if selectedConfig.JsonData != "" {
+		if selected.JsonData != "" {
 			var parsedData interface{}
-			if err := json.Unmarshal([]byte(selectedConfig.JsonData), &parsedData); err != nil {
-				// 如果解析失败，返回原始json_data字符串
+			if err := json.Unmarshal([]byte(selected.JsonData), &parsedData); err != nil {
 				result := gin.H{
-					"name": selectedConfig.Name,
-					"type": selectedConfig.Type,
-					"data": selectedConfig.JsonData,
+					"name": selected.Name,
+					"type": selected.Type,
+					"data": selected.JsonData,
 				}
 				return result
 			}
 
-			// 将解析后的数据包装在正确的格式中
 			result := gin.H{
-				"name": selectedConfig.Name,
-				"type": selectedConfig.Type,
+				"name": selected.Name,
+				"type": selected.Type,
 			}
 			if parsedData != nil {
-				// 如果解析的数据是map类型，直接合并
 				if dataMap, ok := parsedData.(map[string]interface{}); ok {
 					for k, v := range dataMap {
 						result[k] = v
 					}
 				} else {
-					// 否则作为data字段
 					result["data"] = parsedData
 				}
 			}
 			return result
 		}
 
-		// 如果没有json_data，返回基本配置信息
 		return gin.H{
-			"name": selectedConfig.Name,
-			"type": selectedConfig.Type,
+			"name": selected.Name,
+			"type": selected.Type,
 		}
 	}
 
@@ -410,15 +409,23 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 		return result, nil
 	}
 
-	// 构建响应数据
+	// 构建响应数据。DB 的 enabled 列仅用于 vad/asr/llm/tts 等列表项的开关；mqtt/mqtt_server 的业务启用由 json_data 中的 enable 表示，不再用 DB 列覆盖
 	response := gin.H{}
 
-	// 只有当配置存在时才添加到响应中
 	if configs, exists := configsByType["mqtt"]; exists && len(configs) > 0 {
-		response["mqtt"] = selectAndParseConfig(configs)
+		data := selectAndParseConfig(configs)
+		/*if b, err := json.Marshal(data); err == nil {
+			log.Printf("[getSystemConfigsData] mqtt 配置: %s", string(b))
+		}*/
+		response["mqtt"] = data
+
 	}
 	if configs, exists := configsByType["mqtt_server"]; exists && len(configs) > 0 {
-		response["mqtt_server"] = selectAndParseConfig(configs)
+		data := selectAndParseConfig(configs)
+		if b, err := json.Marshal(data); err == nil {
+			log.Printf("[getSystemConfigsData] mqtt_server 配置: %s", string(b))
+		}
+		response["mqtt_server"] = data
 	}
 	if configs, exists := configsByType["udp"]; exists && len(configs) > 0 {
 		response["udp"] = selectAndParseConfig(configs)
@@ -443,46 +450,30 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 		response["local_mcp"] = selectAndParseConfig(configs)
 	}
 
-	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold 和 enabled）
-	// 优先使用环境变量 SPEAKER_SERVICE_URL，如果未定义则从数据库配置获取
+	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold、enable）
+	// 业务启用由 json_data 中的 enable 表示；DB 的 enabled 列仅作列表项开关，不覆盖业务 enable
 	baseURL := os.Getenv("SPEAKER_SERVICE_URL")
 	enabled := true  // 默认启用
 	threshold := 0.4 // 默认阈值
 
-	// 从数据库配置获取 base_url、threshold 和 enabled 状态
 	if configs, exists := configsByType["voice_identify"]; exists && len(configs) > 0 {
-		var selectedConfig models.Config
-		// 优先选择默认配置
-		for _, config := range configs {
-			if config.IsDefault {
-				selectedConfig = config
-				break
-			}
-		}
-		// 如果没有默认配置，选择第一个配置
-		if selectedConfig.ID == 0 {
-			selectedConfig = configs[0]
-		}
-
-		// 获取 enabled 状态
-		enabled = selectedConfig.Enabled
-
-		// 如果环境变量未定义，从数据库配置获取 base_url 和 threshold
-		if selectedConfig.JsonData != "" {
+		selected := getSelectedConfig(configs)
+		if selected != nil && selected.JsonData != "" {
 			var configData map[string]interface{}
-			if err := json.Unmarshal([]byte(selectedConfig.JsonData), &configData); err == nil {
-				// 从 service.base_url 提取 base_url，与控制台配置结构一致
+			if err := json.Unmarshal([]byte(selected.JsonData), &configData); err == nil {
+				// 业务 enable 优先从 json_data 读取
+				if v, ok := configData["enable"]; ok {
+					if b, ok := v.(bool); ok {
+						enabled = b
+					}
+				}
 				if service, ok := configData["service"].(map[string]interface{}); ok {
 					if url, ok := service["base_url"].(string); ok && url != "" && baseURL == "" {
 						baseURL = url
 					}
-					// 读取阈值配置
 					if thresholdVal, ok := service["threshold"]; ok {
-						if thresholdFloat, ok := thresholdVal.(float64); ok {
-							// 验证阈值范围
-							if thresholdFloat >= 0 && thresholdFloat <= 1 {
-								threshold = thresholdFloat
-							}
+						if thresholdFloat, ok := thresholdVal.(float64); ok && thresholdFloat >= 0 && thresholdFloat <= 1 {
+							threshold = thresholdFloat
 						}
 					}
 				}
@@ -661,6 +652,7 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	}
 
 	// 处理 Vision 配置：vision_base 为顶层字段，其余为 vision.vllm[config_id]
+	// config.Enabled 此处仅作列表项开关（该条配置是否纳入返回），业务相关字段来自 json_data
 	if visionConfigs, exists := configsByType["vision"]; exists && len(visionConfigs) > 0 {
 		visionMap := make(gin.H)
 		for _, config := range visionConfigs {
@@ -705,18 +697,16 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
-// notifySystemConfigChanged 配置变更后通过 WebSocket 异步推送系统配置，不阻塞请求
+// notifySystemConfigChanged 在 Save 成功后调用：先同步拉取最新配置，再异步推送，保证推送的是保存后的数据
 func (ac *AdminController) notifySystemConfigChanged() {
 	if ac.WebSocketController == nil {
 		return
 	}
-	go func() {
-		data, err := ac.getSystemConfigsData()
-		if err != nil {
-			return
-		}
-		ac.WebSocketController.BroadcastSystemConfig(data)
-	}()
+	data, err := ac.getSystemConfigsData()
+	if err != nil {
+		return
+	}
+	go ac.WebSocketController.BroadcastSystemConfig(data)
 }
 
 // TestConfigs 一键测试配置：OTA 在 manager 内测，VAD/ASR/LLM/TTS 经 WebSocket 发主程序测，结果按 config_id 对应
@@ -3035,7 +3025,7 @@ func (ac *AdminController) CreateMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusCreated, gin.H{"data": config})
 }
 
@@ -3064,7 +3054,7 @@ func (ac *AdminController) UpdateMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"data": config})
 }
 
@@ -3081,7 +3071,7 @@ func (ac *AdminController) DeleteMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "MCP配置删除成功"})
 }
 

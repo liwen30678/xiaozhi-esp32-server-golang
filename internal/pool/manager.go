@@ -2,8 +2,6 @@ package pool
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -17,6 +15,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
+	"github.com/mitchellh/hashstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -123,14 +122,15 @@ func RegisterResourceType[T any](
 }
 
 // GenerateConfigKey 生成配置键（用于区分不同配置的资源池）
+// 使用 hashstructure 做与 map key 顺序无关的指纹，同一语义配置得到相同 key，避免重复建池。
 func GenerateConfigKey(provider string, config map[string]interface{}) string {
-	configJSON, err := json.Marshal(config)
+	input := map[string]interface{}{"provider": provider, "config": config}
+	h, err := hashstructure.Hash(input, hashstructure.FormatV2, nil)
 	if err != nil {
-		log.Warnf("序列化配置失败，使用provider作为key: %v", err)
+		log.Warnf("配置指纹计算失败，使用 provider 作为 key: %v", err)
 		return provider
 	}
-	hash := md5.Sum([]byte(provider + string(configJSON)))
-	return hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%016x", h)
 }
 
 // getOrCreatePool 获取或创建资源池（泛型版本）

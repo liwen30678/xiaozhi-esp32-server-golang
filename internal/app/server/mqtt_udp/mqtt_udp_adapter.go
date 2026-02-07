@@ -1,6 +1,7 @@
 package mqtt_udp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -33,6 +34,8 @@ type MqttUdpAdapter struct {
 	deviceId2Conn   *sync.Map
 	msgChan         chan mqtt.Message
 	onNewConnection types.OnNewConnection
+	stopCtx         context.Context
+	stopCancel      context.CancelFunc
 	sync.RWMutex
 }
 
@@ -54,10 +57,13 @@ func WithOnNewConnection(onNewConnection types.OnNewConnection) MqttUdpAdapterOp
 
 // NewMqttUdpAdapter 创建新的MQTT-UDP适配器，config为必传，其它参数用Option
 func NewMqttUdpAdapter(config *MqttConfig, opts ...MqttUdpAdapterOption) *MqttUdpAdapter {
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &MqttUdpAdapter{
 		mqttConfig:    config,
 		deviceId2Conn: &sync.Map{},
 		msgChan:       make(chan mqtt.Message, 10000),
+		stopCtx:       ctx,
+		stopCancel:    cancel,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -67,12 +73,16 @@ func NewMqttUdpAdapter(config *MqttConfig, opts ...MqttUdpAdapterOption) *MqttUd
 	return s
 }
 
-// Start 启动MQTT服务器
+// Start 启动 MQTT 客户端（非阻塞）：在后台 goroutine 中连接并重试，不阻塞程序运行
 func (s *MqttUdpAdapter) Start() error {
-	const retryInterval = 5 * time.Second
+	Infof("MqttUdpAdapter开始启动，后台连接MQTT服务器 Broker=%s:%d ClientID=%s", s.mqttConfig.Broker, s.mqttConfig.Port, s.mqttConfig.ClientID)
+	go s.connectAndRetry()
+	return nil
+}
 
-	Info("MqttUdpAdapter开始启动，尝试连接MQTT服务器...")
-	Info("MQTT配置: Broker=%s:%d, ClientID=%s, Username=%s", s.mqttConfig.Broker, s.mqttConfig.Port, s.mqttConfig.ClientID, s.mqttConfig.Username)
+// connectAndRetry 在后台循环连接 MQTT，连接失败时按间隔重试，与 mqtt_server 解耦不阻塞主流程
+func (s *MqttUdpAdapter) connectAndRetry() {
+	const retryInterval = 5 * time.Second
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("%s://%s:%d", s.mqttConfig.Type, s.mqttConfig.Broker, s.mqttConfig.Port))
@@ -86,40 +96,34 @@ func (s *MqttUdpAdapter) Start() error {
 
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		Info("MQTT已连接")
-		// 订阅客户端消息主题
-		topic := ServerSubTopicPrefix // 默认主题前缀
+		topic := ServerSubTopicPrefix
 		if token := client.Subscribe(topic, 0, s.handleMessage); token.Wait() && token.Error() != nil {
 			Errorf("订阅主题失败: %v", token.Error())
 		}
 	})
 
-	var lastErr error
 	var retryCount int
 	for {
+		select {
+		case <-s.stopCtx.Done():
+			return
+		default:
+		}
 		s.client = mqtt.NewClient(opts)
 		if token := s.client.Connect(); token.Wait() && token.Error() != nil {
-			lastErr = token.Error()
 			retryCount++
-			Errorf("连接MQTT服务器失败(第%d次): %v，%d秒后重试", retryCount, lastErr, int(retryInterval.Seconds()))
-			time.Sleep(retryInterval)
-			continue
-		} else if token != nil && token.Error() == nil {
-			lastErr = nil
-			break
+			Errorf("连接MQTT服务器失败(第%d次): %v，%d秒后重试", retryCount, token.Error(), int(retryInterval.Seconds()))
+			select {
+			case <-s.stopCtx.Done():
+				return
+			case <-time.After(retryInterval):
+				continue
+			}
 		}
+		break
 	}
 
-	if lastErr != nil {
-		return fmt.Errorf("连接MQTT服务器失败: %v", lastErr)
-	}
-
-	err := s.checkClientActive()
-	if err != nil {
-		Errorf("检查客户端活跃失败: %v", err)
-		return err
-	}
-
-	return nil
+	_ = s.checkClientActive()
 }
 
 func (s *MqttUdpAdapter) checkClientActive() error {
@@ -128,6 +132,8 @@ func (s *MqttUdpAdapter) checkClientActive() error {
 		defer ticker.Stop()
 		for {
 			select {
+			case <-s.stopCtx.Done():
+				return
 			case <-ticker.C:
 				s.deviceId2Conn.Range(func(key, value interface{}) bool {
 					conn := value.(*MqttUdpConn)
@@ -178,10 +184,35 @@ func (s *MqttUdpAdapter) handleDisconnect(deviceId string) {
 	s.deviceId2Conn.Delete(deviceId)
 }
 
+// Stop 停止适配器：取消 context、断开 MQTT、关闭 UDP、清理会话（供热更前调用）
+func (s *MqttUdpAdapter) Stop() {
+	Debugf("enter MqttUdpAdapter Stop ")
+	defer Debugf("exit MqttUdpAdapter Stop ")
+	s.stopCancel()
+	if s.client != nil && s.client.IsConnected() {
+		Debugf("MqttUdpAdapter Stop, disconnect mqtt client")
+		s.client.Disconnect(250)
+	}
+	Debugf("MqttUdpAdapter Stop, udpServer: %v", s.udpServer)
+	if s.udpServer != nil {
+		Debugf("MqttUdpAdapter Stop, close udpServer")
+		_ = s.udpServer.Close()
+	}
+	s.deviceId2Conn.Range(func(key, value interface{}) bool {
+		if conn, ok := value.(*MqttUdpConn); ok {
+			conn.Destroy()
+		}
+		s.deviceId2Conn.Delete(key)
+		return true
+	})
+}
+
 // 处理消息
 func (s *MqttUdpAdapter) processMessage() {
 	for {
 		select {
+		case <-s.stopCtx.Done():
+			return
 		case msg := <-s.msgChan:
 			Debugf("mqtt handleMessage, topic: %s, payload: %s", msg.Topic(), string(msg.Payload()))
 			var clientMsg ClientMessage

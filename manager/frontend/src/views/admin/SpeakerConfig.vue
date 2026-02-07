@@ -133,7 +133,8 @@ const loadConfig = async () => {
         // 默认值
         form.threshold = 0.6
       }
-      form.enabled = configs[0].enabled !== undefined ? configs[0].enabled : true
+      // 开关对应 json_data.enable（业务启用），不使用接口返回的 enabled 列
+      form.enabled = configObj.enable !== undefined ? configObj.enable : true
     }
   } catch (error) {
     ElMessage.error('加载配置失败')
@@ -149,12 +150,13 @@ const handleSave = async () => {
     if (valid) {
       saving.value = true
       try {
-        // 构建配置数据
+        // 构建配置数据：开关写入 json_data.enable，对外输出以该字段为准
         const configData = {
           service: {
             base_url: form.base_url,
             threshold: form.threshold
-          }
+          },
+          enable: form.enabled
         }
         
         const saveData = {

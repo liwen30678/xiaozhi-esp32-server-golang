@@ -13,13 +13,13 @@ import (
 )
 
 var (
-	// managerSystemConfigHandler 收到 WebSocket system_config 推送时的回调，由主程序注册（如合并到 viper）
-	managerSystemConfigHandler func(map[string]interface{})
+	// managerSystemConfigHandlers 收到 WebSocket system_config 推送时的回调列表，主程序可多次注册（如合并到 viper、热更服务）
+	managerSystemConfigHandlers []func(map[string]interface{})
 )
 
-// RegisterManagerSystemConfigHandler 注册 manager 模式下系统配置推送的回调，应在 InitConfigSystem 之前调用
+// RegisterManagerSystemConfigHandler 注册 manager 模式下系统配置推送的回调，应在 InitConfigSystem 之前调用；可多次调用以追加多个回调
 func RegisterManagerSystemConfigHandler(fn func(map[string]interface{})) {
-	managerSystemConfigHandler = fn
+	managerSystemConfigHandlers = append(managerSystemConfigHandlers, fn)
 }
 
 // InitConfigSystem 初始化配置系统
@@ -37,7 +37,11 @@ func InitConfigSystem(ctx context.Context) error {
 	// 根据配置提供者类型调用对应的Init方法
 	switch providerType {
 	case "manager":
-		manager.SetSystemConfigPushHandler(managerSystemConfigHandler)
+		manager.SetSystemConfigPushHandler(func(data map[string]interface{}) {
+			for _, h := range managerSystemConfigHandlers {
+				h(data)
+			}
+		})
 		return manager.Init(ctx)
 	case "redis":
 		return redis_config.Init(ctx)
