@@ -1,6 +1,8 @@
 module xiaozhi-esp32-server-golang
 
-go 1.24.4
+go 1.24.2
+
+toolchain go1.24.11
 
 require (
 	github.com/ThinkInAIXYZ/go-mcp v0.2.19
@@ -31,7 +33,6 @@ require (
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/redis/go-redis/v9 v9.7.3
-	github.com/scroot/music-sd v0.0.1
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/viper v1.20.1
 	github.com/streamer45/silero-vad-go v0.2.1

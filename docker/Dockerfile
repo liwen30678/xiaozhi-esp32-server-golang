@@ -1,5 +1,5 @@
 # 使用官方 Ubuntu 镜像作为基础镜像
-FROM golang:1.23
+FROM golang:1.24.4
 
 # 设置非交互式安装环境变量
 ENV DEBIAN_FRONTEND=noninteractive
