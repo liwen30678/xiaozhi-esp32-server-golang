@@ -13,7 +13,7 @@
       "database": "xiaozhi_admin_test"
     },
     "sqlite": {
-      "file_path": "./data/xiaozhis.db"
+      "file_path": "./data/xiaozhi.db"
     }
   },
   "jwt": {
