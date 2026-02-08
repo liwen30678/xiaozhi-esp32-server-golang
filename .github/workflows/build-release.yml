@@ -141,34 +141,16 @@ jobs:
           curl -L "https://github.com/k2-fsa/sherpa-onnx-go-macos/archive/refs/tags/v${SHERPA_ONNX_GO_MACOS_VERSION}.tar.gz" -o /tmp/sherpa-onnx-go-macos.tar.gz
           tar -xzf /tmp/sherpa-onnx-go-macos.tar.gz -C /tmp
           SHERPA_DIR="/tmp/sherpa-onnx-go-macos-${SHERPA_ONNX_GO_MACOS_VERSION}"
-
-          pick_by_arch() {
-            local arch="$1"
-            shift
-            for f in "$@"; do
-              if [ "$arch" = "amd64" ] && lipo -info "$f" | grep -q "x86_64"; then
-                echo "$f"
-                return 0
-              fi
-              if [ "$arch" = "arm64" ] && lipo -info "$f" | grep -q "arm64"; then
-                echo "$f"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          mapfile -t C_API_CANDIDATES < <(find "$SHERPA_DIR" -name "libsherpa-onnx-c-api.dylib")
-          mapfile -t ORT_CANDIDATES < <(find "$SHERPA_DIR" -name "libonnxruntime.dylib")
-          C_API_LIB="$(pick_by_arch "${{ matrix.arch }}" "${C_API_CANDIDATES[@]}")"
-          ORT_LIB="$(pick_by_arch "${{ matrix.arch }}" "${ORT_CANDIDATES[@]}")"
-          if [ -z "$C_API_LIB" ] || [ -z "$ORT_LIB" ]; then
-            echo "Failed to locate sherpa-onnx dylibs for arch=${{ matrix.arch }}" >&2
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            SHERPA_LIB_DIR="${SHERPA_DIR}/lib/x86_64-apple-darwin"
+          else
+            SHERPA_LIB_DIR="${SHERPA_DIR}/lib/aarch64-apple-darwin"
+          fi
+          if [ ! -d "$SHERPA_LIB_DIR" ]; then
+            echo "sherpa-onnx lib dir not found: $SHERPA_LIB_DIR" >&2
             exit 1
           fi
-
-          echo "C_API_LIB=$C_API_LIB" >> $GITHUB_ENV
-          echo "ORT_LIB=$ORT_LIB" >> $GITHUB_ENV
+          echo "SHERPA_LIB_DIR=$SHERPA_LIB_DIR" >> $GITHUB_ENV
 
       - name: Build macOS binary
         env:
@@ -191,8 +173,9 @@ jobs:
           cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/"
           cp -r build/common/models build/common/data "$PACK_DIR/"
           cp -R lib/ten-vad/lib/macOS/ten_vad.framework "$PACK_DIR/ten-vad/lib/macOS/"
-          cp "$C_API_LIB" "$PACK_DIR/ten-vad/lib/macOS/"
-          cp "$ORT_LIB" "$PACK_DIR/ten-vad/lib/macOS/"
+          cp "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.dylib" "$PACK_DIR/ten-vad/lib/macOS/"
+          cp "$SHERPA_LIB_DIR/libsherpa-onnx-cxx-api.dylib" "$PACK_DIR/ten-vad/lib/macOS/"
+          cp "$SHERPA_LIB_DIR/libonnxruntime.dylib" "$PACK_DIR/ten-vad/lib/macOS/"
           chmod +x "$PACK_DIR/xiaozhi_server"
           install_name_tool -add_rpath "@executable_path/ten-vad/lib/macOS" "$PACK_DIR/xiaozhi_server" || true
 
@@ -241,8 +224,11 @@ jobs:
 
       - name: Pack release zip
         run: |
-          cd release && zip -r "xiaozhi_server-windows-amd64-${VERSION}.zip" "xiaozhi_server-windows-amd64-${VERSION}" && zip -r "xiaozhi_server-linux-amd64-${VERSION}.zip" "xiaozhi_server-linux-amd64-${VERSION}"
-          cd release && zip -r "xiaozhi_server-macos-amd64-${VERSION}.zip" "xiaozhi_server-macos-amd64-${VERSION}" && zip -r "xiaozhi_server-macos-arm64-${VERSION}.zip" "xiaozhi_server-macos-arm64-${VERSION}"
+          cd release
+          zip -r "xiaozhi_server-windows-amd64-${VERSION}.zip" "xiaozhi_server-windows-amd64-${VERSION}"
+          zip -r "xiaozhi_server-linux-amd64-${VERSION}.zip" "xiaozhi_server-linux-amd64-${VERSION}"
+          zip -r "xiaozhi_server-macos-amd64-${VERSION}.zip" "xiaozhi_server-macos-amd64-${VERSION}"
+          zip -r "xiaozhi_server-macos-arm64-${VERSION}.zip" "xiaozhi_server-macos-arm64-${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
