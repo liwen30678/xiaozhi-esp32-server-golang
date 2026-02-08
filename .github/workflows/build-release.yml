@@ -34,7 +34,7 @@ jobs:
 
       - name: Build Windows package with Docker
         run: |
-          docker build -f docker/Dockerfile.windows -t xiaozhi-build-windows .
+          docker build --target builder -f docker/Dockerfile.windows -t xiaozhi-build-windows .
           docker create --name xiaozhi_windows xiaozhi-build-windows
           docker cp xiaozhi_windows:/out ./out
           docker rm xiaozhi_windows
@@ -68,7 +68,7 @@ jobs:
 
       - name: Build Linux package with Docker
         run: |
-          docker build -f docker/Dockerfile.linux -t xiaozhi-build-linux .
+          docker build --target builder -f docker/Dockerfile.linux -t xiaozhi-build-linux .
           docker create --name xiaozhi_linux xiaozhi-build-linux
           docker cp xiaozhi_linux:/out ./out
           docker rm xiaozhi_linux
