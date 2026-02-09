@@ -74,7 +74,8 @@ RUN PACK_DIR="/out/windows-amd64/xiaozhi-server-windows-amd64" \
     && cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/" \
     && cp -r build/common/models "$PACK_DIR/" \
     && cp -r build/common/data/* "$PACK_DIR/data/" \
-    && cp build/windows/start.bat build/windows/README.md "$PACK_DIR/" \
+    && cp build/windows/start.bat "$PACK_DIR/" \
+    && cp doc/aio/README_windows.md "$PACK_DIR/README.md" \
     && cp /opt/sherpa-onnx-go-windows/x86_64-pc-windows-gnu/onnxruntime.dll "$PACK_DIR/" \
     && cp /opt/sherpa-onnx-go-windows/x86_64-pc-windows-gnu/sherpa-onnx-c-api.dll "$PACK_DIR/" \
     && cp /opt/sherpa-onnx-go-windows/x86_64-pc-windows-gnu/sherpa-onnx-cxx-api.dll "$PACK_DIR/" \

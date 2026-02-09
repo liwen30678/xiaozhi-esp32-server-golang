@@ -38,7 +38,7 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
 - **Release 页面**：<https://github.com/hackers365/xiaozhi-esp32-server-golang/releases>
 - **使用教程**：[doc/quickstart_bundle_tutorial.md](doc/quickstart_bundle_tutorial.md)
 
-启动后访问 **http://localhost:8080** 进入 Web 控制台进行配置。
+启动后访问 **http://<服务器IP或域名>:8080** 进入 Web 控制台进行配置。
 
 ### 方式二：Docker 部署
 

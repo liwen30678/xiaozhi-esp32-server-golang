@@ -30,7 +30,7 @@ TARGETARCH=arm64 docker-compose -f docker-compose.local.yml up --build
 - 前端界面（端口 8080）
 - MySQL 数据库（端口 23306）
 
-访问 http://localhost:8080 查看前端界面。
+访问 http://<服务器IP或域名>:8080 查看前端界面。
 
 ## 🏗️ 多架构支持
 
