@@ -47,24 +47,43 @@ func NewUDPServer(udpPort int, externalHost string, externalPort int) *UdpServer
 
 // Start 启动UDP服务器
 func (s *UdpServer) Start() error {
-	addr := &net.UDPAddr{
-		IP:   net.ParseIP("0.0.0.0"),
-		Port: s.udpPort,
+	// 使用退避重试机制启动监听
+	maxRetries := 10
+	backoff := 1 * time.Second
+
+	var conn *net.UDPConn
+	var err error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		addr := &net.UDPAddr{
+			IP:   net.ParseIP("0.0.0.0"),
+			Port: s.udpPort,
+		}
+
+		if attempt > 0 {
+			Infof("UDP 服务器第 %d 次重试，端口 %d...", attempt+1, s.udpPort)
+		}
+
+		conn, err = net.ListenUDP("udp", addr)
+		if err == nil {
+			s.conn = conn
+			Infof("UDP服务器启动在 %s:%d", "0.0.0.0", s.udpPort)
+
+			// 启动数据包处理
+			go s.handlePackets()
+			return nil
+		}
+
+		// 检查是否需要重试
+		if attempt < maxRetries-1 {
+			Warnf("UDP 服务器启动失败 (尝试 %d/%d): %v，将在 %v 后重试...",
+				attempt+1, maxRetries, err, backoff)
+			time.Sleep(backoff)
+			backoff *= 2 // 指数退避
+		} else {
+			return fmt.Errorf("UDP 服务器启动失败，已达到最大重试次数 %d: %v", maxRetries, err)
+		}
 	}
-
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return fmt.Errorf("监听UDP失败: %v", err)
-	}
-
-	s.conn = conn
-	Infof("UDP服务器启动在 %s:%d", "0.0.0.0", s.udpPort)
-
-	// 启动会话清理
-	//go s.cleanupSessions()
-
-	// 启动数据包处理
-	go s.handlePackets()
 
 	return nil
 }
@@ -317,4 +336,9 @@ func (s *UdpServer) addUdpSession(addr *net.UDPAddr, session *UdpSession) {
 
 func (s *UdpServer) removeUdpSession(addr *net.UDPAddr) {
 	s.addr2Session.Delete(addr.String())
+}
+
+// GetPort 获取UDP服务器监听端口
+func (s *UdpServer) GetPort() int {
+	return s.udpPort
 }

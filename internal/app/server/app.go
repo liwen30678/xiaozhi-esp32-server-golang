@@ -138,7 +138,7 @@ func (app *App) newUdpServer() (*mqtt_udp.UdpServer, error) {
 	udpServer := mqtt_udp.NewUDPServer(udpPort, externalHost, externalPort)
 	err := udpServer.Start()
 	if err != nil {
-		log.Fatalf("udpServer.Start err: %+v", err)
+		log.Errorf("udpServer.Start err: %+v", err)
 		return nil, err
 	}
 	return udpServer, nil
@@ -170,22 +170,47 @@ func (app *App) ReloadMqttUdp() {
 	old := app.mqttUdpAdapter
 	app.mqttUdpAdapter = nil
 	app.mqttUdpMu.Unlock()
-	if old != nil {
-		old.Stop()
-	}
+
+	// 如果 MQTT 被禁用，停止旧适配器
 	if !viper.GetBool("mqtt.enable") {
+		if old != nil {
+			old.Stop()
+		}
 		return
 	}
-	adapter, err := app.newMqttUdpAdapter()
-	if err != nil {
-		log.Errorf("ReloadMqttUdp newMqttUdpAdapter: %v", err)
-		return
+
+	newUdpPort := viper.GetInt("udp.listen_port")
+
+	// 检查是否需要重启
+	needRestart := false
+	if old == nil {
+		needRestart = true
+	} else if old.GetUdpPort() != newUdpPort {
+		// 端口号变化，需要重启
+		needRestart = true
+		old.Stop()
+		// 等待UDP端口释放（Windows下需要等待端口完全释放）
+		time.Sleep(2 * time.Second)
 	}
-	app.mqttUdpMu.Lock()
-	app.mqttUdpAdapter = adapter
-	app.mqttUdpMu.Unlock()
-	time.Sleep(500 * time.Millisecond)
-	go adapter.Start()
+
+	if needRestart {
+		adapter, err := app.newMqttUdpAdapter()
+		if err != nil {
+			log.Errorf("ReloadMqttUdp newMqttUdpAdapter: %v", err)
+			return
+		}
+		app.mqttUdpMu.Lock()
+		app.mqttUdpAdapter = adapter
+		app.mqttUdpMu.Unlock()
+		go adapter.Start()
+		log.Infof("MQTT+UDP 热重载完成，新端口: %d", newUdpPort)
+	} else {
+		// 端口号未变，恢复 app.mqttUdpAdapter 引用
+		app.mqttUdpMu.Lock()
+		app.mqttUdpAdapter = old
+		app.mqttUdpMu.Unlock()
+		log.Infof("MQTT+UDP 端口号未变化 (%d)，跳过重启", newUdpPort)
+	}
 }
 
 // ReloadMCP 热更 MCP：禁用时仅停止全局 MCP；启用时已启动则重启全局 MCP，未启动则启动 MCP 集群

@@ -86,7 +86,7 @@ func (s *WebSocketServer) Start() error {
 	// 启动会话清理
 	go s.cleanupSessions()
 
-	// 注册路由处理器
+	// 注册路由处理器（只注册一次）
 	http.HandleFunc("/xiaozhi/mqtt_udp/v1/", s.handleMqttUdpChat)
 	http.HandleFunc("/xiaozhi/v1/", s.handleChat)
 	http.HandleFunc("/xiaozhi/ota/", s.handleOta)
@@ -94,17 +94,37 @@ func (s *WebSocketServer) Start() error {
 	http.HandleFunc("/mcp", s.handleMCPWebSocket)
 	http.HandleFunc("/xiaozhi/api/mcp/tools/", s.handleMCPAPI)
 	http.HandleFunc("/xiaozhi/api/vision", s.handleVisionAPI) //图片识别API
-
 	http.HandleFunc("/admin/inject_msg", s.handleInjectMsg)
 
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", s.port)
-	log.Infof("WebSocket 服务器启动在 ws://%s/xiaozhi/v1/", listenAddr)
-	log.Infof("MCP WebSocket 端点: ws://%s/mcp?token=xxx", listenAddr)
-	log.Infof("MCP API 端点: http://%s/xiaozhi/api/mcp/tools/{deviceId}", listenAddr)
+	// 使用退避重试机制启动监听
+	maxRetries := 10
+	backoff := 1 * time.Second
 
-	if err := http.ListenAndServe(listenAddr, nil); err != nil {
-		log.Log().Fatalf("WebSocket 服务器启动失败: %v", err)
-		return err
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		listenAddr := fmt.Sprintf("0.0.0.0:%d", s.port)
+		if attempt > 0 {
+			log.Infof("WebSocket 服务器第 %d 次重试，端口 %d...", attempt+1, s.port)
+		} else {
+			log.Infof("WebSocket 服务器启动在 ws://%s/xiaozhi/v1/", listenAddr)
+			log.Infof("MCP WebSocket 端点: ws://%s/mcp?token=xxx", listenAddr)
+			log.Infof("MCP API 端点: http://%s/xiaozhi/api/mcp/tools/{deviceId}", listenAddr)
+		}
+
+		err := http.ListenAndServe(listenAddr, nil)
+		if err == nil {
+			return nil
+		}
+
+		// 检查是否是端口被占用错误
+		if attempt < maxRetries-1 {
+			log.Warnf("WebSocket 服务器启动失败 (尝试 %d/%d): %v，将在 %v 后重试...",
+				attempt+1, maxRetries, err, backoff)
+			time.Sleep(backoff)
+			backoff *= 2 // 指数退避
+		} else {
+			log.Errorf("WebSocket 服务器启动失败，已达到最大重试次数 %d: %v", maxRetries, err)
+			return err
+		}
 	}
 	return nil
 }

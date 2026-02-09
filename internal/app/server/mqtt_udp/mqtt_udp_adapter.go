@@ -207,6 +207,14 @@ func (s *MqttUdpAdapter) Stop() {
 	})
 }
 
+// GetUdpPort 获取UDP服务器监听端口
+func (s *MqttUdpAdapter) GetUdpPort() int {
+	if s.udpServer != nil {
+		return s.udpServer.GetPort()
+	}
+	return 0
+}
+
 // 处理消息
 func (s *MqttUdpAdapter) processMessage() {
 	for {
