@@ -1,13 +1,13 @@
 ﻿package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"xiaozhi-esp32-server-golang/internal/app/server"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
@@ -69,7 +69,6 @@ func main() {
 
 		var doMqttServer, doMqttUdp, doMcpReload bool
 		if data["mqtt_server"] != nil {
-
 			if !SystemConfigEqual(data["mqtt_server"], oldMqttServer) {
 				doMqttServer = true
 			}
@@ -90,28 +89,33 @@ func main() {
 			}
 		}
 		if data["local_mcp"] != nil {
-			oldJS, _ := json.Marshal(oldLocalMcp)
-			newJS, _ := json.Marshal(data["local_mcp"])
-			log.Debugf("[local_mcp] 当前配置: %s", string(oldJS))
-			log.Debugf("[local_mcp] 新推送配置: %s", string(newJS))
 			if !SystemConfigEqual(data["local_mcp"], oldLocalMcp) {
 				doMcpReload = true
 			}
 		}
 
-		log.Debugf("before mqtt server : %+v", viper.Get("mqtt_server"))
 		ApplySystemConfigToViper(data)
-		log.Debugf("after mqtt server: %+v", viper.Get("mqtt_server"))
 
+		var wg sync.WaitGroup
 		if doMqttServer {
-			go appInstance.ReloadMqttServer()
+			go func() {
+				defer wg.Done()
+				appInstance.ReloadMqttServer()
+			}()
 		}
 		if doMqttUdp {
-			go appInstance.ReloadMqttUdp()
+			go func() {
+				defer wg.Done()
+				appInstance.ReloadMqttUdp()
+			}()
 		}
 		if doMcpReload {
-			go appInstance.ReloadMCP()
+			go func() {
+				defer wg.Done()
+				appInstance.ReloadMCP()
+			}()
 		}
+		wg.Wait()
 	})
 	appInstance.Run()
 
