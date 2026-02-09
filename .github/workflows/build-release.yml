@@ -187,6 +187,7 @@ jobs:
           cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/"
           cp doc/aio/README_macos.md "$PACK_DIR/README.md"
           cp -r build/common/models build/common/data "$PACK_DIR/"
+          rm -f "$PACK_DIR/data/xiaozhi.db"
           cp -R lib/ten-vad/lib/macOS/ten_vad.framework "$PACK_DIR/ten-vad/lib/macOS/"
           # Copy all sherpa dylibs, including versioned files like libonnxruntime.1.17.1.dylib.
           cp "$SHERPA_LIB_DIR"/*.dylib "$PACK_DIR/ten-vad/lib/macOS/"

@@ -84,9 +84,9 @@ nohup ./xiaozhi_server > logs/output.log 2>&1 &
 | **8080** | `manager.json` → `server.port` | **管理后台**：Web 控制台 + HTTP API |
 | **8989** | `main_config.yaml` → `websocket.port` | **主服务 WebSocket**：设备/客户端连接 |
 | **9000** | `asr_server.json` → `server.port` | **ASR/声纹服务**：语音识别内部接口 |
-| **2883** | `main_config.yaml` → `mqtt_server.listen_port` | **MQTT 服务**：设备 MQTT 连接 |
-| **8990** | `main_config.yaml` → `udp.listen_port` | **UDP 服务**：设备 UDP 通信 |
-| **6060** | `main_config.yaml` → `server.pprof.port` | **pprof**：性能分析（默认关闭） |
+| **2883** | 控制台配置 | **MQTT 服务**：设备 MQTT 连接 |
+| **8990** | 控制台配置 | **UDP 服务**：设备 UDP 通信 |
+| **6060** | 控制台配置 | **pprof**：性能分析（默认关闭） |
 
 ## 访问地址
 
@@ -105,11 +105,24 @@ nohup ./xiaozhi_server > logs/output.log 2>&1 &
 
 ## 修改配置
 
-编辑对应的配置文件修改配置，修改后需重启服务生效：
+### 需在配置文件中修改的端口
 
-- **主配置**：`main_config.yaml`（MQTT、UDP、WebSocket、LLM 等）
-- **管理后台**：`manager.json`（端口、数据库、登录信息等）
-- **ASR 服务**：`asr_server.json`（语音识别相关配置）
+以下端口修改后需重启服务生效：
+
+| 端口 | 配置文件 | 配置项 |
+|------|----------|--------|
+| 8080 | `manager.json` | `server.port` |
+| 8989 | `main_config.yaml` | `websocket.port` |
+| 9000 | `asr_server.json` | `server.port` |
+
+### 控制台配置
+
+以下端口及所有其他配置通过管理后台控制台进行变更：
+
+- **端口配置**：MQTT (2883)、UDP (8990)、pprof (6060)
+- **功能配置**：LLM、TTS、ASR、声纹识别等
+- 访问 `http://localhost:8080/` 进入管理后台
+- 配置变更实时生效，无需重启服务
 
 ## 生产环境部署（systemd）
 
