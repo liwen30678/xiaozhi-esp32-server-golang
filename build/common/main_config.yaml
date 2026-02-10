@@ -294,7 +294,7 @@ ota:
 mcp:
   # 全局MCP服务器配置
   global:
-    enabled: true  # 是否启用全局MCP
+    enabled: false  # 是否启用全局MCP
     servers:
       # 文件系统MCP服务器
       - name: "filesystem"

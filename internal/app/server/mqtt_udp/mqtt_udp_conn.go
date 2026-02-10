@@ -65,7 +65,13 @@ func NewMqttUdpConn(deviceID string, pubTopic string, mqttClient mqtt.Client, ud
 func (c *MqttUdpConn) SendCmd(msg []byte) error {
 	//log.Debugf("mqtt udp conn send cmd, topic: %s, msg: %s", c.PubTopic, string(msg))
 	c.lastActiveTs = time.Now().Unix()
-	token := c.MqttClient.Publish(c.PubTopic, 0, false, msg)
+	c.RLock()
+	client := c.MqttClient
+	c.RUnlock()
+	if client == nil {
+		return errors.New("mqtt client is nil")
+	}
+	token := client.Publish(c.PubTopic, 0, false, msg)
 	token.Wait()
 	if token.Error() != nil {
 		return token.Error()
@@ -149,6 +155,12 @@ func (c *MqttUdpConn) Close() error {
 
 func (c *MqttUdpConn) OnClose(closeCb func(deviceId string)) {
 	c.onCloseCbList = append(c.onCloseCbList, closeCb)
+}
+
+func (c *MqttUdpConn) SetMqttClient(client mqtt.Client) {
+	c.Lock()
+	c.MqttClient = client
+	c.Unlock()
 }
 
 func (c *MqttUdpConn) GetTransportType() string {

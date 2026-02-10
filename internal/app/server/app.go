@@ -105,17 +105,24 @@ func (app *App) initEventHandle() {
 	log.Info("消息处理器已初始化")
 }
 
-func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
+func (app *App) currentMqttConfig() *mqtt_udp.MqttConfig {
 	if !viper.GetBool("mqtt.enable") {
-		return nil, nil
+		return nil
 	}
-	mqttConfig := mqtt_udp.MqttConfig{
+	return &mqtt_udp.MqttConfig{
 		Broker:   viper.GetString("mqtt.broker"),
 		Type:     viper.GetString("mqtt.type"),
 		Port:     viper.GetInt("mqtt.port"),
 		ClientID: viper.GetString("mqtt.client_id"),
 		Username: viper.GetString("mqtt.username"),
 		Password: viper.GetString("mqtt.password"),
+	}
+}
+
+func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
+	mqttConfig := app.currentMqttConfig()
+	if mqttConfig == nil {
+		return nil, nil
 	}
 
 	udpServer, err := app.newUdpServer()
@@ -124,7 +131,7 @@ func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
 	}
 
 	return mqtt_udp.NewMqttUdpAdapter(
-		&mqttConfig,
+		mqttConfig,
 		mqtt_udp.WithUdpServer(udpServer),
 		mqtt_udp.WithOnNewConnection(app.OnNewConnection),
 	), nil
@@ -186,6 +193,65 @@ func (app *App) ReloadMqttUdp() {
 	app.mqttUdpMu.Unlock()
 	time.Sleep(500 * time.Millisecond)
 	go adapter.Start()
+}
+
+// ReloadMqttUdpWithFlags 根据变更标记决定是否热更 MQTT+UDP
+func (app *App) ReloadMqttUdpWithFlags(doMqttReload, doUdpReload bool) {
+	if !doMqttReload && !doUdpReload {
+		return
+	}
+	if !viper.GetBool("mqtt.enable") {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt disabled, stopping mqtt+udp")
+		app.ReloadMqttUdp()
+		return
+	}
+
+	app.mqttUdpMu.RLock()
+	adapter := app.mqttUdpAdapter
+	app.mqttUdpMu.RUnlock()
+
+	if adapter == nil {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt enabled but adapter is nil, starting mqtt+udp")
+		newAdapter, err := app.newMqttUdpAdapter()
+		if err != nil {
+			log.Errorf("ReloadMqttUdpWithFlags newMqttUdpAdapter: %v", err)
+			return
+		}
+		if newAdapter == nil {
+			return
+		}
+		app.mqttUdpMu.Lock()
+		app.mqttUdpAdapter = newAdapter
+		app.mqttUdpMu.Unlock()
+		time.Sleep(500 * time.Millisecond)
+		go newAdapter.Start()
+		return
+	}
+
+	if doMqttReload && doUdpReload {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt & udp config changed, reloading mqtt+udp")
+		app.ReloadMqttUdp()
+		return
+	}
+	if doMqttReload {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt config changed, reloading mqtt only")
+		mqttConfig := app.currentMqttConfig()
+		if mqttConfig == nil {
+			app.ReloadMqttUdp()
+			return
+		}
+		adapter.ReloadMqttClient(mqttConfig)
+		return
+	}
+	if doUdpReload {
+		log.Infof("ReloadMqttUdpWithFlags: udp listen changed, reloading udp only")
+		udpServer, err := app.newUdpServer()
+		if err != nil {
+			log.Errorf("ReloadMqttUdpWithFlags newUdpServer: %v", err)
+			return
+		}
+		adapter.ReloadUdpServer(udpServer)
+	}
 }
 
 // ReloadMCP 热更 MCP：禁用时仅停止全局 MCP；启用时已启动则重启全局 MCP，未启动则启动 MCP 集群

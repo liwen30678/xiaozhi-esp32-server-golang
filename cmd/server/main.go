@@ -1,6 +1,7 @@
 ﻿package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -58,8 +59,12 @@ func main() {
 
 	// 创建服务器
 	appInstance := server.NewApp()
+
+	var lock sync.RWMutex
 	// 注册 system_config 热更：用 viper 当前配置与推送配置对比，仅当内容变更时合并并触发热更
 	user_config.RegisterManagerSystemConfigHandler(func(data map[string]interface{}) {
+		lock.Lock()
+		defer lock.Unlock()
 		current := viper.AllSettings()
 		oldMqttServer := current["mqtt_server"]
 		oldMqtt := current["mqtt"]
@@ -67,7 +72,7 @@ func main() {
 		oldMcp := current["mcp"]
 		oldLocalMcp := current["local_mcp"]
 
-		var doMqttServer, doMqttUdp, doMcpReload bool
+		var doMqttServer, doMqttReload, doUdpReload, doMcpReload bool
 		if data["mqtt_server"] != nil {
 			if !SystemConfigEqual(data["mqtt_server"], oldMqttServer) {
 				doMqttServer = true
@@ -75,12 +80,12 @@ func main() {
 		}
 		if data["mqtt"] != nil {
 			if !SystemConfigEqual(data["mqtt"], oldMqtt) {
-				doMqttUdp = true
+				doMqttReload = true
 			}
 		}
 		if data["udp"] != nil {
-			if !SystemConfigEqual(data["udp"], oldUdp) {
-				doMqttUdp = true
+			if udpListenChanged(data["udp"], oldUdp) {
+				doUdpReload = true
 			}
 		}
 		if data["mcp"] != nil {
@@ -104,11 +109,11 @@ func main() {
 				appInstance.ReloadMqttServer()
 			}()
 		}
-		if doMqttUdp {
+		if doMqttReload || doUdpReload {
 			go func() {
 				wg.Add(1)
 				defer wg.Done()
-				appInstance.ReloadMqttUdp()
+				appInstance.ReloadMqttUdpWithFlags(doMqttReload, doUdpReload)
 			}()
 		}
 		if doMcpReload {
@@ -141,4 +146,32 @@ func main() {
 	}
 
 	log.Info("服务器已关闭")
+}
+
+func udpListenChanged(newUdpCfg interface{}, oldUdpCfg interface{}) bool {
+	newListenHost, newListenPort := udpListenHostPort(newUdpCfg)
+	oldListenHost, oldListenPort := udpListenHostPort(oldUdpCfg)
+	if newListenHost == "" && newListenPort == 0 {
+		return false
+	}
+	return newListenHost != oldListenHost || newListenPort != oldListenPort
+}
+
+func udpListenHostPort(cfg interface{}) (string, int) {
+	if cfg == nil {
+		return "", 0
+	}
+	type udpListen struct {
+		ListenHost string `json:"listen_host"`
+		ListenPort int    `json:"listen_port"`
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return "", 0
+	}
+	var parsed udpListen
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", 0
+	}
+	return parsed.ListenHost, parsed.ListenPort
 }
