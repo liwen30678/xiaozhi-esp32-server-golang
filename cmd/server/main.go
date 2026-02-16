@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"encoding/json"
@@ -120,7 +120,9 @@ func main() {
 			go func() {
 				wg.Add(1)
 				defer wg.Done()
-				appInstance.ReloadMCP()
+				if err := appInstance.ReloadMCP(); err != nil {
+					log.Errorf("ReloadMCP failed: %v", err)
+				}
 			}()
 		}
 		wg.Wait()

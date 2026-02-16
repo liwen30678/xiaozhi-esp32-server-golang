@@ -121,6 +121,12 @@ const routes = [
             meta: { title: 'MCP配置管理' }
           },
           {
+            path: 'mcp-market',
+            name: 'MCPMarket',
+            component: () => import('../views/admin/MCPMarket.vue'),
+            meta: { title: 'MCP市场' }
+          },
+          {
             path: 'memory-config',
             name: 'MemoryConfig',
             component: () => import('../views/admin/MemoryConfig.vue'),

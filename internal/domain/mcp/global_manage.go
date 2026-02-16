@@ -22,11 +22,15 @@ import (
 
 // MCPServerConfig MCP服务器配置
 type MCPServerConfig struct {
-	Name    string `json:"name" mapstructure:"name"`
-	Type    string `json:"type" mapstructure:"type"`
-	Url     string `json:"url" mapstructure:"url"`
-	SSEUrl  string `json:"sse_url" mapstructure:"sse_url"` //向后兼容sse_url字段
-	Enabled bool   `json:"enabled" mapstructure:"enabled"`
+	Name      string            `json:"name" mapstructure:"name"`
+	Type      string            `json:"type" mapstructure:"type"`
+	Url       string            `json:"url" mapstructure:"url"`
+	SSEUrl    string            `json:"sse_url" mapstructure:"sse_url"` // 向后兼容 sse_url 字段
+	Enabled   bool              `json:"enabled" mapstructure:"enabled"`
+	Provider  string            `json:"provider,omitempty" mapstructure:"provider"`
+	ServiceID string            `json:"service_id,omitempty" mapstructure:"service_id"`
+	AuthRef   string            `json:"auth_ref,omitempty" mapstructure:"auth_ref"`
+	Headers   map[string]string `json:"headers,omitempty" mapstructure:"headers"`
 }
 
 // GlobalMCPManager 全局MCP管理器
@@ -189,7 +193,11 @@ func (g *GlobalMCPManager) connectToServer(config MCPServerConfig) error {
 		return nil
 	}
 
-	log.Infof("正在连接MCP服务器: %s (URL: %s)", config.Name, config.SSEUrl)
+	_, endpoint, endpointErr := endpointForConfig(config)
+	if endpointErr != nil {
+		return endpointErr
+	}
+	log.Infof("正在连接MCP服务器: %s (URL: %s)", config.Name, endpoint)
 
 	conn := &MCPServerConnection{
 		config: config,
@@ -214,28 +222,9 @@ func (conn *MCPServerConnection) connect() error {
 	// 使用背景上下文，不设置超时，让SSE连接长期保持
 	ctx := context.Background()
 
-	config := conn.config
-	var transportInstance transport.Interface
-	var err error
-
-	if config.SSEUrl != "" || config.Type == "sse" {
-		var endpoint string
-		if config.SSEUrl != "" {
-			endpoint = config.SSEUrl
-		}
-		if config.Type == "sse" && config.Url != "" {
-			endpoint = config.Url
-		}
-		sseTransport, err := transport.NewSSE(endpoint)
-		if err != nil {
-			return fmt.Errorf("创建SSE传输层失败: %v", err)
-		}
-		transportInstance = sseTransport
-	} else if config.Type == "streamablehttp" {
-		transportInstance, err = transport.NewStreamableHTTP(config.Url)
-		if err != nil {
-			return fmt.Errorf("创建StreamableHTTP传输层失败: %v", err)
-		}
+	transportInstance, endpoint, err := buildMCPTransport(conn.config)
+	if err != nil {
+		return err
 	}
 
 	// 使用 client.NewClient 创建 MCP 客户端
@@ -243,7 +232,7 @@ func (conn *MCPServerConnection) connect() error {
 
 	conn.client = mcpClient
 
-	log.Infof("开始连接MCP服务器: %s, %s URL: %s", conn.config.Name, conn.config.Type, conn.config.SSEUrl)
+	log.Infof("开始连接MCP服务器: %s, %s URL: %s", conn.config.Name, conn.config.Type, endpoint)
 
 	// 启动客户端
 	if err := conn.client.Start(ctx); err != nil {
@@ -290,6 +279,89 @@ func (conn *MCPServerConnection) connect() error {
 
 	log.Infof("MCP服务器连接建立完成: %s", conn.config.Name)
 	return nil
+}
+
+func normalizeMCPTransportType(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "sse":
+		return "sse"
+	case "streamable_http", "streamable-http", "http":
+		return "streamablehttp"
+	default:
+		return strings.ToLower(strings.TrimSpace(t))
+	}
+}
+
+func endpointForConfig(config MCPServerConfig) (string, string, error) {
+	transportType := normalizeMCPTransportType(config.Type)
+	if transportType == "" {
+		if strings.TrimSpace(config.SSEUrl) != "" {
+			transportType = "sse"
+		} else if strings.TrimSpace(config.Url) != "" {
+			transportType = "streamablehttp"
+		}
+	}
+
+	switch transportType {
+	case "sse":
+		if strings.TrimSpace(config.SSEUrl) != "" {
+			return transportType, strings.TrimSpace(config.SSEUrl), nil
+		}
+		if strings.TrimSpace(config.Url) != "" {
+			return transportType, strings.TrimSpace(config.Url), nil
+		}
+		return "", "", fmt.Errorf("MCP服务器 %s 缺少SSE URL", config.Name)
+	case "streamablehttp":
+		if strings.TrimSpace(config.Url) != "" {
+			return transportType, strings.TrimSpace(config.Url), nil
+		}
+		if strings.TrimSpace(config.SSEUrl) != "" {
+			return transportType, strings.TrimSpace(config.SSEUrl), nil
+		}
+		return "", "", fmt.Errorf("MCP服务器 %s 缺少StreamableHTTP URL", config.Name)
+	default:
+		return "", "", fmt.Errorf("MCP服务器 %s 类型不支持: %s", config.Name, config.Type)
+	}
+}
+
+func buildMCPTransport(config MCPServerConfig) (transport.Interface, string, error) {
+	transportType, endpoint, err := endpointForConfig(config)
+	if err != nil {
+		return nil, "", err
+	}
+
+	headers := make(map[string]string)
+	for k, v := range config.Headers {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		headers[strings.TrimSpace(k)] = v
+	}
+
+	switch transportType {
+	case "sse":
+		opts := make([]transport.ClientOption, 0)
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHeaders(headers))
+		}
+		sseTransport, err := transport.NewSSE(endpoint, opts...)
+		if err != nil {
+			return nil, "", fmt.Errorf("创建SSE传输层失败: %v", err)
+		}
+		return sseTransport, endpoint, nil
+	case "streamablehttp":
+		opts := make([]transport.StreamableHTTPCOption, 0)
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHTTPHeaders(headers))
+		}
+		httpTransport, err := transport.NewStreamableHTTP(endpoint, opts...)
+		if err != nil {
+			return nil, "", fmt.Errorf("创建StreamableHTTP传输层失败: %v", err)
+		}
+		return httpTransport, endpoint, nil
+	default:
+		return nil, "", fmt.Errorf("不支持的MCP传输类型: %s", transportType)
+	}
 }
 
 // refreshTools 刷新工具列表

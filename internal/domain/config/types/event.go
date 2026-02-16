@@ -13,4 +13,5 @@ const (
 // 下行pull事件 管理内控 => 主程序
 const (
 	EventHandleMessageInject = "/api/device/inject_msg" //处理消息注入
+	EventHandleMCPApply      = "/api/mcp/apply"         //应用MCP配置
 )

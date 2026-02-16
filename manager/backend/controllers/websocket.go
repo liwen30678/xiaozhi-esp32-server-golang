@@ -724,7 +724,6 @@ func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context
 			delete(client.callbacks, requestID)
 			client.mu.Unlock()
 		}
-		close(responseChan)
 	}()
 
 	responsesReceived := 0
@@ -743,6 +742,97 @@ func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context
 			return nil, fmt.Errorf("请求超时")
 		case <-ctx.Done():
 			return nil, fmt.Errorf("上下文取消")
+		}
+	}
+}
+
+// ApplyMCPConfig 向已连接主程序下发 MCP 配置，dryRun=true 时仅做预检不落地。
+func (ctrl *WebSocketController) ApplyMCPConfig(ctx context.Context, mcpData map[string]interface{}, localMcpData map[string]interface{}, dryRun bool) error {
+	requestID := uuid.New().String()
+	body := map[string]interface{}{
+		"mcp":       mcpData,
+		"local_mcp": localMcpData,
+		"dry_run":   dryRun,
+	}
+
+	responseChan := make(chan *WebSocketResponse, 10)
+	responseHandler := func(response *WebSocketResponse) {
+		select {
+		case responseChan <- response:
+		default:
+			log.Printf("ApplyMCPConfig 响应通道已满，丢弃响应: %s", response.ID)
+		}
+	}
+
+	callbacksRegistered := 0
+	for item := range ctrl.clientsMap.IterBuffered() {
+		client := item.Val
+		if !client.isConnected {
+			continue
+		}
+		client.mu.Lock()
+		client.callbacks[requestID] = responseHandler
+		client.mu.Unlock()
+		callbacksRegistered++
+
+		req := WebSocketRequest{
+			ID:     requestID,
+			Method: "POST",
+			Path:   "/api/mcp/apply",
+			Body:   body,
+		}
+		if err := client.conn.WriteJSON(req); err != nil {
+			log.Printf("向客户端 %s 发送 /api/mcp/apply 失败: %v", client.ID, err)
+		}
+	}
+
+	if callbacksRegistered == 0 {
+		return fmt.Errorf("没有可用的主程序连接")
+	}
+
+	defer func() {
+		for item := range ctrl.clientsMap.IterBuffered() {
+			client := item.Val
+			client.mu.Lock()
+			delete(client.callbacks, requestID)
+			client.mu.Unlock()
+		}
+	}()
+
+	timeout := 60 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	responsesReceived := 0
+	lastErrMsg := ""
+	for {
+		select {
+		case resp := <-responseChan:
+			responsesReceived++
+			if resp.Status == http.StatusOK {
+				return nil
+			}
+			if resp.Error != "" {
+				lastErrMsg = resp.Error
+			} else {
+				lastErrMsg = fmt.Sprintf("status=%d", resp.Status)
+			}
+			if responsesReceived >= callbacksRegistered {
+				if lastErrMsg == "" {
+					lastErrMsg = "全部主程序返回失败"
+				}
+				return fmt.Errorf("%s", lastErrMsg)
+			}
+		case <-timer.C:
+			return fmt.Errorf("等待主程序应用MCP配置超时")
+		case <-ctx.Done():
+			return fmt.Errorf("上下文取消: %w", ctx.Err())
 		}
 	}
 }
