@@ -14,6 +14,7 @@ import (
 	"time"
 
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
@@ -27,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	mcp_go "github.com/mark3labs/mcp-go/mcp"
+	"github.com/spf13/viper"
 )
 
 const (
@@ -1127,6 +1129,36 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 		log.Debugf("搜索记忆成功, 输入内容: %s, 记忆内容: %s", userMessage.Content, memoryContext)
 		if memoryContext != "" {
 			systemPrompt += fmt.Sprintf("\n历史关联信息: \n%s", memoryContext)
+		}
+	}
+
+	// search knowledge（由配置中心统一转发provider API）
+	if userMessage != nil {
+		providerType := viper.GetString("config_provider.type")
+		configProvider, err := user_config.GetProvider(providerType)
+		if err != nil {
+			log.Warnf("获取配置Provider失败，跳过知识库检索: %v", err)
+		} else {
+			knowledgeHits, err := configProvider.SearchKnowledge(ctx, l.clientState.DeviceID, l.clientState.AgentID, userMessage.Content, 5)
+			if err != nil {
+				log.Warnf("知识库检索失败，降级继续LLM: %v", err)
+			} else if len(knowledgeHits) > 0 {
+				var kbBuilder strings.Builder
+				kbBuilder.WriteString("\n知识库检索结果（仅在相关时参考）：\n")
+				for i, hit := range knowledgeHits {
+					content := strings.TrimSpace(hit.Content)
+					if content == "" {
+						continue
+					}
+					if len(content) > 500 {
+						content = content[:500] + "..."
+					}
+					kbBuilder.WriteString(fmt.Sprintf("%d. %s\n", i+1, content))
+				}
+				if kbBuilder.Len() > len("\n知识库检索结果（仅在相关时参考）：\n") {
+					systemPrompt += kbBuilder.String()
+				}
+			}
 		}
 	}
 

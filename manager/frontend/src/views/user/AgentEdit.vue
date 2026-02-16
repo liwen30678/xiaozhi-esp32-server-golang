@@ -141,6 +141,27 @@
             </div>
           </div>
 
+          <div class="form-group">
+            <label class="form-label">关联知识库</label>
+            <el-select
+              v-model="form.knowledge_base_ids"
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="请选择要关联的知识库（可多选）"
+              size="large"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="kb in knowledgeBases"
+                :key="kb.id"
+                :label="kb.name"
+                :value="kb.id"
+              />
+            </el-select>
+            <div class="form-help">支持多库关联。知识库检索失败时会自动降级为普通LLM对话。</div>
+          </div>
+
           <div class="form-group" v-if="form.tts_config_id">
             <label class="form-label">音色</label>
             <el-select 
@@ -308,7 +329,8 @@ const form = reactive({
   llm_config_id: null,
   tts_config_id: null,
   voice: null,
-  asr_speed: 'normal'
+  asr_speed: 'normal',
+  knowledge_base_ids: []
 })
 
 // LLM配置数据
@@ -316,6 +338,18 @@ const llmConfigs = ref([])
 
 // TTS配置数据
 const ttsConfigs = ref([])
+
+// 知识库数据
+const knowledgeBases = ref([])
+
+const loadKnowledgeBases = async () => {
+  try {
+    const response = await api.get('/user/knowledge-bases')
+    knowledgeBases.value = response.data.data || []
+  } catch (error) {
+    console.error('加载知识库失败:', error)
+  }
+}
 
 // 音色相关数据
 const availableVoices = ref([])
@@ -368,7 +402,8 @@ const loadAgent = async () => {
       name: agent.name || '',
       custom_prompt: agent.custom_prompt || '',
       asr_speed: agent.asr_speed || 'normal',
-      voice: agent.voice || null
+      voice: agent.voice || null,
+      knowledge_base_ids: agent.knowledge_base_ids || []
     })
     
     // 处理LLM配置关联

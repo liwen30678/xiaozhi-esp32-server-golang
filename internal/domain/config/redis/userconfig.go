@@ -211,6 +211,11 @@ func (u *UserConfig) RestoreDeviceDefaultRole(ctx context.Context, deviceID stri
 	return fmt.Errorf("redis 配置提供者不支持恢复设备默认角色")
 }
 
+// SearchKnowledge 非 manager 模式不支持统一知识库检索
+func (u *UserConfig) SearchKnowledge(ctx context.Context, deviceID, agentID, query string, topK int) ([]types.KnowledgeSearchHit, error) {
+	return nil, fmt.Errorf("redis 配置提供者不支持知识库检索")
+}
+
 func (u *UserConfig) NotifyDeviceEvent(ctx context.Context, eventType string, eventData map[string]interface{}) {
 	// 实现设备事件通知逻辑
 	return

@@ -57,6 +57,8 @@ func Init(cfg config.DatabaseConfig) *gorm.DB {
 		&models.User{},
 		&models.Device{},
 		&models.Agent{},
+		&models.KnowledgeBase{},
+		&models.AgentKnowledgeBase{},
 		&models.Config{},
 		&models.GlobalRole{},
 		&models.Role{}, // 新增：统一角色表

@@ -295,6 +295,39 @@ func (c *ConfigManager) RestoreDeviceDefaultRole(ctx context.Context, deviceID s
 	return nil
 }
 
+// SearchKnowledge 通过管理后台统一检索知识库（控制台按provider转发）
+func (c *ConfigManager) SearchKnowledge(ctx context.Context, deviceID, agentID, query string, topK int) ([]types.KnowledgeSearchHit, error) {
+	var response struct {
+		Data struct {
+			Hits []types.KnowledgeSearchHit `json:"hits"`
+		} `json:"data"`
+		Warning string `json:"warning"`
+		Error   string `json:"error"`
+	}
+
+	err := c.client.DoRequest(ctx, http.RequestOptions{
+		Method: "POST",
+		Path:   "/api/internal/knowledge/search",
+		Body: map[string]interface{}{
+			"device_id": deviceID,
+			"agent_id":  agentID,
+			"query":     query,
+			"top_k":     topK,
+		},
+		Response: &response,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("知识库检索请求失败: %w", err)
+	}
+	if response.Error != "" {
+		return nil, fmt.Errorf(response.Error)
+	}
+	if response.Warning != "" {
+		log.Log().Warnf("知识库检索降级: %s", response.Warning)
+	}
+	return response.Data.Hits, nil
+}
+
 func (c *ConfigManager) NotifyDeviceEvent(ctx context.Context, eventType string, eventData map[string]interface{}) {
 	_, err := SendDeviceRequest(ctx, eventType, eventData)
 	if err != nil {

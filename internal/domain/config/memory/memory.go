@@ -137,6 +137,11 @@ func (m *MemoryUserConfigProvider) GetSystemConfig(ctx context.Context) (string,
 	return "", nil
 }
 
+// SearchKnowledge 非 manager 模式不支持统一知识库检索
+func (m *MemoryUserConfigProvider) SearchKnowledge(ctx context.Context, deviceID, agentID, query string, topK int) ([]types.KnowledgeSearchHit, error) {
+	return nil, fmt.Errorf("memory 配置提供者不支持知识库检索")
+}
+
 // Init 初始化Memory配置提供者
 func Init(ctx context.Context) error {
 	log.Log().Info("Memory config provider initialized successfully")

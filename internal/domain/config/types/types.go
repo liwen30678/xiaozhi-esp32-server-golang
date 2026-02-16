@@ -58,3 +58,9 @@ type TtsConfigItem struct {
 	Config    map[string]interface{} `json:"config"`
 	IsDefault bool                   `json:"is_default"`
 }
+
+type KnowledgeSearchHit struct {
+	Content string  `json:"content"`
+	Title   string  `json:"title,omitempty"`
+	Score   float64 `json:"score,omitempty"`
+}

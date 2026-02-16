@@ -49,6 +49,26 @@ type Agent struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// KnowledgeBase 用户知识库（每用户独立）
+type KnowledgeBase struct {
+	ID          uint      `json:"id" gorm:"primarykey"`
+	UserID      uint      `json:"user_id" gorm:"not null;index"`
+	Name        string    `json:"name" gorm:"type:varchar(100);not null"`
+	Description string    `json:"description" gorm:"type:text"`
+	Content     string    `json:"content" gorm:"type:text"`
+	Status      string    `json:"status" gorm:"type:varchar(20);default:'active';index"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// AgentKnowledgeBase 智能体与知识库的多对多关联
+type AgentKnowledgeBase struct {
+	ID              uint      `json:"id" gorm:"primarykey"`
+	AgentID         uint      `json:"agent_id" gorm:"not null;index;uniqueIndex:idx_agent_kb_unique,priority:1"`
+	KnowledgeBaseID uint      `json:"knowledge_base_id" gorm:"not null;index;uniqueIndex:idx_agent_kb_unique,priority:2"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 // 通用配置模型
 type Config struct {
 	ID        uint      `json:"id" gorm:"primarykey"`

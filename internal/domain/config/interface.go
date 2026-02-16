@@ -28,6 +28,9 @@ type UserConfigProvider interface {
 	// 获取 mqtt, mqtt_server, udp, ota, vision配置
 	GetSystemConfig(ctx context.Context) (string, error)
 
+	// SearchKnowledge 通过配置中心统一检索知识库（由控制台按provider转发）
+	SearchKnowledge(ctx context.Context, deviceID, agentID, query string, topK int) ([]types.KnowledgeSearchHit, error)
+
 	//注册上行事件处理函数(比如设备上下线等)
 	NotifyDeviceEvent(ctx context.Context, eventType string, eventData map[string]interface{})
 	//注册下行事件处理函数(比如消息注入等)

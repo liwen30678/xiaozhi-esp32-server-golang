@@ -127,6 +127,12 @@ const routes = [
             meta: { title: 'Memory配置管理' }
           },
           {
+            path: 'knowledge-search-config',
+            name: 'KnowledgeSearchConfig',
+            component: () => import('../views/admin/KnowledgeSearchConfig.vue'),
+            meta: { title: '知识库检索配置' }
+          },
+          {
             path: 'vision-config',
             name: 'VisionConfig',
             component: () => import('../views/admin/VisionConfig.vue'),
@@ -218,6 +224,12 @@ const routes = [
         name: 'AgentHistory',
         component: () => import('../views/user/AgentHistory.vue'),
         meta: { title: '聊天历史记录' }
+      },
+      {
+        path: '/user/knowledge-bases',
+        name: 'UserKnowledgeBases',
+        component: () => import('../views/user/KnowledgeBases.vue'),
+        meta: { title: '我的知识库' }
       },
       {
         path: 'user/roles',
