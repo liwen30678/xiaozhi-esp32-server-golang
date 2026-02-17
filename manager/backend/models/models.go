@@ -137,6 +137,37 @@ type SpeakerSample struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// VoiceClone 复刻音色模型
+type VoiceClone struct {
+	ID                 uint      `json:"id" gorm:"primarykey"`
+	UserID             uint      `json:"user_id" gorm:"not null;index"`
+	Name               string    `json:"name" gorm:"type:varchar(100);not null"`
+	Provider           string    `json:"provider" gorm:"type:varchar(50);not null;index"`
+	ProviderVoiceID    string    `json:"provider_voice_id" gorm:"type:varchar(200);not null;index"`
+	TTSConfigID        string    `json:"tts_config_id" gorm:"type:varchar(100);not null;index"`
+	Status             string    `json:"status" gorm:"type:varchar(20);default:'active';index"`
+	TranscriptRequired bool      `json:"transcript_required" gorm:"default:false"`
+	MetaJSON           string    `json:"meta_json" gorm:"type:json"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// VoiceCloneAudio 复刻原始音频资产模型（保留上传/录音数据）
+type VoiceCloneAudio struct {
+	ID             uint      `json:"id" gorm:"primarykey"`
+	VoiceCloneID   *uint     `json:"voice_clone_id" gorm:"index"`
+	UserID         uint      `json:"user_id" gorm:"not null;index"`
+	SourceType     string    `json:"source_type" gorm:"type:varchar(20);not null"` // upload/record
+	FilePath       string    `json:"file_path" gorm:"type:varchar(500);not null"`
+	FileName       string    `json:"file_name" gorm:"type:varchar(255)"`
+	FileSize       int64     `json:"file_size"`
+	ContentType    string    `json:"content_type" gorm:"type:varchar(100)"`
+	Transcript     string    `json:"transcript" gorm:"type:text"`
+	TranscriptLang string    `json:"transcript_lang" gorm:"type:varchar(20)"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 // ChatMessage 聊天消息模型
 type ChatMessage struct {
 	ID        uint   `json:"id" gorm:"primarykey"`

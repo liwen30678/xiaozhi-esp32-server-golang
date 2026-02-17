@@ -37,6 +37,10 @@
           <el-icon><Microphone /></el-icon>
           <span>声纹管理</span>
         </el-menu-item>
+        <el-menu-item v-if="!authStore.isAdmin" index="/voice-clones">
+          <el-icon><Microphone /></el-icon>
+          <span>声音复刻</span>
+        </el-menu-item>
         
         <!-- 服务配置 -->
         <el-sub-menu v-if="authStore.isAdmin" index="/admin/service-config">

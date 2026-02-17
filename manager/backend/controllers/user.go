@@ -513,14 +513,14 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider参数必填"})
 		return
 	}
+	configID := c.Query("config_id")
 
+	var systemVoices []VoiceOption
 	// 特殊处理：阿里云千问，根据配置中的模型过滤音色
 	if provider == "aliyun_qwen" {
-		configID := c.Query("config_id")
 		// 如果没有提供 config_id，则返回不区分模型的基础音色列表（用于管理员配置页等场景）
 		if configID == "" {
-			voices := GetVoiceOptionsByProvider("aliyun_qwen")
-			c.JSON(http.StatusOK, gin.H{"data": voices})
+			systemVoices = GetVoiceOptionsByProvider("aliyun_qwen")
 		} else {
 			// 查找对应的 TTS 配置（type=tts）
 			var cfg models.Config
@@ -541,15 +541,35 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 				qc.Model = "qwen3-tts-flash"
 			}
 
-			voices := GetAliyunQwenVoicesByModel(qc.Model)
-			c.JSON(http.StatusOK, gin.H{"data": voices})
+			systemVoices = GetAliyunQwenVoicesByModel(qc.Model)
 		}
-		return
+	} else {
+		// 其他 provider：根据provider获取固定音色列表
+		systemVoices = GetVoiceOptionsByProvider(provider)
 	}
 
-	// 其他 provider：根据provider获取固定音色列表
-	voices := GetVoiceOptionsByProvider(provider)
-	c.JSON(http.StatusOK, gin.H{"data": voices})
+	result := make([]VoiceOption, 0, len(systemVoices)+8)
+	if userID, ok := c.Get("user_id"); ok && configID != "" {
+		var clones []models.VoiceClone
+		if err := uc.DB.Where("user_id = ? AND provider = ? AND tts_config_id = ? AND status = ?", userID, provider, configID, "active").Order("created_at DESC").Find(&clones).Error; err == nil {
+			for _, clone := range clones {
+				result = append(result, BuildVoiceOptionForClone(clone))
+			}
+		}
+	}
+
+	seen := make(map[string]bool)
+	for _, v := range result {
+		seen[v.Value] = true
+	}
+	for _, v := range systemVoices {
+		if seen[v.Value] {
+			continue
+		}
+		result = append(result, v)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
 // 获取LLM配置列表

@@ -220,6 +220,12 @@ const routes = [
         meta: { title: '声纹管理' }
       },
       {
+        path: '/voice-clones',
+        name: 'VoiceClones',
+        component: () => import('../views/user/VoiceClones.vue'),
+        meta: { title: '声音复刻' }
+      },
+      {
         path: '/user/agents/:id/history',
         name: 'AgentHistory',
         component: () => import('../views/user/AgentHistory.vue'),

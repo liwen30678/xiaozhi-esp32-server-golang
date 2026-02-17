@@ -36,7 +36,7 @@ func NewAudioStorage(basePath string, maxSize int64) *AudioStorage {
 func (s *AudioStorage) SaveAudioFile(userID uint, groupID uint, uuid, fileName string, fileData io.Reader) (string, int64, error) {
 	// 构建存储路径: storage/speakers/{user_id}/{group_id}/{uuid}.wav
 	dirPath := filepath.Join(s.BasePath, fmt.Sprintf("%d", userID), fmt.Sprintf("%d", groupID))
-	
+
 	// 确保目录存在
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		return "", 0, fmt.Errorf("创建目录失败: %v", err)
@@ -73,6 +73,39 @@ func (s *AudioStorage) SaveAudioFile(userID uint, groupID uint, uuid, fileName s
 	return filePath, written, nil
 }
 
+// SaveVoiceCloneAudioFile 保存复刻音频文件
+func (s *AudioStorage) SaveVoiceCloneAudioFile(userID uint, uuid, fileName string, fileData io.Reader) (string, int64, error) {
+	dirPath := filepath.Join(s.BasePath, "voice_clones", fmt.Sprintf("%d", userID))
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		return "", 0, fmt.Errorf("创建目录失败: %v", err)
+	}
+
+	ext := filepath.Ext(fileName)
+	if ext == "" {
+		ext = ".wav"
+	}
+	filePath := filepath.Join(dirPath, fmt.Sprintf("%s%s", uuid, ext))
+
+	file, err := os.Create(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("创建文件失败: %v", err)
+	}
+	defer file.Close()
+
+	limitedReader := io.LimitReader(fileData, s.MaxSize)
+	written, err := io.Copy(file, limitedReader)
+	if err != nil {
+		os.Remove(filePath)
+		return "", 0, fmt.Errorf("写入文件失败: %v", err)
+	}
+	if written >= s.MaxSize {
+		os.Remove(filePath)
+		return "", 0, fmt.Errorf("文件大小超过限制: %d 字节", s.MaxSize)
+	}
+
+	return filePath, written, nil
+}
+
 // DeleteAudioFile 删除音频文件
 func (s *AudioStorage) DeleteAudioFile(filePath string) error {
 	if filePath == "" {
@@ -97,4 +130,3 @@ func (s *AudioStorage) FileExists(filePath string) bool {
 	_, err := os.Stat(filePath)
 	return !os.IsNotExist(err)
 }
-
