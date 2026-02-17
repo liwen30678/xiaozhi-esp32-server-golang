@@ -3,7 +3,6 @@ package mem0
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -35,125 +34,98 @@ type Mem0Config struct {
 }
 
 var (
-	mem0Mu sync.Mutex
+	mem0Instance *Mem0Client
+	mem0Once     sync.Once
+	configOnce   sync.Once
 )
 
-// GetMem0ClientWithConfig 使用配置创建 Mem0 客户端
+// GetMem0ClientWithConfig 使用配置获取 Mem0 客户端单例
 func GetMem0ClientWithConfig(config map[string]interface{}) (*Mem0Client, error) {
-	mem0Mu.Lock()
-	defer mem0Mu.Unlock()
+	var err error
+	configOnce.Do(func() {
+		var enableSearch bool = true
+		var searchThreshold float64 = 0.5
+		var searchTopk int = 3
+		// 解析配置到结构体
+		var mem0Cfg Mem0Config
 
-	enableSearch := true
-	searchThreshold := 0.5
-	searchTopk := 3
-	mem0Cfg := Mem0Config{}
-
-	if enableSearchInterface, exists := config["enable_search"]; exists {
-		if iEnableSearch, ok := enableSearchInterface.(bool); ok {
-			enableSearch = iEnableSearch
+		if enableSearchInterface, exists := config["enable_search"]; exists {
+			if iEnableSearch, ok := enableSearchInterface.(bool); ok {
+				enableSearch = iEnableSearch
+			}
 		}
-	}
 
-	if searchThresholdInterface, exists := config["search_threshold"]; exists {
-		if iSearchThreshold, ok := searchThresholdInterface.(float64); ok {
-			searchThreshold = iSearchThreshold
+		if searchThresholdInterface, exists := config["search_threshold"]; exists {
+			if iSearchThreshold, ok := searchThresholdInterface.(float64); ok {
+				searchThreshold = iSearchThreshold
+			}
 		}
-	}
 
-	if searchTopkInterface, exists := config["search_topk"]; exists {
-		switch v := searchTopkInterface.(type) {
-		case int:
-			searchTopk = v
-		case float64:
-			searchTopk = int(v)
+		if searchTopkInterface, exists := config["search_topk"]; exists {
+			if iSearchTopk, ok := searchTopkInterface.(int); ok {
+				searchTopk = iSearchTopk
+			}
 		}
-	}
 
-	if apiKeyInterface, exists := config["api_key"]; exists {
-		if apiKey, ok := apiKeyInterface.(string); ok {
-			mem0Cfg.APIKey = apiKey
-		} else {
-			return nil, fmt.Errorf("mem0.api_key 必须是字符串")
+		// 读取 API Key
+		if apiKeyInterface, exists := config["api_key"]; exists {
+			if apiKey, ok := apiKeyInterface.(string); ok {
+				mem0Cfg.APIKey = apiKey
+			} else {
+				err = fmt.Errorf("mem0.api_key 必须是字符串")
+				return
+			}
 		}
-	}
 
-	if hostInterface, exists := config["base_url"]; exists {
-		if host, ok := hostInterface.(string); ok {
-			mem0Cfg.BaseUrl = host
-		} else {
-			return nil, fmt.Errorf("mem0.base_url 必须是字符串")
+		// 读取 Host
+		if hostInterface, exists := config["base_url"]; exists {
+			if host, ok := hostInterface.(string); ok {
+				mem0Cfg.BaseUrl = host
+			} else {
+				err = fmt.Errorf("mem0.host 必须是字符串")
+				return
+			}
 		}
-	}
 
-	if organizationName, exists := config["organization_name"]; exists {
-		if v, ok := organizationName.(string); ok {
-			mem0Cfg.OrganizationName = v
+		// 验证必要配置
+		if mem0Cfg.APIKey == "" {
+			err = fmt.Errorf("mem0.api_key 配置缺失或为空")
+			return
 		}
-	}
-	if projectName, exists := config["project_name"]; exists {
-		if v, ok := projectName.(string); ok {
-			mem0Cfg.ProjectName = v
+
+		// 设置默认值
+		if mem0Cfg.BaseUrl == "" {
+			mem0Cfg.BaseUrl = "https://api.mem0.ai"
 		}
-	}
-	if organizationID, exists := config["organization_id"]; exists {
-		if v, ok := organizationID.(string); ok {
-			mem0Cfg.OrganizationID = v
+
+		// 创建 mem0 客户端
+		clientOptions := client.ClientOptions{
+			APIKey: mem0Cfg.APIKey,
+			/*Host:             mem0Cfg.Host,
+			OrganizationName: mem0Cfg.OrganizationName,
+			ProjectName:      mem0Cfg.ProjectName,
+			OrganizationID:   mem0Cfg.OrganizationID,
+			ProjectID:        mem0Cfg.ProjectID,*/
 		}
-	}
-	if projectID, exists := config["project_id"]; exists {
-		if v, ok := projectID.(string); ok {
-			mem0Cfg.ProjectID = v
+
+		mem0Client, clientErr := client.NewMemoryClient(clientOptions)
+		if clientErr != nil {
+			err = fmt.Errorf("failed to create mem0 client: %w", clientErr)
+			return
 		}
-	}
 
-	if mem0Cfg.APIKey == "" {
-		return nil, fmt.Errorf("mem0.api_key 配置缺失或为空")
-	}
-	if mem0Cfg.BaseUrl == "" {
-		mem0Cfg.BaseUrl = "https://api.mem0.ai"
-	}
-
-	clientOptions := client.ClientOptions{APIKey: mem0Cfg.APIKey}
-	setClientOptionIfExists(&clientOptions, "Host", mem0Cfg.BaseUrl)
-	setClientOptionIfExists(&clientOptions, "BaseURL", mem0Cfg.BaseUrl)
-	setClientOptionIfExists(&clientOptions, "BaseUrl", mem0Cfg.BaseUrl)
-	setClientOptionIfExists(&clientOptions, "OrganizationName", mem0Cfg.OrganizationName)
-	setClientOptionIfExists(&clientOptions, "ProjectName", mem0Cfg.ProjectName)
-	setClientOptionIfExists(&clientOptions, "OrganizationID", mem0Cfg.OrganizationID)
-	setClientOptionIfExists(&clientOptions, "ProjectID", mem0Cfg.ProjectID)
-
-	mem0Client, err := client.NewMemoryClient(clientOptions)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create mem0 client: %w", err)
-	}
-
-	instance := &Mem0Client{
-		client:          mem0Client,
-		config:          mem0Cfg,
-		EnableSearch:    enableSearch,
-		SearchThreshold: searchThreshold,
-		SearchTopk:      searchTopk,
-	}
-
-	log.Log().Infof("Mem0 客户端初始化成功, base_url: %s", mem0Cfg.BaseUrl)
-	return instance, nil
-}
-
-func setClientOptionIfExists(options *client.ClientOptions, fieldName string, value string) {
-	if value == "" {
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			log.Log().Warnf("设置mem0客户端字段失败: %s, err: %v", fieldName, r)
+		mem0Instance = &Mem0Client{
+			client:          mem0Client,
+			config:          mem0Cfg,
+			EnableSearch:    enableSearch,
+			SearchThreshold: searchThreshold,
+			SearchTopk:      searchTopk,
 		}
-	}()
-	v := reflect.ValueOf(options).Elem()
-	f := v.FieldByName(fieldName)
-	if !f.IsValid() || !f.CanSet() || f.Kind() != reflect.String {
-		return
-	}
-	f.SetString(value)
+
+		log.Log().Infof("Mem0 客户端初始化成功, base_url: %s", mem0Cfg.BaseUrl)
+	})
+
+	return mem0Instance, err
 }
 
 // Init 初始化客户端
