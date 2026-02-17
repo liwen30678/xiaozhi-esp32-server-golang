@@ -338,9 +338,15 @@ memory:
   memos:
     api_key: "your_memos_api_key_here"
     base_url: "http://localhost:8000"
-    enable_search: true         # MemOS 接口按 Mem0 兼容模式接入
-    search_threshold: 0.5
+    timeout_ms: 10000
+    enable_search: true
     search_top_k: 3
+    # 以下 endpoint 默认按官方文档 core 目录语义设置，如你的服务路由不同可覆盖
+    endpoint_add_message: "/api/v1/core/add_message"
+    endpoint_get_messages: "/api/v1/core/get_messages"
+    endpoint_search: "/api/v1/core/search"
+    endpoint_flush: "/api/v1/core/flush"
+    endpoint_reset_memory: "/api/v1/core/reset_memory"
 
 # 启用欢迎语
 enable_greeting: true

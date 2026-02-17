@@ -1,4 +1,4 @@
-# MemOS 独立 Provider API 对接文档（基于官方文档，待你确认细节后实现）
+# MemOS 独立 Provider API 对接文档（基于官方文档，基于官方 core 文档实现（可按部署覆盖 endpoint））
 
 > 官方文档：`https://memos-docs.openmem.net/cn/api_docs/start/overview`
 >
@@ -85,3 +85,14 @@ internal/domain/memory/memos/
 当前执行环境对该官方文档站点请求返回 403，无法在本地自动抓取文档内容。
 
 如你确认上面的字段与 endpoint，我会立即提交“独立 MemOS provider 的完整实现 + 测试”。
+
+
+## 6. 当前实现说明
+
+- 已实现 `memos_client.go`，默认使用以下接口：
+  - `/api/v1/core/add_message`
+  - `/api/v1/core/get_messages`
+  - `/api/v1/core/search`
+  - `/api/v1/core/flush`
+  - `/api/v1/core/reset_memory`
+- 若你的 MemOS 实际路由不同，可通过 `endpoint_*` 配置项覆盖。
