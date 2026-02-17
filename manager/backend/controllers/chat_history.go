@@ -492,12 +492,18 @@ func (c *ChatHistoryController) GetMessagesForInit(ctx *gin.Context) {
 	}
 
 	var messages []models.ChatMessage
-	// 使用 ASC 排序（旧的在前），因为用于 LLM 上下文需要按时间顺序
-	if err := query.Order("created_at ASC").
+	// 先取最新的 N 条，再反转为时间正序（旧 -> 新）供 LLM 使用
+	if err := query.Order("created_at DESC").
+		Order("id DESC").
 		Limit(limit).
 		Find(&messages).Error; err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "查询失败"})
 		return
+	}
+
+	// 反转后保证返回顺序为旧 -> 新
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
 	}
 
 	// 转换为响应格式（只包含文本，不包含音频）
