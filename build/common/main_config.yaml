@@ -341,12 +341,12 @@ memory:
     timeout_ms: 10000
     enable_search: true
     search_top_k: 3
-    # 以下 endpoint 默认按官方文档 core 目录语义设置，如你的服务路由不同可覆盖
-    endpoint_add_message: "/core/add_message"
-    endpoint_get_messages: "/core/get_messages"
-    endpoint_search: "/core/search"
-    endpoint_flush: "/core/flush"
-    endpoint_reset_memory: "/core/reset_memory"
+    # 以下 endpoint 默认按 OpenMem v1 路径语义设置，如你的服务路由不同可覆盖
+    endpoint_add_message: "/add/message"
+    endpoint_get_messages: "/get/messages"
+    endpoint_search: "/search"
+    endpoint_flush: "/flush"
+    endpoint_reset_memory: "/reset/memory"
 
 # 启用欢迎语
 enable_greeting: true

@@ -37,7 +37,7 @@ type Client struct {
 
 // GetWithConfig 使用配置初始化 MemOS 客户端。
 //
-// 基于官方文档目录 /cn/api_docs/core/*，默认 endpoint 使用 core 语义路径，
+// 基于 OpenMem 文档，默认 endpoint 使用 openmem v1 路径语义，
 // 如后续文档字段有差异，可通过 endpoint_* 配置覆盖。
 func GetWithConfig(config map[string]interface{}) (*Client, error) {
 	if config == nil {
@@ -66,11 +66,11 @@ func GetWithConfig(config map[string]interface{}) (*Client, error) {
 		httpClient:      &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond},
 		enableSearch:    enableSearch,
 		searchTopK:      searchTopK,
-		addMessagePath:  getString(config, "endpoint_add_message", "/core/add_message"),
-		getMessagesPath: getString(config, "endpoint_get_messages", "/core/get_messages"),
-		searchPath:      getString(config, "endpoint_search", "/core/search"),
-		flushPath:       getString(config, "endpoint_flush", "/core/flush"),
-		resetPath:       getString(config, "endpoint_reset_memory", "/core/reset_memory"),
+		addMessagePath:  getString(config, "endpoint_add_message", "/add/message"),
+		getMessagesPath: getString(config, "endpoint_get_messages", "/get/messages"),
+		searchPath:      getString(config, "endpoint_search", "/search"),
+		flushPath:       getString(config, "endpoint_flush", "/flush"),
+		resetPath:       getString(config, "endpoint_reset_memory", "/reset/memory"),
 	}
 
 	log.Log().Infof("MemOS 客户端初始化成功, base_url: %s", client.baseURL)

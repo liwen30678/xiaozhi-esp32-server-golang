@@ -12,7 +12,7 @@ import (
 
 func TestAddMessage(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/core/add_message" {
+		if r.URL.Path != "/add/message" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -31,7 +31,7 @@ func TestAddMessage(t *testing.T) {
 
 func TestGetMessages(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/core/get_messages" {
+		if r.URL.Path != "/get/messages" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		resp := map[string]interface{}{

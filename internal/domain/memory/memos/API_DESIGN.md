@@ -1,4 +1,4 @@
-# MemOS 独立 Provider API 对接文档（基于官方文档，基于官方 core 文档实现（可按部署覆盖 endpoint））
+# MemOS 独立 Provider API 对接文档（基于官方文档，可按部署覆盖 endpoint）
 
 > 官方文档：`https://memos-docs.openmem.net/cn/api_docs/start/overview`
 >
@@ -89,11 +89,11 @@ internal/domain/memory/memos/
 
 ## 6. 当前实现说明
 
-- 实际请求 URL = `base_url + endpoint_path`（例如 `http://host/api/v1` + `/core/add_message`）。
+- 实际请求 URL = `base_url + endpoint_path`（例如 `http://host/api/v1` + `/add/message`）。
 - 已实现 `memos_client.go`，默认使用以下接口：
-  - `/core/add_message`
-  - `/core/get_messages`
-  - `/core/search`
-  - `/core/flush`
-  - `/core/reset_memory`
+  - `/add/message`
+  - `/get/messages`
+  - `/search`
+  - `/flush`
+  - `/reset/memory`
 - 若你的 MemOS 实际路由不同，可通过 `endpoint_*` 配置项覆盖。
