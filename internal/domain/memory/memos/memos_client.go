@@ -144,10 +144,10 @@ func (c *Client) Search(ctx context.Context, agentID string, query string, topK 
 		return "", err
 	}
 	payload["query"] = query
-	payload["top_k"] = topK
-	payload["threshold"] = c.searchThreshold
-	payload["time_range_days"] = timeRangeDays
-	data, err := c.requestJSON(ctx, http.MethodPost, "/search", payload)
+	payload["memory_limit_number"] = topK
+	payload["relativity"] = c.searchThreshold
+	_ = timeRangeDays // 文档当前无 time_range_days 字段，保留签名兼容
+	data, err := c.requestJSON(ctx, http.MethodPost, "/search/memory", payload)
 	if err != nil {
 		return "", fmt.Errorf("memos search failed: %w", err)
 	}

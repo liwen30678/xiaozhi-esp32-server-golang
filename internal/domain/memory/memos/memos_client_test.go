@@ -77,3 +77,39 @@ func TestAddMessage_EmptyAgentID(t *testing.T) {
 		t.Fatal("expected error when agentID is empty")
 	}
 }
+
+func TestSearchPayload(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/memory" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if payload["user_id"] != "agentX" || payload["conversation_id"] != "agentX" {
+			t.Fatalf("identity fields mismatch: %#v", payload)
+		}
+		if payload["memory_limit_number"] != float64(7) {
+			t.Fatalf("memory_limit_number mismatch: %#v", payload)
+		}
+		if payload["relativity"] != 0.5 {
+			t.Fatalf("relativity mismatch: %#v", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"results":[{"content":"abc"}]}}`))
+	}))
+	defer ts.Close()
+
+	c, err := GetWithConfig(map[string]interface{}{"base_url": ts.URL, "search_threshold": 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := c.Search(context.Background(), "agentX", "hello", 7, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx == "" {
+		t.Fatal("expected non-empty search context")
+	}
+}

@@ -95,10 +95,10 @@ internal/domain/memory/memos/
 - 已实现 `memos_client.go`，默认使用以下接口：
   - `/add/message`
   - `/get/messages`
-  - `/search`
+  - `/search/memory`
   - `/flush`
   - `/reset/memory`
-- 路径采用固定官方语义：`/add/message`、`/get/messages`、`/search`、`/flush`、`/reset/memory`。
+- 路径采用固定官方语义：`/add/message`、`/get/messages`、`/search/memory`、`/flush`、`/reset/memory`。
 
 
 ## 7. Add Message 字段约束（已按文档调整）
@@ -106,3 +106,13 @@ internal/domain/memory/memos/
 - `user_id` / `conversation_id` 为必填。
 - `agent_id` 为可选，仅在有值时传递。
 - 当前实现中使用 `agentID` 同时映射到 `user_id` 与 `conversation_id`；当 `agentID` 为空时直接报错，不再使用默认占位值。
+
+
+## 8. Search Memory 字段映射（已按文档调整）
+
+- Path: `/search/memory`
+- `user_id`: 使用 `agentID` 映射
+- `conversation_id`: 使用 `agentID` 映射
+- `query`: 透传用户输入
+- `memory_limit_number`: 由 `topK` 映射
+- `relativity`: 由 `search_threshold` 映射
