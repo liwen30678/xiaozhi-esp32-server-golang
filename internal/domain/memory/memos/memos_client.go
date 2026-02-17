@@ -151,7 +151,7 @@ func (c *Client) Search(ctx context.Context, agentID string, query string, topK 
 	if err != nil {
 		return "", fmt.Errorf("memos search failed: %w", err)
 	}
-	items := getArrayField(data, "results", "memories", "items")
+	items := getSearchItems(data)
 	if len(items) == 0 {
 		return "", nil
 	}
@@ -161,7 +161,7 @@ func (c *Client) Search(ctx context.Context, agentID string, query string, topK 
 		if !ok {
 			continue
 		}
-		text := getStringFromMap(obj, "content", "memory", "text")
+		text := getStringFromMap(obj, "memory_value", "content", "memory", "text")
 		if text != "" {
 			lines = append(lines, "- "+text)
 		}
@@ -308,6 +308,25 @@ func getBool(config map[string]interface{}, key string, defaultValue bool) bool 
 		}
 	}
 	return defaultValue
+}
+
+func getSearchItems(data map[string]interface{}) []interface{} {
+	keys := []string{
+		"memory_detail_list",
+		"preference_detail_list",
+		"tool_memory_detail_list",
+		"skill_detail_list",
+		"results",
+		"memories",
+		"items",
+	}
+	merged := make([]interface{}, 0)
+	for _, key := range keys {
+		if arr, ok := data[key].([]interface{}); ok && len(arr) > 0 {
+			merged = append(merged, arr...)
+		}
+	}
+	return merged
 }
 
 func getArrayField(data map[string]interface{}, keys ...string) []interface{} {

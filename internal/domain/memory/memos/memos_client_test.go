@@ -97,7 +97,7 @@ func TestSearchPayload(t *testing.T) {
 			t.Fatalf("relativity mismatch: %#v", payload)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"results":[{"content":"abc"}]}}`))
+		_, _ = w.Write([]byte(`{"data":{"memory_detail_list":[{"memory_value":"abc"}]}}`))
 	}))
 	defer ts.Close()
 
@@ -109,7 +109,7 @@ func TestSearchPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ctx == "" {
-		t.Fatal("expected non-empty search context")
+	if ctx == "" || ctx != "- abc" {
+		t.Fatalf("unexpected search context: %s", ctx)
 	}
 }
