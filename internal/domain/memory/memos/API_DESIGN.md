@@ -2,6 +2,8 @@
 
 > 官方文档：`https://memos-docs.openmem.net/cn/api_docs/start/overview`
 >
+> 示例 base_url：`https://memos.memtensor.cn/api/openmem/v1`
+>
 > 目标：将 MemOS 作为**独立 provider**接入，不再与 `mem0` 复用。
 
 ---
@@ -29,9 +31,9 @@
 
 ---
 
-## 3. 官方文档提取清单（待确认）
+## 3. 对接要点（按官方文档）
 
-请按下列模板确认（我会据此直接落地代码，不再猜）：
+以下字段作为可覆盖配置，若部署接口有差异请在后台配置中填写 endpoint_*：
 
 1. 鉴权方式
    - Header 名称：

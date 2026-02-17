@@ -135,9 +135,28 @@
           <el-form-item label="基础URL" prop="base_url">
             <el-input v-model="form.base_url" :placeholder="form.provider === 'memos' ? '请输入MemOS服务基础URL' : '请输入Mem0基础URL'" />
           </el-form-item>
-          
 
-          
+          <template v-if="form.provider === 'memos'">
+            <el-form-item label="超时时间(ms)" prop="timeout_ms">
+              <el-input-number v-model="form.timeout_ms" :min="1000" :step="1000" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="Add路径" prop="endpoint_add_message">
+              <el-input v-model="form.endpoint_add_message" placeholder="/add/message" />
+            </el-form-item>
+            <el-form-item label="Get路径" prop="endpoint_get_messages">
+              <el-input v-model="form.endpoint_get_messages" placeholder="/get/messages" />
+            </el-form-item>
+            <el-form-item label="Search路径" prop="endpoint_search">
+              <el-input v-model="form.endpoint_search" placeholder="/search" />
+            </el-form-item>
+            <el-form-item label="Flush路径" prop="endpoint_flush">
+              <el-input v-model="form.endpoint_flush" placeholder="/flush" />
+            </el-form-item>
+            <el-form-item label="Reset路径" prop="endpoint_reset_memory">
+              <el-input v-model="form.endpoint_reset_memory" placeholder="/reset/memory" />
+            </el-form-item>
+          </template>
+
           <el-form-item label="启用搜索" prop="enable_search">
             <el-switch v-model="form.enable_search" />
           </el-form-item>
@@ -190,14 +209,20 @@ const form = reactive({
   base_url: '',
   enable_search: true,
   search_threshold: 0.5,
-  search_top_k: 3
+  search_top_k: 3,
+  timeout_ms: 10000,
+  endpoint_add_message: '/add/message',
+  endpoint_get_messages: '/get/messages',
+  endpoint_search: '/search',
+  endpoint_flush: '/flush',
+  endpoint_reset_memory: '/reset/memory'
 })
 
 // 默认URL配置
 const defaultUrls = {
   memobase: 'https://api.memobase.dev',
   mem0: 'https://api.mem0.ai',
-  memos: 'http://localhost:8000'
+  memos: 'https://memos.memtensor.cn/api/openmem/v1'
 }
 
 
@@ -214,6 +239,12 @@ const handleProviderChange = (value) => {
   form.enable_search = true
   form.search_threshold = 0.5
   form.search_top_k = 3
+  form.timeout_ms = 10000
+  form.endpoint_add_message = '/add/message'
+  form.endpoint_get_messages = '/get/messages'
+  form.endpoint_search = '/search'
+  form.endpoint_flush = '/flush'
+  form.endpoint_reset_memory = '/reset/memory'
 }
 
 // 生成配置JSON字符串
@@ -225,7 +256,16 @@ const generateConfig = () => {
     search_threshold: form.search_threshold,
     search_top_k: form.search_top_k
   }
-  
+
+  if (form.provider === 'memos') {
+    config.timeout_ms = form.timeout_ms
+    config.endpoint_add_message = form.endpoint_add_message
+    config.endpoint_get_messages = form.endpoint_get_messages
+    config.endpoint_search = form.endpoint_search
+    config.endpoint_flush = form.endpoint_flush
+    config.endpoint_reset_memory = form.endpoint_reset_memory
+  }
+
   return JSON.stringify(config)
 }
 
@@ -238,6 +278,12 @@ const parseConfig = (jsonData) => {
     form.enable_search = config.enable_search !== undefined ? config.enable_search : true
     form.search_threshold = config.search_threshold !== undefined ? config.search_threshold : 0.5
     form.search_top_k = config.search_top_k !== undefined ? config.search_top_k : 3
+    form.timeout_ms = config.timeout_ms !== undefined ? config.timeout_ms : 10000
+    form.endpoint_add_message = config.endpoint_add_message || '/add/message'
+    form.endpoint_get_messages = config.endpoint_get_messages || '/get/messages'
+    form.endpoint_search = config.endpoint_search || '/search'
+    form.endpoint_flush = config.endpoint_flush || '/flush'
+    form.endpoint_reset_memory = config.endpoint_reset_memory || '/reset/memory' 
   } catch (error) {
     console.error('解析配置失败:', error)
   }
@@ -409,7 +455,13 @@ const handleAddConfig = () => {
     base_url: defaultUrls['memobase'], // 设置默认URL
     enable_search: true,
     search_threshold: 0.5,
-    search_top_k: 3
+    search_top_k: 3,
+    timeout_ms: 10000,
+    endpoint_add_message: '/add/message',
+    endpoint_get_messages: '/get/messages',
+    endpoint_search: '/search',
+    endpoint_flush: '/flush',
+    endpoint_reset_memory: '/reset/memory'
   })
   
   editingConfig.value = null
@@ -431,7 +483,13 @@ const handleDialogClose = () => {
     base_url: '',
     enable_search: true,
     search_threshold: 0.5,
-    search_top_k: 3
+    search_top_k: 3,
+    timeout_ms: 10000,
+    endpoint_add_message: '/add/message',
+    endpoint_get_messages: '/get/messages',
+    endpoint_search: '/search',
+    endpoint_flush: '/flush',
+    endpoint_reset_memory: '/reset/memory'
   })
   
   if (formRef.value) {

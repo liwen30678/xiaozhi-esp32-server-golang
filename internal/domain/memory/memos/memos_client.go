@@ -16,17 +16,18 @@ import (
 )
 
 const (
-	defaultBaseURL   = "http://localhost:8000"
+	defaultBaseURL   = "https://memos.memtensor.cn/api/openmem/v1"
 	defaultTimeoutMS = 10000
 )
 
 // Client 是 MemOS 独立 provider 客户端实现。
 type Client struct {
-	baseURL      string
-	apiKey       string
-	httpClient   *http.Client
-	enableSearch bool
-	searchTopK   int
+	baseURL         string
+	apiKey          string
+	httpClient      *http.Client
+	enableSearch    bool
+	searchTopK      int
+	searchThreshold float64
 
 	addMessagePath  string
 	getMessagesPath string
@@ -36,9 +37,7 @@ type Client struct {
 }
 
 // GetWithConfig 使用配置初始化 MemOS 客户端。
-//
-// 基于 OpenMem 文档，默认 endpoint 使用 openmem v1 路径语义，
-// 如后续文档字段有差异，可通过 endpoint_* 配置覆盖。
+// 实际请求 URL = base_url + endpoint_*
 func GetWithConfig(config map[string]interface{}) (*Client, error) {
 	if config == nil {
 		config = map[string]interface{}{}
@@ -49,6 +48,7 @@ func GetWithConfig(config map[string]interface{}) (*Client, error) {
 	timeoutMS := getInt(config, "timeout_ms", defaultTimeoutMS)
 	enableSearch := getBool(config, "enable_search", true)
 	searchTopK := getInt(config, "search_top_k", 3)
+	searchThreshold := getFloat(config, "search_threshold", 0.5)
 
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("memos.base_url 配置缺失或为空")
@@ -66,6 +66,7 @@ func GetWithConfig(config map[string]interface{}) (*Client, error) {
 		httpClient:      &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond},
 		enableSearch:    enableSearch,
 		searchTopK:      searchTopK,
+		searchThreshold: searchThreshold,
 		addMessagePath:  getString(config, "endpoint_add_message", "/add/message"),
 		getMessagesPath: getString(config, "endpoint_get_messages", "/get/messages"),
 		searchPath:      getString(config, "endpoint_search", "/search"),
@@ -105,10 +106,11 @@ func (c *Client) GetMessages(ctx context.Context, agentID string, count int) ([]
 		return nil, fmt.Errorf("memos get_messages failed: %w", err)
 	}
 
-	msgsRaw, ok := data["messages"].([]interface{})
-	if !ok {
+	msgsRaw := getArrayField(data, "messages", "message_list", "items")
+	if len(msgsRaw) == 0 {
 		return []*schema.Message{}, nil
 	}
+
 	messages := make([]*schema.Message, 0, len(msgsRaw))
 	for _, item := range msgsRaw {
 		obj, ok := item.(map[string]interface{})
@@ -126,7 +128,7 @@ func (c *Client) GetMessages(ctx context.Context, agentID string, count int) ([]
 				role = schema.System
 			}
 		}
-		content, _ := obj["content"].(string)
+		content := getStringFromMap(obj, "content", "memory", "text")
 		messages = append(messages, &schema.Message{Role: role, Content: content})
 	}
 	return messages, nil
@@ -150,14 +152,15 @@ func (c *Client) Search(ctx context.Context, agentID string, query string, topK 
 		"agent_id":        agentID,
 		"query":           query,
 		"top_k":           topK,
+		"threshold":       c.searchThreshold,
 		"time_range_days": timeRangeDays,
 	}
 	data, err := c.requestJSON(ctx, http.MethodPost, c.searchPath, payload)
 	if err != nil {
 		return "", fmt.Errorf("memos search failed: %w", err)
 	}
-	items, ok := data["results"].([]interface{})
-	if !ok || len(items) == 0 {
+	items := getArrayField(data, "results", "memories", "items")
+	if len(items) == 0 {
 		return "", nil
 	}
 	lines := make([]string, 0, len(items))
@@ -166,10 +169,7 @@ func (c *Client) Search(ctx context.Context, agentID string, query string, topK 
 		if !ok {
 			continue
 		}
-		text, _ := obj["content"].(string)
-		if text == "" {
-			text, _ = obj["memory"].(string)
-		}
+		text := getStringFromMap(obj, "content", "memory", "text")
 		if text != "" {
 			lines = append(lines, "- "+text)
 		}
@@ -212,6 +212,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, payload m
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -225,7 +226,6 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, payload m
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("status=%d, body=%s", resp.StatusCode, string(respBytes))
 	}
-
 	if len(respBytes) == 0 {
 		return map[string]interface{}{}, nil
 	}
@@ -234,8 +234,12 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, payload m
 	if err := json.Unmarshal(respBytes, &out); err != nil {
 		return nil, fmt.Errorf("invalid json response: %w", err)
 	}
+
 	if data, ok := out["data"].(map[string]interface{}); ok {
 		return data, nil
+	}
+	if result, ok := out["result"].(map[string]interface{}); ok {
+		return result, nil
 	}
 	return out, nil
 }
@@ -265,6 +269,22 @@ func getInt(config map[string]interface{}, key string, defaultValue int) int {
 	return defaultValue
 }
 
+func getFloat(config map[string]interface{}, key string, defaultValue float64) float64 {
+	if v, ok := config[key]; ok {
+		switch value := v.(type) {
+		case float64:
+			return value
+		case float32:
+			return float64(value)
+		case int:
+			return float64(value)
+		case int64:
+			return float64(value)
+		}
+	}
+	return defaultValue
+}
+
 func getBool(config map[string]interface{}, key string, defaultValue bool) bool {
 	if v, ok := config[key]; ok {
 		if b, ok := v.(bool); ok {
@@ -272,4 +292,22 @@ func getBool(config map[string]interface{}, key string, defaultValue bool) bool 
 		}
 	}
 	return defaultValue
+}
+
+func getArrayField(data map[string]interface{}, keys ...string) []interface{} {
+	for _, key := range keys {
+		if arr, ok := data[key].([]interface{}); ok {
+			return arr
+		}
+	}
+	return nil
+}
+
+func getStringFromMap(data map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if val, ok := data[key].(string); ok && val != "" {
+			return val
+		}
+	}
+	return ""
 }
