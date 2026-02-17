@@ -15,6 +15,13 @@ func TestAddMessage(t *testing.T) {
 		if r.URL.Path != "/add/message" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload failed: %v", err)
+		}
+		if payload["user_id"] == "" || payload["conversation_id"] == "" {
+			t.Fatalf("user_id/conversation_id should not be empty: %#v", payload)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":0,"message":"ok"}`))
 	}))
