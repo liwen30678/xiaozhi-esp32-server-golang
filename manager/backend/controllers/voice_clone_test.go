@@ -289,6 +289,75 @@ func TestValidateCloneAudioForProvider(t *testing.T) {
 	if err := validateCloneAudioForProvider("unknown_provider", shortPath); err == nil {
 		t.Fatalf("validateCloneAudioForProvider(unknown_provider) expected error")
 	}
+
+	mp3Path := filepath.Join(dir, "ok.mp3")
+	if err := os.WriteFile(mp3Path, []byte{0x49, 0x44, 0x33, 0x03, 0x00}, 0644); err != nil {
+		t.Fatalf("write mp3 failed: %v", err)
+	}
+	if err := validateCloneAudioForProvider("aliyun_qwen", mp3Path); err != nil {
+		t.Fatalf("validateCloneAudioForProvider(aliyun_qwen/mp3) unexpected error: %v", err)
+	}
+	if err := validateCloneAudioForProvider("minimax", mp3Path); err == nil {
+		t.Fatalf("validateCloneAudioForProvider(minimax/mp3) expected error")
+	}
+}
+
+func TestResolveAliyunQwenCloneEndpoint(t *testing.T) {
+	if got := resolveAliyunQwenCloneEndpoint(map[string]any{"api_url": "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"}); got != defaultAliyunQwenCloneEndpointIntl {
+		t.Fatalf("resolveAliyunQwenCloneEndpoint(intl) = %q, want %q", got, defaultAliyunQwenCloneEndpointIntl)
+	}
+	if got := resolveAliyunQwenCloneEndpoint(map[string]any{"clone_endpoint": "https://example.com/custom"}); got != "https://example.com/custom" {
+		t.Fatalf("resolveAliyunQwenCloneEndpoint(custom) = %q", got)
+	}
+	if got := resolveAliyunQwenCloneEndpoint(map[string]any{}); got != defaultAliyunQwenCloneEndpoint {
+		t.Fatalf("resolveAliyunQwenCloneEndpoint(default) = %q, want %q", got, defaultAliyunQwenCloneEndpoint)
+	}
+}
+
+func TestResolveAliyunQwenTargetModel(t *testing.T) {
+	if model := resolveAliyunQwenTargetModel(); model != defaultAliyunQwenCloneTargetModel {
+		t.Fatalf("resolveAliyunQwenTargetModel() = %q, want %q", model, defaultAliyunQwenCloneTargetModel)
+	}
+}
+
+func TestMapAliyunQwenCloneLanguage(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "zh-CN", want: "zh"},
+		{in: "en-US", want: "en"},
+		{in: "ja-JP", want: "ja"},
+		{in: "ru-RU", want: "ru"},
+		{in: "unknown", want: ""},
+	}
+	for _, tt := range tests {
+		if got := mapAliyunQwenCloneLanguage(tt.in); got != tt.want {
+			t.Fatalf("mapAliyunQwenCloneLanguage(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeCloneProvider(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "qwen_tts", want: "qwen_tts"},
+		{in: " aliyun_qwen ", want: "aliyun_qwen"},
+		{in: "minimax", want: "minimax"},
+	}
+	for _, tt := range tests {
+		if got := normalizeCloneProvider(tt.in); got != tt.want {
+			t.Fatalf("normalizeCloneProvider(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestGetCloneProviderCapabilityAlias(t *testing.T) {
+	if got := GetCloneProviderCapability("qwen_tts"); got.Enabled {
+		t.Fatalf("GetCloneProviderCapability(qwen_tts).Enabled expected false")
+	}
 }
 
 func buildPCM16WAV(sampleRate, channels, bitsPerSample, durationSec int) []byte {

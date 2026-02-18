@@ -95,13 +95,15 @@ func (vcc *VoiceCloneController) processVoiceCloneTask(taskPrimaryID uint) {
 		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("任务关联TTS配置不存在: %w", err))
 		return
 	}
-	provider := strings.TrimSpace(ttsCfg.Provider)
+	provider := normalizeCloneProvider(strings.TrimSpace(ttsCfg.Provider))
 	var result *minimaxVoiceCloneResult
 	switch provider {
 	case "minimax":
 		result, err = vcc.cloneWithMinimax(ctx, ttsCfg, clone.TTSConfigID, audio.FilePath, audio.FileName, audio.Transcript)
 	case "cosyvoice":
 		result, err = vcc.cloneWithCosyVoice(ctx, audio.FilePath, audio.FileName, audio.Transcript)
+	case "aliyun_qwen":
+		result, err = vcc.cloneWithAliyunQwen(ctx, ttsCfg, clone.TTSConfigID, audio.FilePath, audio.FileName, audio.Transcript, audio.TranscriptLang)
 	default:
 		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("当前任务不支持提供商: %s", provider))
 		return
@@ -185,13 +187,21 @@ func (vcc *VoiceCloneController) finishVoiceCloneTaskSuccess(task *models.VoiceC
 		"task_status": voiceCloneTaskStatusSucceeded,
 		"finished_at": now,
 	})
-	taskMetaJSON, _ := json.Marshal(map[string]any{
+	taskMeta := map[string]any{
 		"request_id":  result.RequestID,
 		"http_code":   result.ResponseCode,
 		"response":    result.RawResponse,
 		"voice_id":    result.VoiceID,
 		"finished_at": now,
-	})
+	}
+	if strings.TrimSpace(result.TargetModel) != "" {
+		targetModel := strings.TrimSpace(result.TargetModel)
+		cloneMetaJSON = mergeJSONMeta(cloneMetaJSON, map[string]any{
+			"target_model": targetModel,
+		})
+		taskMeta["target_model"] = targetModel
+	}
+	taskMetaJSON, _ := json.Marshal(taskMeta)
 
 	return vcc.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.VoiceClone{}).Where("id = ? AND user_id = ?", clone.ID, clone.UserID).Updates(map[string]any{

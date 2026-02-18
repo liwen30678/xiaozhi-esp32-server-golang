@@ -71,13 +71,14 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				JsonData string `json:"json_data"`
 			} `json:"memory"`
 			VoiceIdentify map[string]struct {
-				ID          uint     `json:"id"`
-				Name        string   `json:"name"`
-				Prompt      string   `json:"prompt"`
-				Description string   `json:"description"`
-				Uuids       []string `json:"uuids"`
-				TTSConfigID *string  `json:"tts_config_id"`
-				Voice       *string  `json:"voice"`
+				ID                 uint     `json:"id"`
+				Name               string   `json:"name"`
+				Prompt             string   `json:"prompt"`
+				Description        string   `json:"description"`
+				Uuids              []string `json:"uuids"`
+				TTSConfigID        *string  `json:"tts_config_id"`
+				Voice              *string  `json:"voice"`
+				VoiceModelOverride *string  `json:"voice_model_override"`
 			} `json:"voice_identify"`
 			Prompt     string `json:"prompt"`
 			AgentId    string `json:"agent_id"`
@@ -118,13 +119,14 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		// 将 map 格式的声纹组信息转换为配置格式
 		for groupName, groupInfo := range response.Data.VoiceIdentify {
 			groupData := types.SpeakerGroupInfo{
-				ID:          groupInfo.ID,
-				Name:        groupInfo.Name,
-				Prompt:      groupInfo.Prompt,
-				Description: groupInfo.Description,
-				Uuids:       groupInfo.Uuids,
-				TTSConfigID: groupInfo.TTSConfigID,
-				Voice:       groupInfo.Voice,
+				ID:                 groupInfo.ID,
+				Name:               groupInfo.Name,
+				Prompt:             groupInfo.Prompt,
+				Description:        groupInfo.Description,
+				Uuids:              groupInfo.Uuids,
+				TTSConfigID:        groupInfo.TTSConfigID,
+				Voice:              groupInfo.Voice,
+				VoiceModelOverride: groupInfo.VoiceModelOverride,
 			}
 			voiceIdentifyData[groupName] = groupData
 		}

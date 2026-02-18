@@ -38,6 +38,8 @@ type SpeakerGroupInfo struct {
 	Uuids       []string `json:"uuids"`
 	TTSConfigID *string  `json:"tts_config_id"`
 	Voice       *string  `json:"voice"`
+	// 当音色来自复刻时，运行时用于覆盖 TTS 模型。
+	VoiceModelOverride *string `json:"voice_model_override,omitempty"`
 }
 
 type UConfig struct {

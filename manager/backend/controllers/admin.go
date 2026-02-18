@@ -68,13 +68,14 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 	// 构建配置响应
 	type SpeakerGroupInfo struct {
-		ID          uint     `json:"id"`
-		Name        string   `json:"name"`
-		Prompt      string   `json:"prompt"`
-		Description string   `json:"description"`
-		Uuids       []string `json:"uuids"`
-		TTSConfigID *string  `json:"tts_config_id"`
-		Voice       *string  `json:"voice"`
+		ID                 uint     `json:"id"`
+		Name               string   `json:"name"`
+		Prompt             string   `json:"prompt"`
+		Description        string   `json:"description"`
+		Uuids              []string `json:"uuids"`
+		TTSConfigID        *string  `json:"tts_config_id"`
+		Voice              *string  `json:"voice"`
+		VoiceModelOverride *string  `json:"voice_model_override,omitempty"`
 	}
 
 	type ConfigResponse struct {
@@ -132,6 +133,55 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
 	}
 
+	cloneVoiceCache := make(map[string]bool)
+	hasAliyunQwenCloneVoice := func(ttsConfigID string, voice *string) bool {
+		if device.ID == 0 || device.UserID == 0 {
+			return false
+		}
+		if strings.TrimSpace(ttsConfigID) == "" || voice == nil || strings.TrimSpace(*voice) == "" {
+			return false
+		}
+		voiceID := strings.TrimSpace(*voice)
+		cacheKey := ttsConfigID + "||" + voiceID
+		if cached, exists := cloneVoiceCache[cacheKey]; exists {
+			return cached
+		}
+
+		var count int64
+		err := ac.DB.Model(&models.VoiceClone{}).
+			Where("user_id = ? AND provider = ? AND tts_config_id = ? AND provider_voice_id = ? AND status = ?",
+				device.UserID, "aliyun_qwen", ttsConfigID, voiceID, voiceCloneStatusActive).
+			Count(&count).Error
+		if err != nil {
+			log.Printf("检测千问复刻音色失败: user_id=%d tts_config_id=%s voice_id=%s err=%v", device.UserID, ttsConfigID, voiceID, err)
+			cloneVoiceCache[cacheKey] = false
+			return false
+		}
+		cloneVoiceCache[cacheKey] = count > 0
+		return cloneVoiceCache[cacheKey]
+	}
+	applyAliyunQwenCloneModel := func(provider, ttsConfigID string, voice *string, ttsConfigData map[string]interface{}) {
+		if ttsConfigData == nil {
+			return
+		}
+		if normalizeCloneProvider(provider) != "aliyun_qwen" {
+			return
+		}
+		if hasAliyunQwenCloneVoice(ttsConfigID, voice) {
+			ttsConfigData["model"] = defaultAliyunQwenCloneTargetModel
+		}
+	}
+	buildAliyunQwenVoiceModelOverride := func(ttsConfigID *string, voice *string) *string {
+		if ttsConfigID == nil {
+			return nil
+		}
+		if hasAliyunQwenCloneVoice(strings.TrimSpace(*ttsConfigID), voice) {
+			model := defaultAliyunQwenCloneTargetModel
+			return &model
+		}
+		return nil
+	}
+
 	// ==================== 配置获取逻辑（带优先级） ====================
 
 	// 1. 检查设备是否关联了角色（优先级最高）
@@ -178,6 +228,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 					} else {
 						ttsConfigData["voice"] = *role.Voice
 					}
+					applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, role.Voice, ttsConfigData)
 					if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
 						response.TTS.JsonData = string(updatedJsonData)
 					}
@@ -225,6 +276,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 				} else {
 					ttsConfigData["voice"] = *agent.Voice
 				}
+				applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, agent.Voice, ttsConfigData)
 				if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
 					response.TTS.JsonData = string(updatedJsonData)
 				}
@@ -271,6 +323,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 					} else {
 						ttsConfigData["voice"] = *defaultRole.Voice
 					}
+					applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, defaultRole.Voice, ttsConfigData)
 					if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
 						response.TTS.JsonData = string(updatedJsonData)
 					}
@@ -362,13 +415,14 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 				// 以声纹组名称为 key，构建配置数据
 				response.VoiceIdentify[speakerGroup.Name] = SpeakerGroupInfo{
-					ID:          speakerGroup.ID,
-					Name:        speakerGroup.Name,
-					Prompt:      speakerGroup.Prompt,
-					Description: speakerGroup.Description,
-					Uuids:       uuids,
-					TTSConfigID: speakerGroup.TTSConfigID,
-					Voice:       speakerGroup.Voice,
+					ID:                 speakerGroup.ID,
+					Name:               speakerGroup.Name,
+					Prompt:             speakerGroup.Prompt,
+					Description:        speakerGroup.Description,
+					Uuids:              uuids,
+					TTSConfigID:        speakerGroup.TTSConfigID,
+					Voice:              speakerGroup.Voice,
+					VoiceModelOverride: buildAliyunQwenVoiceModelOverride(speakerGroup.TTSConfigID, speakerGroup.Voice),
 				}
 			}
 		}
