@@ -905,9 +905,8 @@ const handleTtsConfigChange = async (configId) => {
     currentVoiceOptions.value = response.data.data || []
   } catch (error) {
     console.error('加载音色列表失败:', error)
-    // 降级到本地提取
-    const jsonData = typeof config.json_data === 'string' ? JSON.parse(config.json_data) : config.json_data
-    currentVoiceOptions.value = extractVoiceOptions(config.provider, jsonData)
+    currentVoiceOptions.value = []
+    ElMessage.warning('加载音色列表失败，请稍后重试')
   }
 }
 

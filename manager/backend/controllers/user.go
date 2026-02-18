@@ -27,6 +27,45 @@ type UserController struct {
 	}
 }
 
+// UserConfigResponse 普通用户可见的配置响应（不包含 json_data 等敏感字段）
+type UserConfigResponse struct {
+	ID        uint      `json:"id"`
+	Type      string    `json:"type"`
+	Name      string    `json:"name"`
+	ConfigID  string    `json:"config_id"`
+	Provider  string    `json:"provider"`
+	Enabled   bool      `json:"enabled"`
+	IsDefault bool      `json:"is_default"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func toUserConfigResponse(cfg *models.Config) *UserConfigResponse {
+	if cfg == nil {
+		return nil
+	}
+
+	return &UserConfigResponse{
+		ID:        cfg.ID,
+		Type:      cfg.Type,
+		Name:      cfg.Name,
+		ConfigID:  cfg.ConfigID,
+		Provider:  cfg.Provider,
+		Enabled:   cfg.Enabled,
+		IsDefault: cfg.IsDefault,
+		CreatedAt: cfg.CreatedAt,
+		UpdatedAt: cfg.UpdatedAt,
+	}
+}
+
+func toUserConfigResponseList(configs []models.Config) []UserConfigResponse {
+	result := make([]UserConfigResponse, 0, len(configs))
+	for i := range configs {
+		result = append(result, *toUserConfigResponse(&configs[i]))
+	}
+	return result
+}
+
 func normalizeMemoryMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "none":
@@ -212,8 +251,8 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 	// 手动加载关联的配置信息
 	type AgentWithConfigs struct {
 		models.Agent
-		LLMConfig *models.Config `json:"llm_config,omitempty"`
-		TTSConfig *models.Config `json:"tts_config,omitempty"`
+		LLMConfig *UserConfigResponse `json:"llm_config,omitempty"`
+		TTSConfig *UserConfigResponse `json:"tts_config,omitempty"`
 	}
 
 	var result []AgentWithConfigs
@@ -224,7 +263,7 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 		if agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
 			var llmConfig models.Config
 			if err := uc.DB.Where("config_id = ? AND type = ?", *agent.LLMConfigID, "llm").First(&llmConfig).Error; err == nil {
-				agentWithConfig.LLMConfig = &llmConfig
+				agentWithConfig.LLMConfig = toUserConfigResponse(&llmConfig)
 			}
 		}
 
@@ -232,7 +271,7 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 		if agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
 			var ttsConfig models.Config
 			if err := uc.DB.Where("config_id = ? AND type = ?", *agent.TTSConfigID, "tts").First(&ttsConfig).Error; err == nil {
-				agentWithConfig.TTSConfig = &ttsConfig
+				agentWithConfig.TTSConfig = toUserConfigResponse(&ttsConfig)
 			}
 		}
 
@@ -299,8 +338,8 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	// 手动加载关联的配置信息
 	type AgentWithConfigs struct {
 		models.Agent
-		LLMConfig *models.Config `json:"llm_config,omitempty"`
-		TTSConfig *models.Config `json:"tts_config,omitempty"`
+		LLMConfig *UserConfigResponse `json:"llm_config,omitempty"`
+		TTSConfig *UserConfigResponse `json:"tts_config,omitempty"`
 	}
 
 	result := AgentWithConfigs{Agent: agent}
@@ -309,7 +348,7 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	if agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
 		var llmConfig models.Config
 		if err := uc.DB.Where("config_id = ? AND type = ?", *agent.LLMConfigID, "llm").First(&llmConfig).Error; err == nil {
-			result.LLMConfig = &llmConfig
+			result.LLMConfig = toUserConfigResponse(&llmConfig)
 		}
 	}
 
@@ -317,7 +356,7 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	if agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
 		var ttsConfig models.Config
 		if err := uc.DB.Where("config_id = ? AND type = ?", *agent.TTSConfigID, "tts").First(&ttsConfig).Error; err == nil {
-			result.TTSConfig = &ttsConfig
+			result.TTSConfig = toUserConfigResponse(&ttsConfig)
 		}
 	}
 
@@ -561,7 +600,7 @@ func (uc *UserController) GetLLMConfigs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": configs})
+	c.JSON(http.StatusOK, gin.H{"data": toUserConfigResponseList(configs)})
 }
 
 // 获取TTS配置列表
@@ -573,7 +612,7 @@ func (uc *UserController) GetTTSConfigs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": configs})
+	c.JSON(http.StatusOK, gin.H{"data": toUserConfigResponseList(configs)})
 }
 
 // GetDeviceMcpTools 获取设备维度MCP工具列表（用户版本）
