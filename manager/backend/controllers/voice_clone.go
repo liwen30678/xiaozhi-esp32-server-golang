@@ -12,6 +12,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,6 +44,13 @@ var cloneProviderCapabilities = map[string]CloneProviderCapability{
 		MaxTextLen:         0,
 		SupportedLangs:     map[string]bool{},
 	},
+	"cosyvoice": {
+		Enabled:            true,
+		RequiresTranscript: true,
+		MinTextLen:         1,
+		MaxTextLen:         0,
+		SupportedLangs:     map[string]bool{},
+	},
 }
 
 type VoiceCloneController struct {
@@ -64,6 +72,9 @@ const (
 	defaultMinimaxUploadEndpoint = "https://api.minimaxi.com/v1/files/upload"
 	defaultMinimaxCloneModel     = "speech-2.5-hd-preview"
 	minMinimaxCloneAudioSeconds  = 10.0
+
+	cosyvoiceCloneEndpoint = "https://tts.linkerai.cn/clone"
+	cosyvoiceFixedKey      = "https://linkerai.top/"
 
 	voiceCloneStatusQueued     = "queued"
 	voiceCloneStatusProcessing = "processing"
@@ -123,8 +134,8 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 		return
 	}
 	provider := strings.TrimSpace(ttsCfg.Provider)
-	if provider != "minimax" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持 Minimax 提供商的声音复刻"})
+	if provider != "minimax" && provider != "cosyvoice" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持 Minimax/CosyVoice 提供商的声音复刻"})
 		return
 	}
 
@@ -158,7 +169,8 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 		return
 	}
 	defer file.Close()
-	log.Printf("[voice_clone][minimax] incoming audio: source_type=%s filename=%q ext=%q content_type=%q header_size=%d",
+	log.Printf("[voice_clone][%s] incoming audio: source_type=%s filename=%q ext=%q content_type=%q header_size=%d",
+		provider,
 		sourceType,
 		header.Filename,
 		strings.ToLower(filepath.Ext(header.Filename)),
@@ -169,7 +181,7 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 	if name == "" {
 		base := strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename))
 		if base == "" {
-			base = "minimax-voice"
+			base = "voice-clone"
 		}
 		name = base
 	}
@@ -180,16 +192,9 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存复刻音频失败: " + err.Error()})
 		return
 	}
-	audioSeconds, err := getMinimaxCloneAudioDurationSeconds(filePath)
-	if err != nil {
+	if err = validateCloneAudioForProvider(provider, filePath); err != nil {
 		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "音频格式校验失败: " + err.Error()})
-		return
-	}
-	log.Printf("[voice_clone][minimax] local duration check: file=%q duration=%.3fs min=%.1fs", filePath, audioSeconds, minMinimaxCloneAudioSeconds)
-	if audioSeconds < minMinimaxCloneAudioSeconds {
-		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Minimax 声音复刻要求音频时长至少 %.0f 秒，当前 %.2f 秒", minMinimaxCloneAudioSeconds, audioSeconds)})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -674,6 +679,99 @@ func (vcc *VoiceCloneController) cloneWithMinimaxEndpoints(ctx context.Context, 
 	}, nil
 }
 
+func (vcc *VoiceCloneController) cloneWithCosyVoice(ctx context.Context, filePath, fileName, transcript string) (*minimaxVoiceCloneResult, error) {
+	cloneURL, err := url.Parse(cosyvoiceCloneEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("解析CosyVoice克隆地址失败: %w", err)
+	}
+	query := cloneURL.Query()
+	query.Set("key", cosyvoiceFixedKey)
+	cloneURL.RawQuery = query.Encode()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取音频文件失败: %w", err)
+	}
+	defer f.Close()
+
+	fileSize := int64(-1)
+	if stat, statErr := f.Stat(); statErr == nil {
+		fileSize = stat.Size()
+	}
+	transcript = strings.TrimSpace(transcript)
+	if transcript == "" {
+		return nil, errors.New("CosyVoice 复刻要求必须填写音频对应文字(train_text)")
+	}
+	log.Printf("[voice_clone][cosyvoice] prepare request: endpoint=%s file_name=%q file_ext=%q file_size=%d transcript_len=%d fixed_key=%q",
+		cloneURL.String(),
+		fileName,
+		strings.ToLower(filepath.Ext(fileName)),
+		fileSize,
+		len([]rune(transcript)),
+		cosyvoiceFixedKey,
+	)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err = writer.WriteField("train_text", transcript); err != nil {
+		return nil, fmt.Errorf("构建CosyVoice请求参数失败: %w", err)
+	}
+	formFile, err := writer.CreateFormFile("train_wav_file", fileName)
+	if err != nil {
+		return nil, fmt.Errorf("创建CosyVoice音频上传表单失败: %w", err)
+	}
+	if _, err = io.Copy(formFile, f); err != nil {
+		return nil, fmt.Errorf("写入CosyVoice上传文件失败: %w", err)
+	}
+	if err = writer.Close(); err != nil {
+		return nil, fmt.Errorf("构建CosyVoice上传请求失败: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cloneURL.String(), &body)
+	if err != nil {
+		return nil, fmt.Errorf("创建CosyVoice请求失败: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := vcc.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用CosyVoice克隆接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("读取CosyVoice响应失败: %w", err)
+	}
+	log.Printf("[voice_clone][cosyvoice] clone response: status=%d body=%s",
+		resp.StatusCode,
+		truncateForLog(strings.TrimSpace(string(respBody)), 4096),
+	)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("CosyVoice克隆HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	parsed, err := unmarshalJSONMap(respBody)
+	if err != nil {
+		return nil, fmt.Errorf("解析CosyVoice响应失败: %w", err)
+	}
+	status := strings.TrimSpace(getStringAny(parsed, "status"))
+	if status != "成功" {
+		return nil, fmt.Errorf("CosyVoice克隆失败(status=%s): %s", status, strings.TrimSpace(string(respBody)))
+	}
+	sid := strings.TrimSpace(getStringAny(parsed, "sid"))
+	if sid == "" {
+		return nil, fmt.Errorf("CosyVoice响应缺少 sid: %s", strings.TrimSpace(string(respBody)))
+	}
+	return &minimaxVoiceCloneResult{
+		VoiceID:      sid,
+		RawResponse:  parsed,
+		RequestID:    getStringAny(parsed, "request_id", "trace_id"),
+		ResponseCode: resp.StatusCode,
+	}, nil
+}
+
 func (vcc *VoiceCloneController) uploadMinimaxVoiceCloneFile(ctx context.Context, apiKey, uploadEndpoint, groupID, filePath, fileName string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -839,6 +937,36 @@ func getMinimaxCloneAudioDurationSeconds(filePath string) (float64, error) {
 		return 0, fmt.Errorf("当前仅支持 WAV 音频，检测到扩展名: %s", ext)
 	}
 	return getWAVDurationSeconds(filePath)
+}
+
+func validateCloneAudioForProvider(provider, filePath string) error {
+	provider = strings.TrimSpace(provider)
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filePath)))
+	if ext != ".wav" {
+		return fmt.Errorf("当前仅支持 WAV 音频，检测到扩展名: %s", ext)
+	}
+
+	switch provider {
+	case "minimax":
+		audioSeconds, err := getMinimaxCloneAudioDurationSeconds(filePath)
+		if err != nil {
+			return fmt.Errorf("音频格式校验失败: %w", err)
+		}
+		log.Printf("[voice_clone][minimax] local duration check: file=%q duration=%.3fs min=%.1fs", filePath, audioSeconds, minMinimaxCloneAudioSeconds)
+		if audioSeconds < minMinimaxCloneAudioSeconds {
+			return fmt.Errorf("Minimax 声音复刻要求音频时长至少 %.0f 秒，当前 %.2f 秒", minMinimaxCloneAudioSeconds, audioSeconds)
+		}
+		return nil
+	case "cosyvoice":
+		audioSeconds, err := getWAVDurationSeconds(filePath)
+		if err != nil {
+			return fmt.Errorf("音频格式校验失败: %w", err)
+		}
+		log.Printf("[voice_clone][cosyvoice] local wav check: file=%q duration=%.3fs", filePath, audioSeconds)
+		return nil
+	default:
+		return fmt.Errorf("暂不支持提供商 %s 的音频校验", provider)
+	}
 }
 
 func getWAVDurationSeconds(filePath string) (float64, error) {

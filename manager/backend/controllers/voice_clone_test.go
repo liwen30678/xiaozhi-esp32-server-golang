@@ -265,6 +265,32 @@ func TestGetMinimaxCloneAudioDurationSeconds(t *testing.T) {
 	}
 }
 
+func TestValidateCloneAudioForProvider(t *testing.T) {
+	dir := t.TempDir()
+
+	shortPath := filepath.Join(dir, "short.wav")
+	if err := os.WriteFile(shortPath, buildPCM16WAV(16000, 1, 16, 2), 0644); err != nil {
+		t.Fatalf("write short wav failed: %v", err)
+	}
+	if err := validateCloneAudioForProvider("cosyvoice", shortPath); err != nil {
+		t.Fatalf("validateCloneAudioForProvider(cosyvoice) unexpected error: %v", err)
+	}
+	if err := validateCloneAudioForProvider("minimax", shortPath); err == nil {
+		t.Fatalf("validateCloneAudioForProvider(minimax) expected duration error")
+	}
+
+	nonWavPath := filepath.Join(dir, "bad.webm")
+	if err := os.WriteFile(nonWavPath, []byte("webm"), 0644); err != nil {
+		t.Fatalf("write webm failed: %v", err)
+	}
+	if err := validateCloneAudioForProvider("cosyvoice", nonWavPath); err == nil {
+		t.Fatalf("validateCloneAudioForProvider(cosyvoice/non-wav) expected error")
+	}
+	if err := validateCloneAudioForProvider("unknown_provider", shortPath); err == nil {
+		t.Fatalf("validateCloneAudioForProvider(unknown_provider) expected error")
+	}
+}
+
 func buildPCM16WAV(sampleRate, channels, bitsPerSample, durationSec int) []byte {
 	bytesPerSample := bitsPerSample / 8
 	dataSize := sampleRate * channels * bytesPerSample * durationSec

@@ -95,12 +95,17 @@ func (vcc *VoiceCloneController) processVoiceCloneTask(taskPrimaryID uint) {
 		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("任务关联TTS配置不存在: %w", err))
 		return
 	}
-	if strings.TrimSpace(ttsCfg.Provider) != "minimax" {
-		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("当前任务仅支持 minimax 提供商，实际为: %s", ttsCfg.Provider))
+	provider := strings.TrimSpace(ttsCfg.Provider)
+	var result *minimaxVoiceCloneResult
+	switch provider {
+	case "minimax":
+		result, err = vcc.cloneWithMinimax(ctx, ttsCfg, clone.TTSConfigID, audio.FilePath, audio.FileName, audio.Transcript)
+	case "cosyvoice":
+		result, err = vcc.cloneWithCosyVoice(ctx, audio.FilePath, audio.FileName, audio.Transcript)
+	default:
+		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("当前任务不支持提供商: %s", provider))
 		return
 	}
-
-	result, err := vcc.cloneWithMinimax(ctx, ttsCfg, clone.TTSConfigID, audio.FilePath, audio.FileName, audio.Transcript)
 	if err != nil {
 		vcc.finishVoiceCloneTaskFailed(task, &clone, err)
 		return

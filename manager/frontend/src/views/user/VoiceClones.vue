@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2>声音复刻</h2>
-        <p class="subtitle">当前第一步仅支持 Minimax，支持上传音频与浏览器录音（WAV 且不少于 10 秒）</p>
+        <p class="subtitle">支持 Minimax/CosyVoice，支持上传音频与浏览器录音（WAV）</p>
       </div>
       <el-button type="primary" @click="openCreateDialog">创建复刻音色</el-button>
     </div>
@@ -41,8 +41,8 @@
           <el-input v-model="form.name" placeholder="可选，不填则自动使用文件名" />
         </el-form-item>
         <el-form-item label="TTS配置" required>
-          <el-select v-model="form.tts_config_id" placeholder="请选择Minimax配置" style="width: 100%" @change="onConfigChange">
-            <el-option v-for="cfg in minimaxConfigs" :key="cfg.config_id" :label="`${cfg.name} (${cfg.config_id})`" :value="cfg.config_id" />
+          <el-select v-model="form.tts_config_id" placeholder="请选择可复刻的TTS配置" style="width: 100%" @change="onConfigChange">
+            <el-option v-for="cfg in cloneEnabledConfigs" :key="cfg.config_id" :label="`${cfg.name} (${cfg.config_id})`" :value="cfg.config_id" />
           </el-select>
         </el-form-item>
         <el-form-item label="音频来源">
@@ -54,14 +54,14 @@
 
         <el-form-item v-if="form.source_type === 'upload'" label="音频文件" required>
           <input type="file" accept=".wav,audio/wav" @change="handleFileChange" />
-          <div class="help">要求：WAV 格式，时长不少于 10 秒</div>
+          <div class="help">{{ audioRequirementText }}</div>
         </el-form-item>
 
         <el-form-item v-else label="浏览器录音" required>
           <el-button :disabled="isRecording" @click="startRecording">开始录音</el-button>
           <el-button :disabled="!isRecording" type="warning" @click="stopRecording">停止录音</el-button>
           <audio v-if="recordPreviewUrl" :src="recordPreviewUrl" controls style="display:block;width:100%;margin-top:10px" />
-          <div class="help">要求：录音将自动转为 WAV，时长不少于 10 秒</div>
+          <div class="help">{{ audioRequirementText }}</div>
         </el-form-item>
 
         <el-form-item :label="capability.requires_transcript ? '音频对应文字 *' : '音频对应文字'">
@@ -146,6 +146,7 @@ const voiceClones = ref([])
 const currentAudios = ref([])
 const ttsConfigs = ref([])
 const MIN_AUDIO_DURATION_SECONDS = 10
+const cloneEnabledProviders = ['minimax', 'cosyvoice']
 const pendingStatuses = ['queued', 'processing']
 let clonePollingTimer = null
 const clonePollingBusy = ref(false)
@@ -176,7 +177,16 @@ const editForm = ref({
 
 const capability = ref({ enabled: true, requires_transcript: false, min_text_len: 0, max_text_len: 0 })
 
-const minimaxConfigs = computed(() => ttsConfigs.value.filter(item => item.provider === 'minimax'))
+const cloneEnabledConfigs = computed(() => ttsConfigs.value.filter(item => cloneEnabledProviders.includes(item.provider)))
+const selectedCloneConfig = computed(() => cloneEnabledConfigs.value.find(item => item.config_id === form.value.tts_config_id) || null)
+const currentCloneProvider = computed(() => selectedCloneConfig.value?.provider || '')
+const requiresMinimaxDuration = computed(() => currentCloneProvider.value === 'minimax')
+const audioRequirementText = computed(() => {
+  if (requiresMinimaxDuration.value) {
+    return `要求：WAV 格式，时长不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒`
+  }
+  return '要求：WAV 格式（CosyVoice 需填写音频对应文字）'
+})
 
 const isRecording = ref(false)
 const mediaRecorder = ref(null)
@@ -274,11 +284,23 @@ const loadTtsConfigs = async () => {
 const openCreateDialog = async () => {
   createDialogVisible.value = true
   await loadTtsConfigs()
+  if (!cloneEnabledConfigs.value.length) {
+    form.value.tts_config_id = ''
+    return
+  }
+  const selectedConfig = cloneEnabledConfigs.value.find(item => item.config_id === form.value.tts_config_id)
+  if (!selectedConfig) {
+    form.value.tts_config_id = cloneEnabledConfigs.value[0].config_id
+  }
+  await onConfigChange(form.value.tts_config_id)
 }
 
 const onConfigChange = async (configId) => {
-  const cfg = minimaxConfigs.value.find(item => item.config_id === configId)
-  if (!cfg) return
+  const cfg = cloneEnabledConfigs.value.find(item => item.config_id === configId)
+  if (!cfg) {
+    capability.value = { enabled: true, requires_transcript: false, min_text_len: 0, max_text_len: 0 }
+    return
+  }
   const res = await api.get('/user/voice-clone/capabilities', { params: { provider: cfg.provider } })
   capability.value = res.data.data || capability.value
 }
@@ -325,7 +347,7 @@ const handleFileChange = async (event) => {
   }
   try {
     const duration = await getAudioDurationSeconds(file)
-    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+    if (requiresMinimaxDuration.value && duration < MIN_AUDIO_DURATION_SECONDS) {
       ElMessage.warning(`音频时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
       form.value.audioFile = null
       form.value.audioDurationSec = 0
@@ -411,7 +433,7 @@ const startRecording = async () => {
     try {
       const wavBlob = await convertToWav(blob)
       const duration = await getAudioDurationSeconds(wavBlob)
-      if (duration < MIN_AUDIO_DURATION_SECONDS) {
+      if (requiresMinimaxDuration.value && duration < MIN_AUDIO_DURATION_SECONDS) {
         ElMessage.warning(`录音时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
         form.value.recordBlob = null
         form.value.audioDurationSec = 0
@@ -447,7 +469,7 @@ const stopRecording = () => {
 
 const submitClone = async () => {
   if (!form.value.tts_config_id) {
-    ElMessage.warning('请选择 Minimax TTS 配置')
+    ElMessage.warning('请选择可复刻的 TTS 配置')
     return
   }
   if (capability.value.requires_transcript && !form.value.transcript.trim()) {
@@ -468,7 +490,7 @@ const submitClone = async () => {
       return
     }
     let duration = form.value.audioDurationSec
-    if (!duration) {
+    if (requiresMinimaxDuration.value && !duration) {
       try {
         duration = await getAudioDurationSeconds(form.value.audioFile)
       } catch (error) {
@@ -476,7 +498,7 @@ const submitClone = async () => {
         return
       }
     }
-    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+    if (requiresMinimaxDuration.value && duration < MIN_AUDIO_DURATION_SECONDS) {
       ElMessage.warning(`音频时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
       return
     }
@@ -487,7 +509,7 @@ const submitClone = async () => {
       return
     }
     let duration = form.value.audioDurationSec
-    if (!duration) {
+    if (requiresMinimaxDuration.value && !duration) {
       try {
         duration = await getAudioDurationSeconds(form.value.recordBlob)
       } catch (error) {
@@ -495,7 +517,7 @@ const submitClone = async () => {
         return
       }
     }
-    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+    if (requiresMinimaxDuration.value && duration < MIN_AUDIO_DURATION_SECONDS) {
       ElMessage.warning(`录音时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
       return
     }
