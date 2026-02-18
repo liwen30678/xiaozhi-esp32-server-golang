@@ -2,13 +2,12 @@
   <el-form ref="formRef" :model="model" :rules="rules" label-width="120px">
     <el-form-item label="提供商" prop="provider">
       <el-select v-model="model.provider" placeholder="请选择提供商" style="width: 100%">
-        <el-option label="豆包 WebSocket" value="doubao_ws" />
-        <el-option label="Edge TTS" value="edge" />
-        <el-option label="Edge 离线" value="edge_offline" />
-        <el-option label="OpenAI" value="openai" />
-        <el-option label="千问" value="aliyun_qwen" />
-        <el-option label="智谱" value="zhipu" />
-        <el-option label="Minimax" value="minimax" />
+        <el-option
+          v-for="provider in TTS_PROVIDER_OPTIONS"
+          :key="provider.value"
+          :label="provider.label"
+          :value="provider.value"
+        />
       </el-select>
     </el-form-item>
     <el-form-item label="配置名称" prop="name">
@@ -269,11 +268,37 @@
         <el-input-number v-model="model.openai.frame_duration" :min="1" :max="1000" style="width: 100%" placeholder="毫秒" />
       </el-form-item>
     </template>
+
+    <template v-if="model.provider === 'cosyvoice'">
+      <el-form-item label="API URL" prop="cosyvoice.api_url">
+        <el-input v-model="model.cosyvoice.api_url" placeholder="请输入API URL" />
+      </el-form-item>
+      <el-form-item label="说话人ID" prop="cosyvoice.spk_id">
+        <el-input v-model="model.cosyvoice.spk_id" placeholder="请输入说话人ID" />
+      </el-form-item>
+      <el-form-item label="帧时长" prop="cosyvoice.frame_duration">
+        <el-input-number v-model="model.cosyvoice.frame_duration" :min="1" :max="1000" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="目标采样率" prop="cosyvoice.target_sr">
+        <el-input-number v-model="model.cosyvoice.target_sr" :min="8000" :max="48000" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="音频格式" prop="cosyvoice.audio_format">
+        <el-select v-model="model.cosyvoice.audio_format" placeholder="请选择音频格式" style="width: 100%">
+          <el-option label="MP3" value="mp3" />
+          <el-option label="WAV" value="wav" />
+          <el-option label="PCM" value="pcm" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="指示文本" prop="cosyvoice.instruct_text">
+        <el-input v-model="model.cosyvoice.instruct_text" placeholder="请输入指示文本（可选）" />
+      </el-form-item>
+    </template>
   </el-form>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
+import { TTS_PROVIDER_OPTIONS } from './ttsProviderOptions'
 
 const props = defineProps({
   model: { type: Object, required: true },
@@ -290,6 +315,14 @@ function getJsonData() {
   const form = props.model
   const config = {}
   switch (form.provider) {
+    case 'cosyvoice':
+      config.api_url = form.cosyvoice?.api_url
+      config.spk_id = form.cosyvoice?.spk_id
+      config.frame_duration = form.cosyvoice?.frame_duration
+      config.target_sr = form.cosyvoice?.target_sr
+      config.audio_format = form.cosyvoice?.audio_format
+      config.instruct_text = form.cosyvoice?.instruct_text
+      break
     case 'doubao_ws':
       config.appid = form.doubao_ws?.appid
       config.access_token = form.doubao_ws?.access_token
