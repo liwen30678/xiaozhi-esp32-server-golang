@@ -2122,6 +2122,274 @@ func (ac *AdminController) ResetUserPassword(c *gin.Context) {
 	})
 }
 
+// GetUserVoiceCloneQuotas 获取用户声音复刻额度（按 tts_config_id 维度）
+func (ac *AdminController) GetUserVoiceCloneQuotas(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "用户ID格式错误"})
+		return
+	}
+
+	var user models.User
+	if err = ac.DB.First(&user, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户失败"})
+		return
+	}
+	if strings.TrimSpace(user.Role) != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持为普通用户分配复刻额度"})
+		return
+	}
+
+	var ttsConfigs []models.Config
+	if err = ac.DB.Where("type = ?", "tts").Order("enabled DESC, name ASC").Find(&ttsConfigs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询TTS配置失败"})
+		return
+	}
+
+	var quotas []models.UserVoiceCloneQuota
+	if err = ac.DB.Where("user_id = ?", user.ID).Find(&quotas).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户额度失败"})
+		return
+	}
+	quotaByConfigID := make(map[string]models.UserVoiceCloneQuota, len(quotas))
+	for _, quota := range quotas {
+		quotaByConfigID[quota.TTSConfigID] = quota
+	}
+
+	type usageRow struct {
+		TTSConfigID string `json:"tts_config_id"`
+		UsedCount   int64  `json:"used_count"`
+	}
+	var usageRows []usageRow
+	if err = ac.DB.Model(&models.VoiceClone{}).
+		Select("tts_config_id, COUNT(1) AS used_count").
+		Where("user_id = ? AND status != ?", user.ID, "deleted").
+		Group("tts_config_id").
+		Scan(&usageRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "统计用户复刻次数失败"})
+		return
+	}
+	usageByConfigID := make(map[string]int, len(usageRows))
+	for _, row := range usageRows {
+		usageByConfigID[row.TTSConfigID] = int(row.UsedCount)
+	}
+
+	result := make([]gin.H, 0, len(ttsConfigs))
+	configIDSet := make(map[string]bool, len(ttsConfigs))
+	for _, ttsConfig := range ttsConfigs {
+		configIDSet[ttsConfig.ConfigID] = true
+		quota, hasQuota := quotaByConfigID[ttsConfig.ConfigID]
+		maxCount := -1
+		usedCount := usageByConfigID[ttsConfig.ConfigID]
+		if hasQuota {
+			maxCount = quota.MaxCount
+			if quota.UsedCount > usedCount {
+				usedCount = quota.UsedCount
+			}
+		}
+		remainingCount := -1
+		if maxCount >= 0 {
+			remainingCount = maxCount - usedCount
+			if remainingCount < 0 {
+				remainingCount = 0
+			}
+		}
+
+		result = append(result, gin.H{
+			"tts_config_id":   ttsConfig.ConfigID,
+			"tts_config_name": ttsConfig.Name,
+			"provider":        ttsConfig.Provider,
+			"enabled":         ttsConfig.Enabled,
+			"max_count":       maxCount,
+			"used_count":      usedCount,
+			"remaining_count": remainingCount,
+		})
+	}
+
+	// 保留已删除的历史配置额度，避免“额度配置丢失不可见”
+	for _, quota := range quotas {
+		if configIDSet[quota.TTSConfigID] {
+			continue
+		}
+		maxCount := quota.MaxCount
+		usedCount := quota.UsedCount
+		if usageByConfigID[quota.TTSConfigID] > usedCount {
+			usedCount = usageByConfigID[quota.TTSConfigID]
+		}
+		remainingCount := -1
+		if maxCount >= 0 {
+			remainingCount = maxCount - usedCount
+			if remainingCount < 0 {
+				remainingCount = 0
+			}
+		}
+		result = append(result, gin.H{
+			"tts_config_id":   quota.TTSConfigID,
+			"tts_config_name": "(已删除配置)",
+			"provider":        "",
+			"enabled":         false,
+			"max_count":       maxCount,
+			"used_count":      usedCount,
+			"remaining_count": remainingCount,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"user_id":    user.ID,
+		"username":   user.Username,
+		"quotas":     result,
+		"updated_at": time.Now(),
+	}})
+}
+
+// UpdateUserVoiceCloneQuotas 批量更新用户声音复刻额度
+func (ac *AdminController) UpdateUserVoiceCloneQuotas(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "用户ID格式错误"})
+		return
+	}
+
+	var user models.User
+	if err = ac.DB.First(&user, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户失败"})
+		return
+	}
+	if strings.TrimSpace(user.Role) != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持为普通用户分配复刻额度"})
+		return
+	}
+
+	var req struct {
+		Items []struct {
+			TTSConfigID string `json:"tts_config_id"`
+			MaxCount    int    `json:"max_count"`
+		} `json:"items"`
+	}
+	if err = c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数格式错误"})
+		return
+	}
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "items不能为空"})
+		return
+	}
+
+	itemByConfigID := make(map[string]int, len(req.Items))
+	configIDs := make([]string, 0, len(req.Items))
+	for _, item := range req.Items {
+		configID := strings.TrimSpace(item.TTSConfigID)
+		if configID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tts_config_id不能为空"})
+			return
+		}
+		if item.MaxCount < -1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "max_count 不能小于 -1"})
+			return
+		}
+		if _, exists := itemByConfigID[configID]; !exists {
+			configIDs = append(configIDs, configID)
+		}
+		itemByConfigID[configID] = item.MaxCount
+	}
+
+	var ttsConfigs []models.Config
+	if err = ac.DB.Where("type = ? AND config_id IN ?", "tts", configIDs).Find(&ttsConfigs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询TTS配置失败"})
+		return
+	}
+	validConfigIDSet := make(map[string]bool, len(ttsConfigs))
+	for _, cfg := range ttsConfigs {
+		validConfigIDSet[cfg.ConfigID] = true
+	}
+	for _, configID := range configIDs {
+		if validConfigIDSet[configID] {
+			continue
+		}
+		// 历史已删除配置仅允许设置为 -1（删除额度记录）
+		if itemByConfigID[configID] == -1 {
+			continue
+		}
+		if !validConfigIDSet[configID] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("TTS配置不存在: %s", configID)})
+			return
+		}
+	}
+
+	type usageRow struct {
+		TTSConfigID string `json:"tts_config_id"`
+		UsedCount   int64  `json:"used_count"`
+	}
+	var usageRows []usageRow
+	if err = ac.DB.Model(&models.VoiceClone{}).
+		Select("tts_config_id, COUNT(1) AS used_count").
+		Where("user_id = ? AND status != ? AND tts_config_id IN ?", user.ID, "deleted", configIDs).
+		Group("tts_config_id").
+		Scan(&usageRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "统计用户已使用次数失败"})
+		return
+	}
+	usageByConfigID := make(map[string]int, len(usageRows))
+	for _, row := range usageRows {
+		usageByConfigID[row.TTSConfigID] = int(row.UsedCount)
+	}
+
+	if err = ac.DB.Transaction(func(tx *gorm.DB) error {
+		for _, configID := range configIDs {
+			maxCount := itemByConfigID[configID]
+			if maxCount == -1 {
+				if err := tx.Where("user_id = ? AND tts_config_id = ?", user.ID, configID).Delete(&models.UserVoiceCloneQuota{}).Error; err != nil {
+					return err
+				}
+				continue
+			}
+
+			usedCount := usageByConfigID[configID]
+			var quota models.UserVoiceCloneQuota
+			if err := tx.Where("user_id = ? AND tts_config_id = ?", user.ID, configID).First(&quota).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					newQuota := models.UserVoiceCloneQuota{
+						UserID:      user.ID,
+						TTSConfigID: configID,
+						MaxCount:    maxCount,
+						UsedCount:   usedCount,
+					}
+					if err := tx.Create(&newQuota).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+
+			nextUsedCount := quota.UsedCount
+			if usedCount > nextUsedCount {
+				nextUsedCount = usedCount
+			}
+			if err := tx.Model(&models.UserVoiceCloneQuota{}).Where("id = ?", quota.ID).Updates(map[string]any{
+				"max_count":  maxCount,
+				"used_count": nextUsedCount,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新用户复刻额度失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "额度更新成功"})
+}
+
 // 设备管理
 func (ac *AdminController) GetDevices(c *gin.Context) {
 	var devices []models.Device

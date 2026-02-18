@@ -168,6 +168,34 @@ type VoiceCloneAudio struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// VoiceCloneTask 声音复刻异步任务模型
+type VoiceCloneTask struct {
+	ID           uint       `json:"id" gorm:"primarykey"`
+	TaskID       string     `json:"task_id" gorm:"type:varchar(64);not null;uniqueIndex;index"`
+	UserID       uint       `json:"user_id" gorm:"not null;index"`
+	VoiceCloneID uint       `json:"voice_clone_id" gorm:"not null;index"`
+	Provider     string     `json:"provider" gorm:"type:varchar(50);not null;index"`
+	Status       string     `json:"status" gorm:"type:varchar(20);not null;default:'queued';index"` // queued/processing/succeeded/failed
+	Attempts     int        `json:"attempts" gorm:"not null;default:0"`
+	LastError    string     `json:"last_error" gorm:"type:text"`
+	StartedAt    *time.Time `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+	MetaJSON     string     `json:"meta_json" gorm:"type:json"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// UserVoiceCloneQuota 用户声音复刻额度（按 tts_config_id 维度）
+type UserVoiceCloneQuota struct {
+	ID          uint      `json:"id" gorm:"primarykey"`
+	UserID      uint      `json:"user_id" gorm:"not null;index;uniqueIndex:idx_user_tts_quota,priority:1"`
+	TTSConfigID string    `json:"tts_config_id" gorm:"type:varchar(100);not null;index;uniqueIndex:idx_user_tts_quota,priority:2"`
+	MaxCount    int       `json:"max_count" gorm:"not null;default:-1"` // -1 表示不限制，0 表示禁止创建
+	UsedCount   int       `json:"used_count" gorm:"not null;default:0"` // 每次提交复刻任务即计数
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // ChatMessage 聊天消息模型
 type ChatMessage struct {
 	ID        uint   `json:"id" gorm:"primarykey"`

@@ -124,6 +124,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				user.GET("/voice-clone/capabilities", voiceCloneController.GetCloneProviderCapabilities)
 				user.POST("/voice-clones", voiceCloneController.CreateVoiceClone)
 				user.GET("/voice-clones", voiceCloneController.GetVoiceClones)
+				user.PUT("/voice-clones/:id", voiceCloneController.UpdateVoiceClone)
 				user.GET("/voice-clones/:id/audios", voiceCloneController.GetVoiceCloneAudios)
 				user.GET("/voice-clones/audios/:audio_id/file", voiceCloneController.GetVoiceCloneAudioFile)
 
@@ -292,6 +293,8 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				admin.PUT("/users/:id", adminController.UpdateUser)
 				admin.DELETE("/users/:id", adminController.DeleteUser)
 				admin.POST("/users/:id/reset-password", adminController.ResetUserPassword)
+				admin.GET("/users/:id/voice-clone-quotas", adminController.GetUserVoiceCloneQuotas)
+				admin.PUT("/users/:id/voice-clone-quotas", adminController.UpdateUserVoiceCloneQuotas)
 
 				// 配置导入导出
 				admin.GET("/configs/export", adminController.ExportConfigs)

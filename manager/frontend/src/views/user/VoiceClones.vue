@@ -3,22 +3,34 @@
     <div class="page-header">
       <div>
         <h2>声音复刻</h2>
-        <p class="subtitle">当前第一步仅支持 Minimax，支持上传音频与浏览器录音</p>
+        <p class="subtitle">当前第一步仅支持 Minimax，支持上传音频与浏览器录音（WAV 且不少于 10 秒）</p>
       </div>
       <el-button type="primary" @click="openCreateDialog">创建复刻音色</el-button>
     </div>
 
-    <el-table :data="voiceClones" v-loading="loading" stripe>
-      <el-table-column prop="name" label="名称" min-width="140" />
-      <el-table-column prop="provider" label="提供商" width="120" />
-      <el-table-column prop="tts_config_id" label="TTS Config ID" min-width="180" />
-      <el-table-column prop="provider_voice_id" label="复刻音色ID" min-width="220" />
-      <el-table-column label="创建时间" width="180">
+    <el-table :data="voiceClones" v-loading="loading" stripe style="width: 100%" table-layout="fixed">
+      <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
+      <el-table-column prop="provider" label="提供商" width="100" show-overflow-tooltip />
+      <el-table-column label="TTS配置" min-width="180" show-overflow-tooltip>
+        <template #default="{ row }">{{ `${row.tts_config_name || '-'} (${row.tts_config_id || '-'})` }}</template>
+      </el-table-column>
+      <el-table-column prop="provider_voice_id" label="复刻音色ID" min-width="160" show-overflow-tooltip />
+      <el-table-column label="任务状态" width="100">
+        <template #default="{ row }">
+          <el-tag :type="getCloneStatusTagType(row)" size="small">{{ formatCloneStatus(row) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="失败原因" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">
+          <span>{{ getCloneLastError(row) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="创建时间" width="160" show-overflow-tooltip>
         <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140">
+      <el-table-column label="编辑" width="90">
         <template #default="{ row }">
-          <el-button link type="primary" @click="loadAudios(row)">查看音频</el-button>
+          <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -41,13 +53,15 @@
         </el-form-item>
 
         <el-form-item v-if="form.source_type === 'upload'" label="音频文件" required>
-          <input type="file" accept="audio/*" @change="handleFileChange" />
+          <input type="file" accept=".wav,audio/wav" @change="handleFileChange" />
+          <div class="help">要求：WAV 格式，时长不少于 10 秒</div>
         </el-form-item>
 
         <el-form-item v-else label="浏览器录音" required>
           <el-button :disabled="isRecording" @click="startRecording">开始录音</el-button>
           <el-button :disabled="!isRecording" type="warning" @click="stopRecording">停止录音</el-button>
           <audio v-if="recordPreviewUrl" :src="recordPreviewUrl" controls style="display:block;width:100%;margin-top:10px" />
+          <div class="help">要求：录音将自动转为 WAV，时长不少于 10 秒</div>
         </el-form-item>
 
         <el-form-item :label="capability.requires_transcript ? '音频对应文字 *' : '音频对应文字'">
@@ -85,11 +99,41 @@
         </el-table-column>
       </el-table>
     </el-dialog>
+
+    <el-dialog v-model="editDialogVisible" title="编辑复刻音色" width="620px" @close="resetEditForm">
+      <el-form label-width="120px">
+        <el-form-item label="名称">
+          <el-input v-model="editForm.name" maxlength="100" show-word-limit />
+        </el-form-item>
+        <el-form-item label="提供商">
+          <el-input v-model="editForm.provider" readonly class="readonly-field" />
+        </el-form-item>
+        <el-form-item label="TTS配置">
+          <el-input v-model="editForm.ttsConfigDisplay" readonly class="readonly-field" />
+        </el-form-item>
+        <el-form-item label="复刻音色ID">
+          <el-input v-model="editForm.providerVoiceID" readonly class="readonly-field" />
+        </el-form-item>
+        <el-form-item label="任务状态">
+          <el-input v-model="editForm.statusText" readonly class="readonly-field" />
+        </el-form-item>
+        <el-form-item label="创建时间">
+          <el-input v-model="editForm.createdAtText" readonly class="readonly-field" />
+        </el-form-item>
+        <el-form-item v-if="editForm.lastError" label="失败原因">
+          <el-input v-model="editForm.lastError" type="textarea" :rows="3" readonly class="readonly-field" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editSubmitting" @click="submitEditClone">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onBeforeUnmount, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../utils/api'
 
@@ -97,9 +141,15 @@ const loading = ref(false)
 const submitting = ref(false)
 const createDialogVisible = ref(false)
 const audioDialogVisible = ref(false)
+const editDialogVisible = ref(false)
 const voiceClones = ref([])
 const currentAudios = ref([])
 const ttsConfigs = ref([])
+const MIN_AUDIO_DURATION_SECONDS = 10
+const pendingStatuses = ['queued', 'processing']
+let clonePollingTimer = null
+const clonePollingBusy = ref(false)
+const editSubmitting = ref(false)
 
 const form = ref({
   name: '',
@@ -108,7 +158,20 @@ const form = ref({
   transcript: '',
   transcript_lang: 'zh-CN',
   audioFile: null,
-  recordBlob: null
+  recordBlob: null,
+  audioDurationSec: 0
+})
+
+const editForm = ref({
+  id: null,
+  originalName: '',
+  name: '',
+  provider: '',
+  ttsConfigDisplay: '',
+  providerVoiceID: '',
+  statusText: '',
+  createdAtText: '',
+  lastError: ''
 })
 
 const capability = ref({ enabled: true, requires_transcript: false, min_text_len: 0, max_text_len: 0 })
@@ -121,14 +184,85 @@ const recordChunks = ref([])
 const recordPreviewUrl = ref('')
 
 const formatDate = (value) => (value ? new Date(value).toLocaleString() : '-')
+const parseMetaJSON = (metaJSON) => {
+  if (!metaJSON || typeof metaJSON !== 'string') return {}
+  try {
+    return JSON.parse(metaJSON)
+  } catch (error) {
+    return {}
+  }
+}
+const normalizeCloneStatus = (row) => {
+  const status = String(row?.status || '').trim().toLowerCase()
+  const taskStatus = String(row?.task_status || '').trim().toLowerCase()
+  if (status === 'failed' || taskStatus === 'failed') return 'failed'
+  if (status === 'active' || taskStatus === 'succeeded') return 'active'
+  if (taskStatus === 'queued' || taskStatus === 'processing') return taskStatus
+  if (status === 'queued' || status === 'processing') return status
+  return status || taskStatus || 'unknown'
+}
+const formatCloneStatus = (row) => {
+  const status = normalizeCloneStatus(row)
+  if (status === 'queued') return '排队中'
+  if (status === 'processing') return '处理中'
+  if (status === 'active') return '成功'
+  if (status === 'failed') return '失败'
+  return '未知'
+}
+const getCloneStatusTagType = (row) => {
+  const status = normalizeCloneStatus(row)
+  if (status === 'queued') return 'info'
+  if (status === 'processing') return 'warning'
+  if (status === 'active') return 'success'
+  if (status === 'failed') return 'danger'
+  return 'info'
+}
+const getCloneLastError = (row) => {
+  const status = normalizeCloneStatus(row)
+  if (status !== 'failed') return '-'
+  if (row?.task_last_error) return row.task_last_error
+  const meta = parseMetaJSON(row?.meta_json)
+  return meta.last_error || '-'
+}
+const hasPendingCloneTask = (row) => pendingStatuses.includes(normalizeCloneStatus(row))
+const clearClonePollingTimer = () => {
+  if (!clonePollingTimer) return
+  window.clearTimeout(clonePollingTimer)
+  clonePollingTimer = null
+}
+const scheduleClonePolling = () => {
+  if (clonePollingTimer) return
+  clonePollingTimer = window.setTimeout(async () => {
+    clonePollingTimer = null
+    if (!voiceClones.value.some(hasPendingCloneTask)) return
+    if (clonePollingBusy.value) {
+      scheduleClonePolling()
+      return
+    }
+    clonePollingBusy.value = true
+    try {
+      await loadVoiceClones(true)
+    } finally {
+      clonePollingBusy.value = false
+      if (voiceClones.value.some(hasPendingCloneTask)) {
+        scheduleClonePolling()
+      }
+    }
+  }, 2000)
+}
 
-const loadVoiceClones = async () => {
-  loading.value = true
+const loadVoiceClones = async (silent = false) => {
+  if (!silent) loading.value = true
   try {
     const res = await api.get('/user/voice-clones')
     voiceClones.value = res.data.data || []
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
+    if (voiceClones.value.some(hasPendingCloneTask)) {
+      scheduleClonePolling()
+    } else {
+      clearClonePollingTimer()
+    }
   }
 }
 
@@ -149,22 +283,157 @@ const onConfigChange = async (configId) => {
   capability.value = res.data.data || capability.value
 }
 
-const handleFileChange = (event) => {
-  form.value.audioFile = event.target.files?.[0] || null
+const isWavFile = (file) => {
+  const name = (file?.name || '').toLowerCase()
+  const type = (file?.type || '').toLowerCase()
+  return type.includes('audio/wav') || type.includes('audio/wave') || name.endsWith('.wav')
+}
+
+const getAudioDurationSeconds = (blobOrFile) => new Promise((resolve, reject) => {
+  const url = URL.createObjectURL(blobOrFile)
+  const audio = new Audio()
+  audio.preload = 'metadata'
+  audio.onloadedmetadata = () => {
+    const duration = Number(audio.duration || 0)
+    URL.revokeObjectURL(url)
+    if (!Number.isFinite(duration) || duration <= 0) {
+      reject(new Error('无法读取音频时长'))
+      return
+    }
+    resolve(duration)
+  }
+  audio.onerror = () => {
+    URL.revokeObjectURL(url)
+    reject(new Error('无法解析音频文件'))
+  }
+  audio.src = url
+})
+
+const handleFileChange = async (event) => {
+  const file = event.target.files?.[0] || null
+  if (!file) {
+    form.value.audioFile = null
+    form.value.audioDurationSec = 0
+    return
+  }
+  if (!isWavFile(file)) {
+    ElMessage.warning('仅支持 WAV 格式音频')
+    form.value.audioFile = null
+    form.value.audioDurationSec = 0
+    event.target.value = ''
+    return
+  }
+  try {
+    const duration = await getAudioDurationSeconds(file)
+    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+      ElMessage.warning(`音频时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
+      form.value.audioFile = null
+      form.value.audioDurationSec = 0
+      event.target.value = ''
+      return
+    }
+    form.value.audioFile = file
+    form.value.audioDurationSec = duration
+  } catch (error) {
+    ElMessage.warning(error.message || '读取音频时长失败')
+    form.value.audioFile = null
+    form.value.audioDurationSec = 0
+    event.target.value = ''
+  }
+}
+
+const convertToWav = async (blob) => {
+  const arrayBuffer = await blob.arrayBuffer()
+  const audioContext = new (window.AudioContext || window.webkitAudioContext)()
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+    const wav = audioBufferToWav(audioBuffer)
+    return new Blob([wav], { type: 'audio/wav' })
+  } finally {
+    await audioContext.close()
+  }
+}
+
+const audioBufferToWav = (buffer) => {
+  const length = buffer.length
+  const numberOfChannels = buffer.numberOfChannels
+  const sampleRate = buffer.sampleRate
+  const bytesPerSample = 2
+  const blockAlign = numberOfChannels * bytesPerSample
+  const byteRate = sampleRate * blockAlign
+  const dataSize = length * blockAlign
+  const bufferSize = 44 + dataSize
+  const arrayBuffer = new ArrayBuffer(bufferSize)
+  const view = new DataView(arrayBuffer)
+  const writeString = (offset, str) => {
+    for (let i = 0; i < str.length; i += 1) {
+      view.setUint8(offset + i, str.charCodeAt(i))
+    }
+  }
+
+  writeString(0, 'RIFF')
+  view.setUint32(4, bufferSize - 8, true)
+  writeString(8, 'WAVE')
+  writeString(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, numberOfChannels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, 16, true)
+  writeString(36, 'data')
+  view.setUint32(40, dataSize, true)
+
+  let offset = 44
+  for (let i = 0; i < length; i += 1) {
+    for (let channel = 0; channel < numberOfChannels; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]))
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true)
+      offset += 2
+    }
+  }
+  return arrayBuffer
 }
 
 const startRecording = async () => {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
   recordChunks.value = []
-  const recorder = new MediaRecorder(stream)
+  form.value.audioDurationSec = 0
+  const recorderOptions = { mimeType: 'audio/webm;codecs=opus' }
+  const recorder = MediaRecorder.isTypeSupported(recorderOptions.mimeType) ? new MediaRecorder(stream, recorderOptions) : new MediaRecorder(stream)
   mediaRecorder.value = recorder
   recorder.ondataavailable = (evt) => {
     if (evt.data && evt.data.size > 0) recordChunks.value.push(evt.data)
   }
-  recorder.onstop = () => {
-    const blob = new Blob(recordChunks.value, { type: 'audio/webm' })
-    form.value.recordBlob = blob
-    recordPreviewUrl.value = URL.createObjectURL(blob)
+  recorder.onstop = async () => {
+    const blob = new Blob(recordChunks.value, { type: recordChunks.value[0]?.type || 'audio/webm' })
+    try {
+      const wavBlob = await convertToWav(blob)
+      const duration = await getAudioDurationSeconds(wavBlob)
+      if (duration < MIN_AUDIO_DURATION_SECONDS) {
+        ElMessage.warning(`录音时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
+        form.value.recordBlob = null
+        form.value.audioDurationSec = 0
+        if (recordPreviewUrl.value) {
+          URL.revokeObjectURL(recordPreviewUrl.value)
+          recordPreviewUrl.value = ''
+        }
+      } else {
+        form.value.recordBlob = wavBlob
+        form.value.audioDurationSec = duration
+        if (recordPreviewUrl.value) URL.revokeObjectURL(recordPreviewUrl.value)
+        recordPreviewUrl.value = URL.createObjectURL(wavBlob)
+      }
+    } catch (error) {
+      ElMessage.error('录音转换失败，请重试')
+      form.value.recordBlob = null
+      form.value.audioDurationSec = 0
+      if (recordPreviewUrl.value) {
+        URL.revokeObjectURL(recordPreviewUrl.value)
+        recordPreviewUrl.value = ''
+      }
+    }
     stream.getTracks().forEach(t => t.stop())
   }
   recorder.start()
@@ -198,19 +467,46 @@ const submitClone = async () => {
       ElMessage.warning('请上传音频文件')
       return
     }
+    let duration = form.value.audioDurationSec
+    if (!duration) {
+      try {
+        duration = await getAudioDurationSeconds(form.value.audioFile)
+      } catch (error) {
+        ElMessage.warning(error.message || '读取音频时长失败')
+        return
+      }
+    }
+    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+      ElMessage.warning(`音频时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
+      return
+    }
     fd.append('audio_file', form.value.audioFile)
   } else {
     if (!form.value.recordBlob) {
       ElMessage.warning('请先录音')
       return
     }
-    fd.append('audio_blob', form.value.recordBlob, 'record.webm')
+    let duration = form.value.audioDurationSec
+    if (!duration) {
+      try {
+        duration = await getAudioDurationSeconds(form.value.recordBlob)
+      } catch (error) {
+        ElMessage.warning(error.message || '读取录音时长失败')
+        return
+      }
+    }
+    if (duration < MIN_AUDIO_DURATION_SECONDS) {
+      ElMessage.warning(`录音时长需不少于 ${MIN_AUDIO_DURATION_SECONDS} 秒，当前约 ${duration.toFixed(2)} 秒`)
+      return
+    }
+    fd.append('audio_blob', form.value.recordBlob, `recording_${Date.now()}.wav`)
   }
 
   submitting.value = true
   try {
-    await api.post('/user/voice-clones', fd)
-    ElMessage.success('复刻音色创建成功')
+    const res = await api.post('/user/voice-clones', fd, { timeout: 120000 })
+    const queued = res.status === 202 || pendingStatuses.includes(normalizeCloneStatus(res.data?.data || {}))
+    ElMessage.success(queued ? '已提交复刻任务，正在后台处理' : '复刻音色创建成功')
     createDialogVisible.value = false
     await loadVoiceClones()
   } finally {
@@ -224,6 +520,65 @@ const loadAudios = async (clone) => {
   audioDialogVisible.value = true
 }
 
+const openEditDialog = (clone) => {
+  if (!clone) return
+  editForm.value = {
+    id: clone.id,
+    originalName: String(clone.name || ''),
+    name: String(clone.name || ''),
+    provider: String(clone.provider || '-'),
+    ttsConfigDisplay: `${clone.tts_config_name || '-'} (${clone.tts_config_id || '-'})`,
+    providerVoiceID: String(clone.provider_voice_id || '-'),
+    statusText: formatCloneStatus(clone),
+    createdAtText: formatDate(clone.created_at),
+    lastError: String(getCloneLastError(clone) === '-' ? '' : getCloneLastError(clone))
+  }
+  editDialogVisible.value = true
+}
+
+const resetEditForm = () => {
+  editForm.value = {
+    id: null,
+    originalName: '',
+    name: '',
+    provider: '',
+    ttsConfigDisplay: '',
+    providerVoiceID: '',
+    statusText: '',
+    createdAtText: '',
+    lastError: ''
+  }
+  editSubmitting.value = false
+}
+
+const submitEditClone = async () => {
+  const cloneID = editForm.value.id
+  if (!cloneID) return
+  const nextName = String(editForm.value.name || '').trim()
+  if (!nextName) {
+    ElMessage.warning('名称不能为空')
+    return
+  }
+  if ([...nextName].length > 100) {
+    ElMessage.warning('名称长度不能超过100个字符')
+    return
+  }
+  if (nextName === String(editForm.value.originalName || '').trim()) {
+    editDialogVisible.value = false
+    return
+  }
+
+  editSubmitting.value = true
+  try {
+    await api.put(`/user/voice-clones/${cloneID}`, { name: nextName })
+    ElMessage.success('名称更新成功')
+    editDialogVisible.value = false
+    await loadVoiceClones(true)
+  } finally {
+    editSubmitting.value = false
+  }
+}
+
 const playAudio = async (audio) => {
   const response = await api.get(`/user/voice-clones/audios/${audio.id}/file`, { responseType: 'blob' })
   const audioPlayer = new Audio(URL.createObjectURL(response.data))
@@ -232,6 +587,10 @@ const playAudio = async (audio) => {
 
 onMounted(async () => {
   await loadVoiceClones()
+})
+
+onBeforeUnmount(() => {
+  clearClonePollingTimer()
 })
 </script>
 
@@ -253,5 +612,24 @@ onMounted(async () => {
   color: #999;
   font-size: 12px;
   margin-top: 4px;
+}
+
+.voice-clones-page :deep(.el-table .cell) {
+  white-space: nowrap;
+}
+
+.readonly-field :deep(.el-input__wrapper) {
+  background-color: var(--el-fill-color-light);
+  box-shadow: 0 0 0 1px var(--el-border-color-light) inset;
+}
+
+.readonly-field :deep(.el-input__inner) {
+  color: var(--el-text-color-secondary);
+}
+
+.readonly-field :deep(.el-textarea__inner) {
+  background-color: var(--el-fill-color-light);
+  border-color: var(--el-border-color-light);
+  color: var(--el-text-color-secondary);
 }
 </style>
