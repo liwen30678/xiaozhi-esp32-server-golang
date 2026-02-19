@@ -9,6 +9,8 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
+const doubaoRetryableResponseCode = "45000081"
+
 type Asr struct {
 	lock sync.RWMutex
 	// ASR 上下文和通道
@@ -54,6 +56,10 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 		case result, ok := <-a.AsrResultChannel:
 			log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, error: %+v", result.Text, ok, result.IsFinal, result.Error)
 			if result.Error != nil {
+				if a.AsrType == "doubao" && strings.Contains(result.Error.Error(), doubaoRetryableResponseCode) {
+					log.Warnf("doubao ASR 返回可重试错误(%s)，触发重试", doubaoRetryableResponseCode)
+					return "", true, nil
+				}
 				return "", false, result.Error
 			}
 

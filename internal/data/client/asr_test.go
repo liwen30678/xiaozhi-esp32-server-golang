@@ -1,0 +1,43 @@
+package client
+
+import (
+	"context"
+	"errors"
+	"testing"
+	asr_types "xiaozhi-esp32-server-golang/internal/domain/asr/types"
+)
+
+func TestRetireAsrResult_DoubaoRetryableError(t *testing.T) {
+	a := &Asr{
+		AsrType:          "doubao",
+		AsrResultChannel: make(chan asr_types.StreamingResult, 1),
+	}
+	a.AsrResultChannel <- asr_types.StreamingResult{Error: errors.New("asr response code: 45000081")}
+
+	text, isRetry, err := a.RetireAsrResult(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected empty text, got %q", text)
+	}
+	if !isRetry {
+		t.Fatalf("expected isRetry to be true")
+	}
+}
+
+func TestRetireAsrResult_DoubaoNonRetryableError(t *testing.T) {
+	a := &Asr{
+		AsrType:          "doubao",
+		AsrResultChannel: make(chan asr_types.StreamingResult, 1),
+	}
+	a.AsrResultChannel <- asr_types.StreamingResult{Error: errors.New("asr response code: 123")}
+
+	_, isRetry, err := a.RetireAsrResult(context.Background())
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if isRetry {
+		t.Fatalf("expected isRetry to be false")
+	}
+}
