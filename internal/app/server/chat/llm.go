@@ -512,7 +512,7 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, userMessage *sc
 
 	for _, toolCall := range tools {
 		toolName := toolCall.Function.Name
-		tool, ok := mcp.GetToolByName(state.DeviceID, state.AgentID, toolName)
+		tool, ok := mcp.GetToolByName(state.DeviceID, state.AgentID, toolName, state.DeviceConfig.MCPServiceNames)
 		if !ok || tool == nil {
 			log.Errorf("未找到工具: %s", toolName)
 			addMessageFunc(toolCall, fmt.Sprintf("未找到工具: %s", toolName))

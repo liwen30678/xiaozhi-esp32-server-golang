@@ -398,13 +398,14 @@ func (s *App) DeviceOffline(deviceID string) {
 
 func (a *App) registerHandler() {
 	providerType := viper.GetString("config_provider.type")
+	log.Infof("registerHandler: config_provider.type=%s", providerType)
 	provider, err := user_config.GetProvider(providerType)
 	if err != nil {
 		log.Errorf("GetProvider err: %+v", err)
 		return
 	}
 	provider.RegisterMessageEventHandler(context.Background(), config_types.EventHandleMessageInject, a.HandleInjectMsg)
-	provider.RegisterMessageEventHandler(context.Background(), config_types.EventHandleMCPApply, a.HandleApplyMCPConfig)
+	log.Infof("registerHandler: registered paths=[%s]", config_types.EventHandleMessageInject)
 }
 
 // 向客户端注入消息
@@ -450,58 +451,4 @@ func (a *App) HandleInjectMsg(ctx context.Context, eventType string, eventData m
 	}
 
 	return "message injected successfully", nil
-}
-
-// HandleApplyMCPConfig 应用/预检来自管理端下发的 MCP 配置。
-// 支持 dry_run=true 仅做 initialize+tools/list 预检，不修改运行时配置。
-func (a *App) HandleApplyMCPConfig(ctx context.Context, eventType string, eventData map[string]interface{}) (string, error) {
-	mcpData, ok := eventData["mcp"].(map[string]interface{})
-	if !ok || mcpData == nil {
-		return "", fmt.Errorf("mcp 配置不能为空")
-	}
-
-	localMCPData, _ := eventData["local_mcp"].(map[string]interface{})
-	dryRun, _ := eventData["dry_run"].(bool)
-
-	if err := mcp.ValidateMCPConfigMap(mcpData); err != nil {
-		return "", fmt.Errorf("MCP预检失败: %w", err)
-	}
-	if dryRun {
-		return "mcp dry-run success", nil
-	}
-
-	oldMCP := deepCopyAny(viper.Get("mcp"))
-	oldLocalMCP := deepCopyAny(viper.Get("local_mcp"))
-
-	viper.Set("mcp", mcpData)
-	if localMCPData != nil {
-		viper.Set("local_mcp", localMCPData)
-	}
-
-	if err := a.ReloadMCP(); err != nil {
-		log.Errorf("HandleApplyMCPConfig ReloadMCP failed, rollback: %v", err)
-		viper.Set("mcp", oldMCP)
-		viper.Set("local_mcp", oldLocalMCP)
-		if rollbackErr := a.ReloadMCP(); rollbackErr != nil {
-			log.Errorf("HandleApplyMCPConfig rollback ReloadMCP failed: %v", rollbackErr)
-		}
-		return "", fmt.Errorf("应用MCP配置失败: %w", err)
-	}
-
-	return "mcp apply success", nil
-}
-
-func deepCopyAny(src interface{}) interface{} {
-	if src == nil {
-		return nil
-	}
-	body, err := json.Marshal(src)
-	if err != nil {
-		return src
-	}
-	var dst interface{}
-	if err := json.Unmarshal(body, &dst); err != nil {
-		return src
-	}
-	return dst
 }

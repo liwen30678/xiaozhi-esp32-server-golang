@@ -193,6 +193,32 @@
             </div>
           </div>
 
+          <div class="form-group" v-loading="mcpServiceOptionsLoading">
+            <label class="form-label">MCP服务</label>
+            <el-select
+              v-model="selectedMcpServices"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              clearable
+              size="large"
+              style="width: 100%"
+              placeholder="留空则使用全部已启用服务"
+              @change="handleMcpServiceSelectionChange"
+            >
+              <el-option
+                v-for="serviceName in mcpServiceOptions"
+                :key="serviceName"
+                :label="serviceName"
+                :value="serviceName"
+              />
+            </el-select>
+            <div class="form-help">
+              留空表示使用全部已启用全局MCP服务，当前可选 {{ mcpServiceOptions.length }} 个服务。
+            </div>
+          </div>
+
           <div class="form-group">
             <label class="form-label">MCP接入点</label>
             <el-button 
@@ -335,7 +361,8 @@ const form = reactive({
   tts_config_id: null,
   voice: null,
   asr_speed: 'normal',
-  memory_mode: 'short'
+  memory_mode: 'short',
+  mcp_service_names: ''
 })
 
 // LLM配置数据
@@ -350,6 +377,11 @@ const filteredVoices = ref([])
 const voiceSearchKeyword = ref('')
 const voiceLoading = ref(false)
 const previousTtsConfigId = ref(null) // 用于跟踪TTS配置变化
+
+// MCP服务选择
+const mcpServiceOptions = ref([])
+const selectedMcpServices = ref([])
+const mcpServiceOptionsLoading = ref(false)
 
 // MCP接入点相关
 const showMCPDialog = ref(false)
@@ -399,8 +431,11 @@ const loadAgent = async () => {
       custom_prompt: agent.custom_prompt || '',
       asr_speed: agent.asr_speed || 'normal',
       memory_mode: agent.memory_mode || 'short',
-      voice: agent.voice || null
+      voice: agent.voice || null,
+      mcp_service_names: agent.mcp_service_names || ''
     })
+    selectedMcpServices.value = normalizeMcpServiceNames((form.mcp_service_names || '').split(','))
+    syncMcpServiceNamesToForm()
     
     // 处理LLM配置关联
     const hasValidLlmConfigId = agent.llm_config_id && 
@@ -468,6 +503,57 @@ const loadAgent = async () => {
   } catch (error) {
     console.error('加载智能体失败:', error)
     ElMessage.error('加载智能体失败')
+  }
+}
+
+const normalizeMcpServiceNames = (names) => {
+  if (!Array.isArray(names)) return []
+  const unique = []
+  const seen = new Set()
+  for (const item of names) {
+    const name = String(item || '').trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    unique.push(name)
+  }
+  return unique
+}
+
+const syncMcpServiceNamesToForm = () => {
+  selectedMcpServices.value = normalizeMcpServiceNames(selectedMcpServices.value)
+  form.mcp_service_names = selectedMcpServices.value.join(',')
+}
+
+const handleMcpServiceSelectionChange = (values) => {
+  selectedMcpServices.value = normalizeMcpServiceNames(values || [])
+  syncMcpServiceNamesToForm()
+}
+
+const loadMcpServiceOptions = async () => {
+  if (!route.params.id) return
+
+  mcpServiceOptionsLoading.value = true
+  try {
+    const response = await api.get(`/user/agents/${route.params.id}/mcp-services/options`)
+    const data = response.data.data || {}
+
+    mcpServiceOptions.value = Array.isArray(data.options)
+      ? normalizeMcpServiceNames(data.options)
+      : []
+
+    if (Array.isArray(data.selected)) {
+      selectedMcpServices.value = normalizeMcpServiceNames(data.selected)
+    } else if (typeof data.mcp_service_names === 'string') {
+      selectedMcpServices.value = normalizeMcpServiceNames(data.mcp_service_names.split(','))
+    } else {
+      selectedMcpServices.value = normalizeMcpServiceNames((form.mcp_service_names || '').split(','))
+    }
+    syncMcpServiceNamesToForm()
+  } catch (error) {
+    console.error('加载MCP服务选项失败:', error)
+    ElMessage.warning('加载MCP服务选项失败')
+  } finally {
+    mcpServiceOptionsLoading.value = false
   }
 }
 
@@ -543,6 +629,7 @@ const handleSave = async () => {
   
   try {
     saving.value = true
+    syncMcpServiceNamesToForm()
     
     const response = await api.put(`/user/agents/${route.params.id}`, form)
     
@@ -836,6 +923,7 @@ onMounted(async () => {
   if (route.params.id) {
     // 编辑现有智能体，加载智能体数据
     await loadAgent()
+    await loadMcpServiceOptions()
     // 如果已有TTS配置，加载对应的音色列表
     if (form.tts_config_id) {
       previousTtsConfigId.value = form.tts_config_id

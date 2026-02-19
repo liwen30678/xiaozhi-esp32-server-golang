@@ -58,6 +58,7 @@ func Init(cfg config.DatabaseConfig) *gorm.DB {
 		&models.Device{},
 		&models.Agent{},
 		&models.Config{},
+		&models.MCPMarketService{},
 		&models.GlobalRole{},
 		&models.Role{}, // 新增：统一角色表
 		&models.ChatMessage{},

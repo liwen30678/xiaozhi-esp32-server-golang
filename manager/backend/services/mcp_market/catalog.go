@@ -1,6 +1,7 @@
 package mcp_market
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,19 +48,75 @@ func BuildHeaders(auth AuthConfig) map[string]string {
 	return headers
 }
 
+func BuildCookies(auth AuthConfig, providerID string) map[string]string {
+	token := strings.TrimSpace(auth.Token)
+	if token == "" {
+		return nil
+	}
+
+	switch NormalizeProviderID(providerID) {
+	case ProviderModelScope:
+		return map[string]string{"m_session_id": token}
+	default:
+		return nil
+	}
+}
+
 func FetchJSON(ctx context.Context, endpoint string, headers map[string]string, opts HTTPOptions) (interface{}, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 15 * time.Second
 	}
 
+	method := strings.ToUpper(strings.TrimSpace(opts.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	var bodyReader io.Reader
+	if opts.JSONBody != nil {
+		bodyBytes, err := json.Marshal(opts.JSONBody)
+		if err != nil {
+			return nil, fmt.Errorf("序列化请求体失败: %w", err)
+		}
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	endpointURL := strings.TrimSpace(endpoint)
+	if len(opts.Query) > 0 {
+		u, err := url.Parse(endpointURL)
+		if err != nil {
+			return nil, fmt.Errorf("解析请求URL失败: %w", err)
+		}
+		q := u.Query()
+		for k, v := range opts.Query {
+			k = strings.TrimSpace(k)
+			if k == "" {
+				continue
+			}
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		endpointURL = u.String()
+	}
+
 	client := &http.Client{Timeout: opts.Timeout}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, endpointURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if opts.JSONBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	for k, v := range opts.Cookies {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		req.AddCookie(&http.Cookie{Name: k, Value: v, Path: "/"})
 	}
 
 	resp, err := client.Do(req)
@@ -99,6 +156,9 @@ func BuildDetailURL(catalogURL, detailURLTemplate, serviceID string) (string, er
 
 	template := strings.TrimSpace(detailURLTemplate)
 	if template != "" {
+		if strings.Contains(template, "{raw_id}") {
+			template = strings.ReplaceAll(template, "{raw_id}", serviceID)
+		}
 		return strings.ReplaceAll(template, "{id}", url.PathEscape(serviceID)), nil
 	}
 
@@ -161,9 +221,6 @@ func ParseServiceDetail(payload interface{}, marketID uint, marketName, serviceI
 	}
 
 	endpoints := ExtractMCPEndpoints(payload, headers)
-	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("未在市场详情中解析到 mcp sse/streamablehttp 资源地址")
-	}
 
 	return &MarketServiceDetail{
 		MarketID:    marketID,
@@ -213,7 +270,7 @@ func ExtractMCPEndpoints(payload interface{}, headers map[string]string) []Parse
 			if smap := asMap(configNode); smap != nil {
 				for name, v := range smap {
 					if cfg := asMap(v); cfg != nil {
-						transportType := firstString(cfg, "type", "transport", "protocol")
+						transportType := firstString(cfg, "type", "transport", "protocol", "transport_type")
 						endpoint := firstString(cfg, "url", "endpoint", "sse_url", "sseUrl")
 						if endpoint != "" {
 							appendEndpoint(ParsedEndpoint{Name: name, Transport: transportType, URL: endpoint})
@@ -223,8 +280,18 @@ func ExtractMCPEndpoints(payload interface{}, headers map[string]string) []Parse
 			}
 		}
 
-		transportType := firstString(m, "type", "transport", "protocol")
+		if operationalNode, ok := m["operational_urls"]; ok {
+			appendEndpointFromArray(operationalNode, appendEndpoint)
+		}
+		if mcpServersNode, ok := m["mcp_servers"]; ok {
+			appendEndpointFromArray(mcpServersNode, appendEndpoint)
+		}
+
+		transportType := firstString(m, "type", "transport", "protocol", "transport_type")
 		if urlValue := firstString(m, "url", "endpoint", "mcp_url", "mcpUrl"); urlValue != "" {
+			if transportType == "" {
+				transportType = inferTransportFromURL(urlValue)
+			}
 			appendEndpoint(ParsedEndpoint{Name: firstString(m, "name", "title"), Transport: transportType, URL: urlValue})
 		}
 		if sseURL := firstString(m, "sse_url", "sseUrl", "sse"); sseURL != "" {
@@ -304,12 +371,48 @@ func cloneHeaders(in map[string]string) map[string]string {
 	return out
 }
 
+func appendEndpointFromArray(v interface{}, appendFn func(ParsedEndpoint)) {
+	items := asArray(v)
+	if len(items) == 0 {
+		return
+	}
+	for _, item := range items {
+		m := asMap(item)
+		if m == nil {
+			continue
+		}
+		rawURL := firstString(m, "url", "endpoint")
+		if rawURL == "" {
+			continue
+		}
+		transportType := firstString(m, "type", "transport", "protocol", "transport_type")
+		if transportType == "" {
+			transportType = inferTransportFromURL(rawURL)
+		}
+		appendFn(ParsedEndpoint{Name: firstString(m, "name", "title"), Transport: transportType, URL: rawURL})
+	}
+}
+
+func inferTransportFromURL(rawURL string) string {
+	lowerURL := strings.ToLower(strings.TrimSpace(rawURL))
+	switch {
+	case strings.HasSuffix(lowerURL, "/sse"), strings.Contains(lowerURL, "/sse?"):
+		return TransportSSE
+	case strings.HasSuffix(lowerURL, "/streamable_http"), strings.Contains(lowerURL, "/streamable_http?"):
+		return TransportStreamableHTTP
+	case strings.HasSuffix(lowerURL, "/streamablehttp"), strings.Contains(lowerURL, "/streamablehttp?"):
+		return TransportStreamableHTTP
+	default:
+		return ""
+	}
+}
+
 func findFirstObjectArray(v interface{}) []map[string]interface{} {
 	switch t := v.(type) {
 	case []interface{}:
 		return convertObjectArray(t)
 	case map[string]interface{}:
-		for _, key := range []string{"data", "items", "services", "list", "results", "records"} {
+		for _, key := range []string{"data", "items", "services", "list", "results", "records", "mcp_server_list"} {
 			if next, ok := t[key]; ok {
 				if arr := findFirstObjectArray(next); len(arr) > 0 {
 					return arr
@@ -375,6 +478,13 @@ func asMap(v interface{}) map[string]interface{} {
 	m, ok := v.(map[string]interface{})
 	if ok {
 		return m
+	}
+	return nil
+}
+
+func asArray(v interface{}) []interface{} {
+	if arr, ok := v.([]interface{}); ok {
+		return arr
 	}
 	return nil
 }

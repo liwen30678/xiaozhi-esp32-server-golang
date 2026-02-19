@@ -8,6 +8,11 @@ const (
 )
 
 const (
+	ProviderGeneric    = "generic"
+	ProviderModelScope = "modelscope"
+)
+
+const (
 	AuthTypeNone   = "none"
 	AuthTypeBearer = "bearer"
 	AuthTypeHeader = "header"
@@ -29,6 +34,7 @@ type AuthConfig struct {
 // MarketConnection stores a marketplace connection config in Config.json_data.
 type MarketConnection struct {
 	Name                   string `json:"name"`
+	ProviderID             string `json:"provider_id,omitempty"`
 	CatalogURL             string `json:"catalog_url"`
 	DetailURLTemplate      string `json:"detail_url_template,omitempty"`
 	Enabled                bool   `json:"enabled"`
@@ -47,6 +53,7 @@ type MarketConnectionView struct {
 	ID                uint   `json:"id"`
 	ConfigID          string `json:"config_id"`
 	Name              string `json:"name"`
+	ProviderID        string `json:"provider_id"`
 	CatalogURL        string `json:"catalog_url"`
 	DetailURLTemplate string `json:"detail_url_template,omitempty"`
 	Enabled           bool   `json:"enabled"`
@@ -97,6 +104,17 @@ type ImportResult struct {
 	PrecheckPassed bool     `json:"precheck_passed"`
 }
 
+// MarketProviderPreset defines builtin provider presets for marketplace onboarding.
+type MarketProviderPreset struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	CatalogURL        string `json:"catalog_url"`
+	DetailURLTemplate string `json:"detail_url_template,omitempty"`
+	AuthType          string `json:"auth_type"`
+	HeaderName        string `json:"header_name,omitempty"`
+	Description       string `json:"description,omitempty"`
+}
+
 // MergedMCPConfig is an internal structure used during apply/import.
 type MergedMCPConfig struct {
 	MCP      map[string]interface{} `json:"mcp"`
@@ -105,5 +123,9 @@ type MergedMCPConfig struct {
 
 // HTTPOptions controls outbound request behavior.
 type HTTPOptions struct {
-	Timeout time.Duration
+	Timeout  time.Duration
+	Method   string
+	JSONBody interface{}
+	Query    map[string]string
+	Cookies  map[string]string
 }

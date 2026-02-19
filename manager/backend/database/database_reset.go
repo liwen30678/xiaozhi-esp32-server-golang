@@ -43,6 +43,7 @@ func InitWithReset(cfg config.DatabaseConfig) *gorm.DB {
 		&models.Device{},
 		&models.Agent{},
 		&models.Config{},
+		&models.MCPMarketService{},
 		&models.GlobalRole{},
 		&models.Role{},
 		&models.SpeakerGroup{},

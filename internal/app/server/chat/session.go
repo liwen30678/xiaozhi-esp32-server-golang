@@ -1014,7 +1014,7 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResu
 	}
 
 	// 获取全局MCP工具列表
-	mcpTools, err := mcp.GetToolsByDeviceId(clientState.DeviceID, clientState.AgentID)
+	mcpTools, err := mcp.GetToolsByDeviceId(clientState.DeviceID, clientState.AgentID, clientState.DeviceConfig.MCPServiceNames)
 	if err != nil {
 		log.Errorf("获取设备 %s 的工具失败: %v", clientState.DeviceID, err)
 		mcpTools = make(map[string]tool.InvokableTool)

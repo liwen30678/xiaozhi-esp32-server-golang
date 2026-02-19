@@ -27,6 +27,7 @@ const (
 
 type upsertMCPMarketRequest struct {
 	Name              string              `json:"name" binding:"required"`
+	ProviderID        string              `json:"provider_id"`
 	CatalogURL        string              `json:"catalog_url" binding:"required"`
 	DetailURLTemplate string              `json:"detail_url_template"`
 	Auth              upsertMCPMarketAuth `json:"auth"`
@@ -44,6 +45,10 @@ type importMCPMarketServiceRequest struct {
 	MarketID     uint   `json:"market_id" binding:"required"`
 	ServiceID    string `json:"service_id" binding:"required"`
 	NameOverride string `json:"name_override"`
+}
+
+func (ac *AdminController) GetMCPMarketProviders(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"data": mcpmarket.ListProviderPresets()})
 }
 
 func (ac *AdminController) GetMCPMarkets(c *gin.Context) {
@@ -175,7 +180,7 @@ func (ac *AdminController) TestMCPMarket(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
 
-	raw, err := mcpmarket.FetchJSON(ctx, strings.TrimSpace(marketCfg.CatalogURL), mcpmarket.BuildHeaders(authCfg), mcpmarket.HTTPOptions{Timeout: 15 * time.Second})
+	raw, err := fetchMarketCatalog(ctx, marketCfg, authCfg)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("连接测试失败: %v", err)})
 		return
@@ -247,6 +252,7 @@ func (ac *AdminController) GetMCPMarketServices(c *gin.Context) {
 func (ac *AdminController) GetMCPMarketServiceDetail(c *gin.Context) {
 	marketID, _ := strconv.Atoi(c.Param("market_id"))
 	serviceID := strings.TrimSpace(c.Param("service_id"))
+	serviceID = strings.TrimPrefix(serviceID, "/")
 	if serviceID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "service_id 不能为空"})
 		return
@@ -272,11 +278,6 @@ func (ac *AdminController) GetMCPMarketServiceDetail(c *gin.Context) {
 }
 
 func (ac *AdminController) ImportMCPMarketService(c *gin.Context) {
-	if ac.WebSocketController == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "主程序未连接，无法下发MCP配置"})
-		return
-	}
-
 	var req importMCPMarketServiceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -298,60 +299,161 @@ func (ac *AdminController) ImportMCPMarketService(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(detail.Endpoints) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该服务暂无可用的 SSE/StreamableHTTP 地址，请先在上游市场激活或部署后重试"})
+		return
+	}
 
-	current, selectedCfg, err := ac.loadCurrentMCPConfig()
+	current, _, err := ac.loadCurrentMCPConfig()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("读取现有MCP配置失败: %v", err)})
 		return
 	}
 
-	oldSnapshot := deepCopyMap(map[string]interface{}{
-		"mcp":       current.MCP,
-		"local_mcp": current.LocalMCP,
-	})
-
-	merged, importedNames, conflictURL, err := mergeEndpointsIntoMCPConfig(current, detail, req.NameOverride)
+	existingAll, err := ac.listMCPMarketServices(false)
 	if err != nil {
-		if conflictURL != "" {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "conflict_url": conflictURL})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("读取已导入服务失败: %v", err)})
+		return
+	}
+	existingEnabled := filterEnabledMarketServices(existingAll)
+
+	manualURLSet, err := collectManualURLSet(current.MCP)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("解析人工MCP配置失败: %v", err)})
+		return
+	}
+	usedNames, err := collectUsedServerNames(current.MCP, existingAll)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("解析MCP服务名称失败: %v", err)})
+		return
+	}
+
+	urlHashToExisting := make(map[string]models.MCPMarketService)
+	for _, item := range existingAll {
+		if strings.TrimSpace(item.URLHash) != "" {
+			urlHashToExisting[item.URLHash] = item
+		}
+	}
+
+	baseName := strings.TrimSpace(req.NameOverride)
+	if baseName == "" {
+		baseName = strings.TrimSpace(detail.Name)
+	}
+	if baseName == "" {
+		baseName = "mcp-service"
+	}
+
+	upserts := make([]models.MCPMarketService, 0, len(detail.Endpoints))
+	importedNames := make([]string, 0, len(detail.Endpoints))
+	skippedURLs := make([]string, 0)
+
+	for idx, endpoint := range detail.Endpoints {
+		normURL := mcpmarket.NormalizeURL(endpoint.URL)
+		if normURL == "" {
+			continue
+		}
+		if _, conflict := manualURLSet[normURL]; conflict {
+			skippedURLs = append(skippedURLs, endpoint.URL)
+			continue
+		}
+
+		nameCandidate := baseName
+		if len(detail.Endpoints) > 1 {
+			nameCandidate = fmt.Sprintf("%s-%d", baseName, idx+1)
+		}
+		nameCandidate = resolveUniqueName(usedNames, nameCandidate)
+		usedNames[nameCandidate] = struct{}{}
+
+		row := models.MCPMarketService{
+			Name:        nameCandidate,
+			Enabled:     true,
+			Transport:   normalizeImportedTransport(endpoint.Transport),
+			URL:         endpoint.URL,
+			URLHash:     normalizedURLHash(endpoint.URL),
+			HeadersJSON: encodeHeadersJSON(endpoint.Headers),
+			MarketID:    &marketModel.ID,
+			ProviderID:  mcpmarket.NormalizeProviderID(marketCfg.ProviderID),
+			ServiceID:   detail.ServiceID,
+			ServiceName: detail.Name,
+		}
+		if row.Transport != mcpmarket.TransportSSE && row.Transport != mcpmarket.TransportStreamableHTTP {
+			continue
+		}
+		if row.URLHash == "" {
+			continue
+		}
+		if existing, ok := urlHashToExisting[row.URLHash]; ok {
+			row.ID = existing.ID
+			if strings.TrimSpace(req.NameOverride) == "" && strings.TrimSpace(existing.Name) != "" {
+				row.Name = strings.TrimSpace(existing.Name)
+			}
+		}
+
+		upserts = append(upserts, row)
+		importedNames = append(importedNames, row.Name)
+	}
+
+	if len(upserts) == 0 {
+		if len(skippedURLs) > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "所有可导入地址都与人工配置URL冲突，已按人工优先跳过", "skipped_urls": skippedURLs})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未解析到可导入的有效地址"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 70*time.Second)
-	defer cancel()
-
-	if err := ac.WebSocketController.ApplyMCPConfig(ctx, merged.MCP, merged.LocalMCP, true); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("MCP预检失败: %v", err)})
+	candidateEnabled := mergeServiceUpserts(existingEnabled, upserts)
+	_, mergeWarnings, err := mergeManualAndMarketServers(current.MCP, candidateEnabled)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("聚合MCP配置失败: %v", err)})
 		return
 	}
 
-	if err := ac.WebSocketController.ApplyMCPConfig(ctx, merged.MCP, merged.LocalMCP, false); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("应用MCP配置失败: %v", err)})
-		return
+	tx := ac.DB.Begin()
+	for _, row := range upserts {
+		if row.ID == 0 {
+			if err := tx.Create(&row).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("写入导入服务失败: %v", err)})
+				return
+			}
+			continue
+		}
+		updateMap := map[string]interface{}{
+			"name":         row.Name,
+			"enabled":      row.Enabled,
+			"transport":    row.Transport,
+			"url":          row.URL,
+			"url_hash":     row.URLHash,
+			"headers_json": row.HeadersJSON,
+			"market_id":    row.MarketID,
+			"provider_id":  row.ProviderID,
+			"service_id":   row.ServiceID,
+			"service_name": row.ServiceName,
+		}
+		if err := tx.Model(&models.MCPMarketService{}).Where("id = ?", row.ID).Updates(updateMap).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新导入服务失败: %v", err)})
+			return
+		}
 	}
 
-	persistErr := ac.persistMCPConfig(selectedCfg, merged)
-	if persistErr != nil {
-		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 40*time.Second)
-		_ = ac.WebSocketController.ApplyMCPConfig(rollbackCtx, asMap(oldSnapshot["mcp"]), asMap(oldSnapshot["local_mcp"]), false)
-		rollbackCancel()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("持久化MCP配置失败，已尝试回滚: %v", persistErr)})
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("持久化导入服务失败: %v", err)})
 		return
 	}
 
 	ac.notifySystemConfigChanged()
 
-	c.JSON(http.StatusOK, gin.H{"data": mcpmarket.ImportResult{
-		ServiceID:      detail.ServiceID,
-		ServiceName:    detail.Name,
-		MarketID:       detail.MarketID,
-		MarketName:     detail.MarketName,
-		ImportedNames:  importedNames,
-		ImportedCount:  len(importedNames),
-		PrecheckPassed: true,
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"service_id":     detail.ServiceID,
+		"service_name":   detail.Name,
+		"market_id":      detail.MarketID,
+		"market_name":    detail.MarketName,
+		"imported_names": importedNames,
+		"imported_count": len(importedNames),
+		"skipped_urls":   skippedURLs,
+		"warnings":       mergeWarnings,
 	}})
 }
 
@@ -417,8 +519,7 @@ func fetchAllMarketServices(ctx context.Context, markets []marketWithAuth) ([]mc
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			catalogURL := strings.TrimSpace(market.MarketConfig.CatalogURL)
-			raw, err := mcpmarket.FetchJSON(ctx, catalogURL, mcpmarket.BuildHeaders(market.AuthConfig), mcpmarket.HTTPOptions{Timeout: 15 * time.Second})
+			raw, err := fetchMarketCatalog(ctx, market.MarketConfig, market.AuthConfig)
 			if err != nil {
 				mu.Lock()
 				warnings = append(warnings, fmt.Sprintf("%s: %v", market.ConfigModel.Name, err))
@@ -451,16 +552,68 @@ func fetchAllMarketServices(ctx context.Context, markets []marketWithAuth) ([]mc
 }
 
 func fetchServiceDetail(ctx context.Context, marketModel models.Config, marketCfg mcpmarket.MarketConnection, authCfg mcpmarket.AuthConfig, serviceID string) (*mcpmarket.MarketServiceDetail, error) {
+	if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope && strings.TrimSpace(authCfg.Token) == "" {
+		return nil, fmt.Errorf("魔搭服务详情需要 Token，请在该市场连接中填写 Token")
+	}
+
 	detailURL, err := mcpmarket.BuildDetailURL(marketCfg.CatalogURL, marketCfg.DetailURLTemplate, serviceID)
 	if err != nil {
 		return nil, err
 	}
 
-	raw, err := mcpmarket.FetchJSON(ctx, detailURL, mcpmarket.BuildHeaders(authCfg), mcpmarket.HTTPOptions{Timeout: 20 * time.Second})
+	raw, err := fetchMarketDetail(ctx, marketCfg, authCfg, detailURL)
 	if err != nil {
+		if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope {
+			errMsg := strings.ToLower(err.Error())
+			if strings.Contains(errMsg, "invalidauthentication") || strings.Contains(errMsg, "authentication failed") || strings.Contains(errMsg, "401") {
+				return nil, fmt.Errorf("魔搭服务详情鉴权失败，请检查市场连接中的 Token 是否有效")
+			}
+		}
 		return nil, fmt.Errorf("拉取服务详情失败: %w", err)
 	}
-	return mcpmarket.ParseServiceDetail(raw, marketModel.ID, marketModel.Name, serviceID, mcpmarket.BuildHeaders(authCfg))
+	detail, err := mcpmarket.ParseServiceDetail(raw, marketModel.ID, marketModel.Name, serviceID, mcpmarket.BuildHeaders(authCfg))
+	if err != nil {
+		return nil, err
+	}
+	if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope && len(detail.Endpoints) == 0 {
+		return nil, fmt.Errorf("该服务暂无可调用地址（可能未在魔搭激活完成），请先在魔搭激活后重试")
+	}
+	return detail, nil
+}
+
+func fetchMarketCatalog(ctx context.Context, marketCfg mcpmarket.MarketConnection, authCfg mcpmarket.AuthConfig) (interface{}, error) {
+	catalogURL := strings.TrimSpace(marketCfg.CatalogURL)
+	if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope {
+		if strings.TrimSpace(authCfg.Token) == "" {
+			return nil, fmt.Errorf("魔搭市场仅拉取已激活服务，请先在该市场连接中填写 Token")
+		}
+		catalogURL = strings.TrimRight(catalogURL, "/") + "/operational"
+	}
+	return mcpmarket.FetchJSON(ctx, catalogURL, mcpmarket.BuildHeaders(authCfg), buildCatalogFetchOptions(marketCfg, authCfg))
+}
+
+func fetchMarketDetail(ctx context.Context, marketCfg mcpmarket.MarketConnection, authCfg mcpmarket.AuthConfig, detailURL string) (interface{}, error) {
+	return mcpmarket.FetchJSON(ctx, detailURL, mcpmarket.BuildHeaders(authCfg), buildDetailFetchOptions(marketCfg, authCfg))
+}
+
+func buildCatalogFetchOptions(marketCfg mcpmarket.MarketConnection, authCfg mcpmarket.AuthConfig) mcpmarket.HTTPOptions {
+	opts := mcpmarket.HTTPOptions{
+		Timeout: 15 * time.Second,
+		Cookies: mcpmarket.BuildCookies(authCfg, marketCfg.ProviderID),
+	}
+	return opts
+}
+
+func buildDetailFetchOptions(marketCfg mcpmarket.MarketConnection, authCfg mcpmarket.AuthConfig) mcpmarket.HTTPOptions {
+	opts := mcpmarket.HTTPOptions{
+		Timeout: 20 * time.Second,
+		Cookies: mcpmarket.BuildCookies(authCfg, marketCfg.ProviderID),
+	}
+
+	if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope {
+		opts.Query = map[string]string{"get_operational_url": "true"}
+	}
+	return opts
 }
 
 func mergeEndpointsIntoMCPConfig(current mcpmarket.MergedMCPConfig, detail *mcpmarket.MarketServiceDetail, nameOverride string) (mcpmarket.MergedMCPConfig, []string, string, error) {
@@ -618,6 +771,12 @@ type mcpServerConfig struct {
 
 func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.MarketConnection) (mcpmarket.MarketConnection, error) {
 	name := strings.TrimSpace(req.Name)
+	providerID := strings.TrimSpace(req.ProviderID)
+	if providerID == "" && existing != nil {
+		providerID = existing.ProviderID
+	}
+	providerID = mcpmarket.NormalizeProviderID(providerID)
+
 	catalogURL := strings.TrimSpace(req.CatalogURL)
 	detailTemplate := strings.TrimSpace(req.DetailURLTemplate)
 	if name == "" || catalogURL == "" {
@@ -627,7 +786,9 @@ func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.Mar
 		return mcpmarket.MarketConnection{}, fmt.Errorf("catalog_url 格式不正确")
 	}
 	if detailTemplate != "" {
-		if _, err := url.ParseRequestURI(strings.ReplaceAll(detailTemplate, "{id}", "placeholder")); err != nil {
+		validateURL := strings.ReplaceAll(detailTemplate, "{id}", "placeholder")
+		validateURL = strings.ReplaceAll(validateURL, "{raw_id}", "placeholder/raw")
+		if _, err := url.ParseRequestURI(validateURL); err != nil {
 			return mcpmarket.MarketConnection{}, fmt.Errorf("detail_url_template 格式不正确")
 		}
 	}
@@ -647,6 +808,9 @@ func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.Mar
 			authType = mcpmarket.AuthTypeNone
 		}
 	}
+	if providerID == mcpmarket.ProviderModelScope {
+		authType = mcpmarket.AuthTypeBearer
+	}
 	if authType != mcpmarket.AuthTypeNone && authType != mcpmarket.AuthTypeBearer && authType != mcpmarket.AuthTypeHeader {
 		return mcpmarket.MarketConnection{}, fmt.Errorf("auth.type 仅支持 none/bearer/header")
 	}
@@ -656,6 +820,9 @@ func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.Mar
 		headerName = existing.HeaderName
 	}
 	if authType == mcpmarket.AuthTypeHeader && headerName == "" {
+		headerName = "Authorization"
+	}
+	if providerID == mcpmarket.ProviderModelScope {
 		headerName = "Authorization"
 	}
 
@@ -673,12 +840,8 @@ func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.Mar
 	case authType == mcpmarket.AuthTypeNone:
 		tokenCipher, tokenNonce, tokenMask = "", "", ""
 	case newToken != "":
-		ciphertext, nonce, err := mcpmarket.EncryptText(newToken)
-		if err != nil {
-			return mcpmarket.MarketConnection{}, err
-		}
-		tokenCipher = ciphertext
-		tokenNonce = nonce
+		tokenCipher = newToken
+		tokenNonce = ""
 		tokenMask = mcpmarket.MaskToken(newToken)
 	case existing == nil && authType != mcpmarket.AuthTypeNone:
 		return mcpmarket.MarketConnection{}, fmt.Errorf("已启用鉴权但未提供 token")
@@ -699,17 +862,18 @@ func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.Mar
 			extraHeadersCipher = ""
 			extraHeadersNonce = ""
 		} else {
-			ciphertext, nonce, err := mcpmarket.EncryptText(string(headersJSON))
-			if err != nil {
-				return mcpmarket.MarketConnection{}, err
-			}
-			extraHeadersCipher = ciphertext
-			extraHeadersNonce = nonce
+			extraHeadersCipher = string(headersJSON)
+			extraHeadersNonce = ""
 		}
+	}
+	if providerID == mcpmarket.ProviderModelScope {
+		extraHeadersCipher = ""
+		extraHeadersNonce = ""
 	}
 
 	return mcpmarket.MarketConnection{
 		Name:                   name,
+		ProviderID:             providerID,
 		CatalogURL:             catalogURL,
 		DetailURLTemplate:      detailTemplate,
 		Enabled:                enabled,
@@ -732,6 +896,7 @@ func parseStoredMarketConfig(jsonData string) (mcpmarket.MarketConnection, error
 	if err := json.Unmarshal([]byte(jsonData), &cfg); err != nil {
 		return mcpmarket.MarketConnection{}, err
 	}
+	cfg.ProviderID = mcpmarket.NormalizeProviderID(cfg.ProviderID)
 	if cfg.Name == "" || cfg.CatalogURL == "" {
 		return mcpmarket.MarketConnection{}, fmt.Errorf("市场配置缺少 name/catalog_url")
 	}
@@ -743,30 +908,40 @@ func decodeMarketAuthConfig(cfg mcpmarket.MarketConnection) (mcpmarket.AuthConfi
 		Type:       cfg.AuthType,
 		HeaderName: cfg.HeaderName,
 	}
+	if mcpmarket.NormalizeProviderID(cfg.ProviderID) == mcpmarket.ProviderModelScope {
+		auth.Type = mcpmarket.AuthTypeBearer
+		auth.HeaderName = "Authorization"
+	}
 	if auth.Type == "" {
 		auth.Type = mcpmarket.AuthTypeNone
 	}
 
 	if cfg.TokenCiphertext != "" {
-		token, err := mcpmarket.DecryptText(cfg.TokenCiphertext, cfg.TokenNonce)
-		if err != nil {
-			return mcpmarket.AuthConfig{}, err
+		auth.Token = cfg.TokenCiphertext
+		// 兼容历史加密存储：如果配置了旧密钥，优先解密并覆盖
+		if strings.TrimSpace(cfg.TokenNonce) != "" {
+			if token, err := mcpmarket.DecryptText(cfg.TokenCiphertext, cfg.TokenNonce); err == nil {
+				auth.Token = token
+			}
 		}
-		auth.Token = token
 	}
 
 	if cfg.ExtraHeadersCiphertext != "" {
-		nonce := cfg.ExtraHeadersNonce
-		if strings.TrimSpace(nonce) == "" {
-			nonce = cfg.TokenNonce
-		}
-		headersJSON, err := mcpmarket.DecryptText(cfg.ExtraHeadersCiphertext, nonce)
-		if err != nil {
-			// 向后兼容：若历史数据明文存储为 JSON，允许直接解析
-			headersJSON = cfg.ExtraHeadersCiphertext
-		}
+		headersJSON := cfg.ExtraHeadersCiphertext
 		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err == nil {
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
+			// 兼容历史加密存储：尝试使用旧密钥解密
+			nonce := cfg.ExtraHeadersNonce
+			if strings.TrimSpace(nonce) == "" {
+				nonce = cfg.TokenNonce
+			}
+			if decrypted, derr := mcpmarket.DecryptText(cfg.ExtraHeadersCiphertext, nonce); derr == nil {
+				if uerr := json.Unmarshal([]byte(decrypted), &headers); uerr != nil {
+					headers = nil
+				}
+			}
+		}
+		if len(headers) > 0 {
 			auth.ExtraHeaders = headers
 		}
 	}
@@ -775,15 +950,22 @@ func decodeMarketAuthConfig(cfg mcpmarket.MarketConnection) (mcpmarket.AuthConfi
 }
 
 func toMarketConnectionView(cfg models.Config, marketCfg mcpmarket.MarketConnection) mcpmarket.MarketConnectionView {
+	authType := marketCfg.AuthType
+	headerName := marketCfg.HeaderName
+	if mcpmarket.NormalizeProviderID(marketCfg.ProviderID) == mcpmarket.ProviderModelScope {
+		authType = mcpmarket.AuthTypeBearer
+		headerName = "Authorization"
+	}
 	return mcpmarket.MarketConnectionView{
 		ID:                cfg.ID,
 		ConfigID:          cfg.ConfigID,
 		Name:              marketCfg.Name,
+		ProviderID:        mcpmarket.NormalizeProviderID(marketCfg.ProviderID),
 		CatalogURL:        marketCfg.CatalogURL,
 		DetailURLTemplate: marketCfg.DetailURLTemplate,
 		Enabled:           cfg.Enabled && marketCfg.Enabled,
-		AuthType:          marketCfg.AuthType,
-		HeaderName:        marketCfg.HeaderName,
+		AuthType:          authType,
+		HeaderName:        headerName,
 		TokenMask:         marketCfg.TokenMask,
 		HasToken:          marketCfg.TokenCiphertext != "",
 		CreatedAt:         cfg.CreatedAt.Format(time.RFC3339),

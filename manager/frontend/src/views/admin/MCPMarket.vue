@@ -5,83 +5,193 @@
       <p class="subtitle">连接多个MCP市场并导入可用的SSE/StreamableHTTP服务</p>
     </div>
 
-    <el-row :gutter="16">
-      <el-col :xs="24" :lg="11">
+    <el-tabs v-model="activeTab" class="market-tabs">
+      <el-tab-pane name="discover">
+        <template #label>
+          <span>市场发现</span>
+        </template>
+
+        <el-row :gutter="16">
+          <el-col :xs="24" :lg="11">
+            <el-card shadow="never" class="panel-card">
+              <template #header>
+                <div class="panel-header">
+                  <span>MCP市场</span>
+                  <div>
+                    <el-button type="primary" size="small" @click="openCreateDialog">新增连接</el-button>
+                    <el-button size="small" @click="loadMarkets">
+                      <el-icon><Refresh /></el-icon>
+                    </el-button>
+                  </div>
+                </div>
+              </template>
+
+              <el-table :data="markets" stripe v-loading="marketsLoading" height="560">
+                <el-table-column prop="name" label="名称" min-width="140" />
+                <el-table-column prop="provider_id" label="提供商" width="130">
+                  <template #default="{ row }">
+                    <el-tag size="small">{{ row.provider_id || 'generic' }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="catalog_url" label="目录URL" min-width="220" show-overflow-tooltip />
+                <el-table-column label="鉴权" width="120">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="row.has_token ? 'success' : 'info'">
+                      {{ row.auth_type || 'none' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="90">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="row.enabled ? 'success' : 'info'">
+                      {{ row.enabled ? '启用' : '禁用' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="96" fixed="right">
+                  <template #default="{ row }">
+                    <el-dropdown trigger="click" @command="(cmd) => handleMarketAction(cmd, row)">
+                      <el-button link type="primary" class="market-action-btn">
+                        <el-icon><MoreFilled /></el-icon>
+                      </el-button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                          <el-dropdown-item command="test">测试</el-dropdown-item>
+                          <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-card>
+          </el-col>
+
+          <el-col :xs="24" :lg="13">
+            <el-card shadow="never" class="panel-card">
+              <template #header>
+                <div class="panel-header">
+                  <span>聚合服务列表</span>
+                  <div class="search-actions">
+                    <el-input
+                      v-model="serviceQuery"
+                      placeholder="搜索服务名/描述/ID"
+                      clearable
+                      size="small"
+                      style="width: 240px"
+                      @keyup.enter="loadServices(1)"
+                    >
+                      <template #append>
+                        <el-button @click="loadServices(1)">
+                          <el-icon><Search /></el-icon>
+                        </el-button>
+                      </template>
+                    </el-input>
+                    <el-button size="small" @click="loadServices(servicePage)">
+                      <el-icon><Refresh /></el-icon>
+                    </el-button>
+                  </div>
+                </div>
+              </template>
+
+              <el-table :data="services" stripe v-loading="servicesLoading" height="500">
+                <el-table-column prop="name" label="服务" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="market_name" label="来源市场" min-width="120" show-overflow-tooltip />
+                <el-table-column prop="service_id" label="Service ID" min-width="180" show-overflow-tooltip />
+                <el-table-column label="操作" width="90" fixed="right">
+                  <template #default="{ row }">
+                    <el-button link type="primary" @click.stop="loadServiceDetail(row)">详情</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div class="pagination-wrap">
+                <el-pagination
+                  layout="prev, pager, next, total"
+                  :current-page="servicePage"
+                  :page-size="servicePageSize"
+                  :total="serviceTotal"
+                  @current-change="loadServices"
+                />
+              </div>
+
+              <el-alert
+                v-if="serviceWarnings.length > 0"
+                type="warning"
+                :closable="false"
+                title="部分市场拉取失败"
+                class="warning-alert"
+              >
+                <template #default>
+                  <div v-for="(warn, idx) in serviceWarnings" :key="idx">{{ warn }}</div>
+                </template>
+              </el-alert>
+            </el-card>
+          </el-col>
+        </el-row>
+      </el-tab-pane>
+
+      <el-tab-pane name="imported">
+        <template #label>
+          <div class="tab-label-with-badge">
+            <span>已导入服务</span>
+            <el-badge :value="importedTotal" :max="999" class="tab-badge" />
+          </div>
+        </template>
+
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-header">
-              <span>市场连接管理</span>
-              <div>
-                <el-button type="primary" size="small" @click="openCreateDialog">新增连接</el-button>
-                <el-button size="small" @click="loadMarkets">
+              <span>已导入服务</span>
+              <div class="search-actions">
+                <el-input
+                  v-model="importedQuery"
+                  placeholder="搜索名称 / service_id / URL"
+                  clearable
+                  size="small"
+                  style="width: 320px"
+                  @keyup.enter="loadImportedItems(1)"
+                >
+                  <template #append>
+                    <el-button @click="loadImportedItems(1)">
+                      <el-icon><Search /></el-icon>
+                    </el-button>
+                  </template>
+                </el-input>
+                <el-button size="small" @click="loadImportedItems(importedPage)">
                   <el-icon><Refresh /></el-icon>
                 </el-button>
+                <el-button type="primary" size="small" @click="openCreateImportedDialog">新增服务</el-button>
               </div>
             </div>
           </template>
 
-          <el-table :data="markets" stripe v-loading="marketsLoading" height="520">
-            <el-table-column prop="name" label="名称" min-width="140" />
-            <el-table-column prop="catalog_url" label="目录URL" min-width="220" show-overflow-tooltip />
-            <el-table-column label="鉴权" width="120">
+          <el-table :data="importedItems" stripe v-loading="importedLoading" height="560">
+            <el-table-column prop="name" label="名称" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="transport" label="传输" width="140" />
+            <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
+            <el-table-column prop="service_id" label="Service ID" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="provider_id" label="提供商" width="120">
               <template #default="{ row }">
-                <el-tag size="small" :type="row.has_token ? 'success' : 'info'">
-                  {{ row.auth_type || 'none' }}
-                </el-tag>
+                <el-tag size="small">{{ row.provider_id || '-' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="90">
+            <el-table-column prop="enabled" label="启用" width="90">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.enabled ? 'success' : 'info'">
                   {{ row.enabled ? '启用' : '禁用' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="210" fixed="right">
+            <el-table-column prop="updated_at" label="更新时间" width="180" />
+            <el-table-column label="操作" width="220" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-                <el-button link type="success" @click="testMarket(row)">测试</el-button>
-                <el-button link type="danger" @click="deleteMarket(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-
-      <el-col :xs="24" :lg="13">
-        <el-card shadow="never" class="panel-card">
-          <template #header>
-            <div class="panel-header">
-              <span>聚合服务列表</span>
-              <div class="search-actions">
-                <el-input
-                  v-model="serviceQuery"
-                  placeholder="搜索服务名/描述/ID"
-                  clearable
-                  size="small"
-                  style="width: 240px"
-                  @keyup.enter="loadServices(1)"
-                >
-                  <template #append>
-                    <el-button @click="loadServices(1)">
-                      <el-icon><Search /></el-icon>
-                    </el-button>
-                  </template>
-                </el-input>
-                <el-button size="small" @click="loadServices(servicePage)">
-                  <el-icon><Refresh /></el-icon>
+                <el-button link type="primary" @click="openEditImportedDialog(row)">编辑</el-button>
+                <el-button link :type="row.enabled ? 'warning' : 'success'" @click="toggleImportedEnabled(row)">
+                  {{ row.enabled ? '禁用' : '启用' }}
                 </el-button>
-              </div>
-            </div>
-          </template>
-
-          <el-table :data="services" stripe v-loading="servicesLoading" height="460" @row-click="handleSelectService">
-            <el-table-column prop="name" label="服务" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="market_name" label="来源市场" min-width="120" show-overflow-tooltip />
-            <el-table-column prop="service_id" label="Service ID" min-width="180" show-overflow-tooltip />
-            <el-table-column label="操作" width="90" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" @click.stop="loadServiceDetail(row)">详情</el-button>
+                <el-button link type="danger" @click="deleteImportedItem(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -89,67 +199,98 @@
           <div class="pagination-wrap">
             <el-pagination
               layout="prev, pager, next, total"
-              :current-page="servicePage"
-              :page-size="servicePageSize"
-              :total="serviceTotal"
-              @current-change="loadServices"
+              :current-page="importedPage"
+              :page-size="importedPageSize"
+              :total="importedTotal"
+              @current-change="loadImportedItems"
             />
           </div>
-
-          <el-alert
-            v-if="serviceWarnings.length > 0"
-            type="warning"
-            :closable="false"
-            title="部分市场拉取失败"
-            class="warning-alert"
-          >
-            <template #default>
-              <div v-for="(warn, idx) in serviceWarnings" :key="idx">{{ warn }}</div>
-            </template>
-          </el-alert>
         </el-card>
-      </el-col>
-    </el-row>
+      </el-tab-pane>
+    </el-tabs>
 
-    <el-card shadow="never" class="panel-card detail-panel" v-loading="detailLoading">
-      <template #header>
-        <div class="panel-header">
-          <span>服务详情与导入</span>
-        </div>
+    <el-dialog v-model="detailDialogVisible" title="服务详情" width="900px">
+      <div v-loading="detailLoading">
+        <el-empty v-if="!serviceDetail && !detailLoading" description="暂无服务详情" />
+        <template v-else-if="serviceDetail">
+          <div class="detail-grid">
+            <div><strong>服务：</strong>{{ serviceDetail.name || '-' }}</div>
+            <div><strong>来源市场：</strong>{{ serviceDetail.market_name || '-' }}</div>
+            <div><strong>Service ID：</strong>{{ serviceDetail.service_id || '-' }}</div>
+          </div>
+          <div v-if="serviceDetail.description" class="detail-desc">{{ serviceDetail.description }}</div>
+          <el-table :data="serviceDetail.endpoints || []" size="small" stripe>
+            <el-table-column prop="name" label="资源名" min-width="120" show-overflow-tooltip />
+            <el-table-column prop="transport" label="传输" width="140" />
+            <el-table-column prop="url" label="URL" min-width="360" show-overflow-tooltip />
+          </el-table>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="detailDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="detailImporting" :disabled="!serviceDetail" @click="importFromDetail">
+          导入服务配置并热更新
+        </el-button>
       </template>
+    </el-dialog>
 
-      <div v-if="!serviceDetail" class="empty-tip">请选择一个服务查看详情</div>
-      <template v-else>
-        <div class="detail-grid">
-          <div><strong>服务：</strong>{{ serviceDetail.name }}</div>
-          <div><strong>来源市场：</strong>{{ serviceDetail.market_name }}</div>
-          <div><strong>Service ID：</strong>{{ serviceDetail.service_id }}</div>
-        </div>
-
-        <div class="desc" v-if="serviceDetail.description">{{ serviceDetail.description }}</div>
-
-        <el-table :data="serviceDetail.endpoints || []" size="small" stripe>
-          <el-table-column prop="name" label="资源名" min-width="120" show-overflow-tooltip />
-          <el-table-column prop="transport" label="传输" width="140" />
-          <el-table-column prop="url" label="URL" min-width="300" show-overflow-tooltip />
-        </el-table>
-
-        <div class="import-actions">
-          <el-input
-            v-model="nameOverride"
-            placeholder="可选：导入名称覆盖（默认服务名）"
-            clearable
-            style="max-width: 320px"
-          />
-          <el-button type="primary" :loading="importing" @click="importService">一键导入并热更新</el-button>
-        </div>
-      </template>
-    </el-card>
-
-    <el-dialog v-model="marketDialogVisible" :title="editingMarket ? '编辑市场连接' : '新增市场连接'" width="640px">
-      <el-form ref="marketFormRef" :model="marketForm" :rules="marketRules" label-width="130px">
+    <el-dialog v-model="importedDialogVisible" :title="editingImported ? '编辑导入服务' : '新增导入服务'" width="700px">
+      <el-form ref="importedFormRef" :model="importedForm" :rules="importedRules" label-width="120px">
         <el-form-item label="名称" prop="name">
-          <el-input v-model="marketForm.name" placeholder="例如：魔搭MCP广场" />
+          <el-input v-model="importedForm.name" placeholder="服务展示名称" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="importedForm.enabled" />
+        </el-form-item>
+        <el-form-item label="传输" prop="transport">
+          <el-select v-model="importedForm.transport" style="width: 100%">
+            <el-option label="SSE" value="sse" />
+            <el-option label="StreamableHTTP" value="streamablehttp" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="URL" prop="url">
+          <el-input v-model="importedForm.url" placeholder="https://example.com/mcp" />
+        </el-form-item>
+        <el-form-item label="来源市场">
+          <el-select v-model="importedForm.market_id" clearable filterable style="width: 100%" placeholder="可选">
+            <el-option v-for="item in markets" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="提供商">
+          <el-input v-model="importedForm.provider_id" placeholder="例如：modelscope" />
+        </el-form-item>
+        <el-form-item label="Service ID">
+          <el-input v-model="importedForm.service_id" placeholder="上游服务ID（可选）" />
+        </el-form-item>
+        <el-form-item label="服务名称">
+          <el-input v-model="importedForm.service_name" placeholder="上游服务名（可选）" />
+        </el-form-item>
+        <el-form-item label="Headers(JSON)">
+          <el-input
+            v-model="importedHeadersText"
+            type="textarea"
+            :rows="4"
+            placeholder='例如：{"Authorization":"Bearer xxx"}'
+          />
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="importedDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="importedSaving" @click="saveImportedItem">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="marketDialogVisible" :title="editingMarket ? '编辑MCP市场' : '新增MCP市场'" width="640px">
+      <el-form ref="marketFormRef" :model="marketForm" :rules="marketRules" label-width="130px">
+        <el-form-item label="提供商">
+          <el-select v-model="marketForm.provider_id" style="width: 100%" @change="handleProviderChange">
+            <el-option v-for="provider in selectableProviderOptions" :key="provider.id" :label="provider.name" :value="provider.id" />
+          </el-select>
+          <div v-if="currentProvider?.description" class="provider-desc">{{ currentProvider.description }}</div>
+        </el-form-item>
+        <el-form-item label="名称" prop="name">
+          <el-input v-model="marketForm.name" placeholder="例如：魔搭MCP市场" />
         </el-form-item>
         <el-form-item label="目录URL" prop="catalog_url">
           <el-input v-model="marketForm.catalog_url" placeholder="https://example.com/api/services" />
@@ -162,31 +303,12 @@
         </el-form-item>
 
         <el-divider>鉴权配置</el-divider>
-
-        <el-form-item label="鉴权类型">
-          <el-select v-model="marketForm.auth.type" style="width: 100%">
-            <el-option label="none" value="none" />
-            <el-option label="bearer" value="bearer" />
-            <el-option label="header" value="header" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="marketForm.auth.type === 'header'" label="Header名">
-          <el-input v-model="marketForm.auth.header_name" placeholder="Authorization" />
-        </el-form-item>
         <el-form-item label="Token">
           <el-input
             v-model="marketForm.auth.token"
-            :placeholder="editingMarket ? `留空则保持原值（当前：${editingMarket.token_mask || '未设置'}）` : '输入Token（可选）'"
+            :placeholder="editingMarket ? `留空则保持原值（当前：${editingMarket.token_mask || '未设置'}）` : '请输入魔搭 Token'"
             show-password
             clearable
-          />
-        </el-form-item>
-        <el-form-item label="额外Headers(JSON)">
-          <el-input
-            v-model="extraHeadersText"
-            type="textarea"
-            :rows="4"
-            placeholder='例如：{"X-API-Key":"xxx"}'
           />
         </el-form-item>
       </el-form>
@@ -200,26 +322,29 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { Refresh, Search, MoreFilled } from '@element-plus/icons-vue'
 import api from '@/utils/api'
+
+const activeTab = ref('discover')
 
 const markets = ref([])
 const marketsLoading = ref(false)
+const providerOptions = ref([])
 const marketDialogVisible = ref(false)
 const marketSaving = ref(false)
 const editingMarket = ref(null)
 const marketFormRef = ref()
-const extraHeadersText = ref('')
 
 const marketForm = reactive({
   name: '',
+  provider_id: 'modelscope',
   catalog_url: '',
   detail_url_template: '',
   enabled: true,
   auth: {
-    type: 'none',
+    type: 'bearer',
     token: '',
     header_name: 'Authorization'
   }
@@ -230,6 +355,14 @@ const marketRules = {
   catalog_url: [{ required: true, message: '请输入目录URL', trigger: 'blur' }]
 }
 
+const selectableProviderOptions = computed(() => {
+  return providerOptions.value.filter(item => item.id !== 'generic')
+})
+
+const currentProvider = computed(() => {
+  return selectableProviderOptions.value.find(item => item.id === marketForm.provider_id) || null
+})
+
 const services = ref([])
 const servicesLoading = ref(false)
 const serviceWarnings = ref([])
@@ -237,11 +370,104 @@ const servicePage = ref(1)
 const servicePageSize = ref(20)
 const serviceTotal = ref(0)
 const serviceQuery = ref('')
-
+const detailDialogVisible = ref(false)
 const detailLoading = ref(false)
+const detailImporting = ref(false)
 const serviceDetail = ref(null)
-const importing = ref(false)
-const nameOverride = ref('')
+
+const importedLoading = ref(false)
+const importedSaving = ref(false)
+const importedDialogVisible = ref(false)
+const editingImported = ref(null)
+const importedFormRef = ref()
+const importedItems = ref([])
+const importedPage = ref(1)
+const importedPageSize = ref(20)
+const importedTotal = ref(0)
+const importedQuery = ref('')
+const importedHeadersText = ref('')
+
+const importedForm = reactive({
+  name: '',
+  enabled: true,
+  transport: 'streamablehttp',
+  url: '',
+  market_id: null,
+  provider_id: '',
+  service_id: '',
+  service_name: ''
+})
+
+const importedRules = {
+  name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
+  transport: [{ required: true, message: '请选择传输类型', trigger: 'change' }],
+  url: [{ required: true, message: '请输入URL', trigger: 'blur' }]
+}
+
+const getDefaultProviderId = () => {
+  if (selectableProviderOptions.value.length === 0) return 'modelscope'
+  if (selectableProviderOptions.value.some(item => item.id === 'modelscope')) return 'modelscope'
+  return selectableProviderOptions.value[0].id
+}
+
+const loadProviders = async () => {
+  try {
+    const resp = await api.get('/admin/mcp-market/providers')
+    providerOptions.value = resp.data.data || []
+    if (!marketForm.provider_id) {
+      marketForm.provider_id = getDefaultProviderId()
+    }
+    if (!selectableProviderOptions.value.some(item => item.id === marketForm.provider_id)) {
+      marketForm.provider_id = getDefaultProviderId()
+    }
+  } catch (error) {
+    providerOptions.value = [{ id: 'modelscope', name: '魔搭 ModelScope' }]
+    marketForm.provider_id = marketForm.provider_id || 'modelscope'
+    ElMessage.error(error.response?.data?.error || '加载提供商失败')
+  }
+}
+
+const applyProviderPreset = (providerId, force = false) => {
+  const provider = selectableProviderOptions.value.find(item => item.id === providerId)
+  if (!provider) return
+
+  if (force || !marketForm.catalog_url) {
+    marketForm.catalog_url = provider.catalog_url || ''
+  }
+  if (force || !marketForm.detail_url_template) {
+    marketForm.detail_url_template = provider.detail_url_template || ''
+  }
+  if (force || !marketForm.auth.type) {
+    marketForm.auth.type = 'bearer'
+  }
+  marketForm.auth.header_name = 'Authorization'
+
+  if (force) {
+    marketForm.auth.token = ''
+  }
+
+  if (!editingMarket.value && (force || !marketForm.name) && provider.id === 'modelscope') {
+    marketForm.name = '魔搭MCP市场'
+  }
+}
+
+const handleProviderChange = (providerId) => {
+  applyProviderPreset(providerId, true)
+}
+
+const handleMarketAction = async (command, row) => {
+  if (command === 'edit') {
+    openEditDialog(row)
+    return
+  }
+  if (command === 'test') {
+    await testMarket(row)
+    return
+  }
+  if (command === 'delete') {
+    await deleteMarket(row)
+  }
+}
 
 const loadMarkets = async () => {
   marketsLoading.value = true
@@ -249,7 +475,7 @@ const loadMarkets = async () => {
     const resp = await api.get('/admin/mcp-markets')
     markets.value = resp.data.data || []
   } catch (error) {
-    ElMessage.error(error.response?.data?.error || '加载市场连接失败')
+    ElMessage.error(error.response?.data?.error || '加载MCP市场失败')
   } finally {
     marketsLoading.value = false
   }
@@ -257,46 +483,36 @@ const loadMarkets = async () => {
 
 const resetMarketForm = () => {
   marketForm.name = ''
+  marketForm.provider_id = getDefaultProviderId()
   marketForm.catalog_url = ''
   marketForm.detail_url_template = ''
   marketForm.enabled = true
-  marketForm.auth.type = 'none'
+  marketForm.auth.type = 'bearer'
   marketForm.auth.token = ''
   marketForm.auth.header_name = 'Authorization'
-  extraHeadersText.value = ''
 }
 
 const openCreateDialog = () => {
   editingMarket.value = null
   resetMarketForm()
+  applyProviderPreset(marketForm.provider_id, true)
   marketDialogVisible.value = true
 }
 
 const openEditDialog = (row) => {
   editingMarket.value = row
   marketForm.name = row.name
+  const rowProviderId = row.provider_id || getDefaultProviderId()
+  marketForm.provider_id = selectableProviderOptions.value.some(item => item.id === rowProviderId)
+    ? rowProviderId
+    : getDefaultProviderId()
   marketForm.catalog_url = row.catalog_url
   marketForm.detail_url_template = row.detail_url_template || ''
   marketForm.enabled = !!row.enabled
-  marketForm.auth.type = row.auth_type || 'none'
-  marketForm.auth.header_name = row.header_name || 'Authorization'
+  marketForm.auth.type = 'bearer'
+  marketForm.auth.header_name = 'Authorization'
   marketForm.auth.token = ''
-  extraHeadersText.value = ''
   marketDialogVisible.value = true
-}
-
-const parseExtraHeaders = () => {
-  const txt = extraHeadersText.value.trim()
-  if (!txt) return null
-  try {
-    const parsed = JSON.parse(txt)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('extra_headers 必须是JSON对象')
-    }
-    return parsed
-  } catch (e) {
-    throw new Error('额外Headers不是合法JSON对象')
-  }
 }
 
 const saveMarket = async () => {
@@ -304,24 +520,16 @@ const saveMarket = async () => {
   const valid = await marketFormRef.value.validate().catch(() => false)
   if (!valid) return
 
-  let extraHeaders = null
-  try {
-    extraHeaders = parseExtraHeaders()
-  } catch (e) {
-    ElMessage.error(e.message)
-    return
-  }
-
   const payload = {
     name: marketForm.name,
+    provider_id: marketForm.provider_id,
     catalog_url: marketForm.catalog_url,
     detail_url_template: marketForm.detail_url_template,
     enabled: marketForm.enabled,
     auth: {
-      type: marketForm.auth.type,
+      type: 'bearer',
       token: marketForm.auth.token,
-      header_name: marketForm.auth.header_name,
-      extra_headers: extraHeaders
+      header_name: 'Authorization'
     }
   }
 
@@ -346,7 +554,7 @@ const saveMarket = async () => {
 
 const deleteMarket = async (row) => {
   try {
-    await ElMessageBox.confirm(`确认删除市场连接「${row.name}」？`, '提示', {
+    await ElMessageBox.confirm(`确认删除MCP市场「${row.name}」？`, '提示', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消'
@@ -394,16 +602,13 @@ const loadServices = async (page = 1) => {
   }
 }
 
-const handleSelectService = (row) => {
-  loadServiceDetail(row)
-}
-
 const loadServiceDetail = async (row) => {
+  detailDialogVisible.value = true
   detailLoading.value = true
+  serviceDetail.value = null
   try {
     const resp = await api.get(`/admin/mcp-market/services/${row.market_id}/${encodeURIComponent(row.service_id)}`)
-    serviceDetail.value = resp.data.data
-    nameOverride.value = ''
+    serviceDetail.value = resp.data?.data || null
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '加载服务详情失败')
   } finally {
@@ -411,33 +616,187 @@ const loadServiceDetail = async (row) => {
   }
 }
 
-const importService = async () => {
-  if (!serviceDetail.value) {
-    ElMessage.warning('请先选择一个服务')
+const importFromDetail = async () => {
+  const row = serviceDetail.value
+  if (!row?.market_id || !row?.service_id) {
+    ElMessage.error('服务标识缺失，无法导入')
     return
   }
 
-  importing.value = true
+  detailImporting.value = true
   try {
     const payload = {
-      market_id: serviceDetail.value.market_id,
-      service_id: serviceDetail.value.service_id,
-      name_override: nameOverride.value || ''
+      market_id: row.market_id,
+      service_id: row.service_id,
+      name_override: ''
     }
     const resp = await api.post('/admin/mcp-market/import', payload)
     const result = resp.data.data || {}
     ElMessage.success(`导入成功：${result.imported_count || 0} 个服务已应用`)
     await loadServices(servicePage.value)
+    await loadImportedItems(1)
+    detailDialogVisible.value = false
+    activeTab.value = 'imported'
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '导入失败')
   } finally {
-    importing.value = false
+    detailImporting.value = false
+  }
+}
+
+const loadImportedItems = async (page = 1) => {
+  importedPage.value = page
+  importedLoading.value = true
+  try {
+    const resp = await api.get('/admin/mcp-market/imported-services', {
+      params: {
+        q: importedQuery.value,
+        page: importedPage.value,
+        page_size: importedPageSize.value
+      }
+    })
+    const data = resp.data.data || {}
+    importedItems.value = data.items || []
+    importedTotal.value = data.total || 0
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '加载导入服务失败')
+  } finally {
+    importedLoading.value = false
+  }
+}
+
+const parseImportedHeaders = () => {
+  const txt = importedHeadersText.value.trim()
+  if (!txt) return null
+  try {
+    const parsed = JSON.parse(txt)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('headers 必须是 JSON 对象')
+    }
+    return parsed
+  } catch (error) {
+    throw new Error('Headers 不是合法 JSON 对象')
+  }
+}
+
+const resetImportedForm = () => {
+  importedForm.name = ''
+  importedForm.enabled = true
+  importedForm.transport = 'streamablehttp'
+  importedForm.url = ''
+  importedForm.market_id = null
+  importedForm.provider_id = ''
+  importedForm.service_id = ''
+  importedForm.service_name = ''
+  importedHeadersText.value = ''
+}
+
+const openCreateImportedDialog = () => {
+  editingImported.value = null
+  resetImportedForm()
+  importedDialogVisible.value = true
+}
+
+const openEditImportedDialog = (row) => {
+  editingImported.value = row
+  importedForm.name = row.name || ''
+  importedForm.enabled = !!row.enabled
+  importedForm.transport = row.transport || 'streamablehttp'
+  importedForm.url = row.url || ''
+  importedForm.market_id = row.market_id || null
+  importedForm.provider_id = row.provider_id || ''
+  importedForm.service_id = row.service_id || ''
+  importedForm.service_name = row.service_name || ''
+  importedHeadersText.value = row.headers ? JSON.stringify(row.headers, null, 2) : ''
+  importedDialogVisible.value = true
+}
+
+const saveImportedItem = async () => {
+  if (!importedFormRef.value) return
+  const valid = await importedFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  let headers = null
+  try {
+    headers = parseImportedHeaders()
+  } catch (error) {
+    ElMessage.error(error.message)
+    return
+  }
+
+  const payload = {
+    name: importedForm.name,
+    enabled: importedForm.enabled,
+    transport: importedForm.transport,
+    url: importedForm.url,
+    headers,
+    market_id: importedForm.market_id || null,
+    provider_id: importedForm.provider_id,
+    service_id: importedForm.service_id,
+    service_name: importedForm.service_name
+  }
+
+  importedSaving.value = true
+  try {
+    if (editingImported.value) {
+      await api.put(`/admin/mcp-market/imported-services/${editingImported.value.id}`, payload)
+      ElMessage.success('更新成功')
+    } else {
+      await api.post('/admin/mcp-market/imported-services', payload)
+      ElMessage.success('创建成功')
+    }
+    importedDialogVisible.value = false
+    await loadImportedItems(importedPage.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '保存失败')
+  } finally {
+    importedSaving.value = false
+  }
+}
+
+const toggleImportedEnabled = async (row) => {
+  const payload = {
+    name: row.name,
+    enabled: !row.enabled,
+    transport: row.transport,
+    url: row.url,
+    headers: row.headers || null,
+    market_id: row.market_id || null,
+    provider_id: row.provider_id || '',
+    service_id: row.service_id || '',
+    service_name: row.service_name || ''
+  }
+  try {
+    await api.put(`/admin/mcp-market/imported-services/${row.id}`, payload)
+    ElMessage.success(row.enabled ? '已禁用' : '已启用')
+    await loadImportedItems(importedPage.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '更新状态失败')
+  }
+}
+
+const deleteImportedItem = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确认删除导入服务「${row.name}」？`, '提示', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+    await api.delete(`/admin/mcp-market/imported-services/${row.id}`)
+    ElMessage.success('删除成功')
+    await loadImportedItems(importedPage.value)
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.error || '删除失败')
+    }
   }
 }
 
 onMounted(async () => {
+  await loadProviders()
   await loadMarkets()
   await loadServices(1)
+  await loadImportedItems(1)
 })
 </script>
 
@@ -459,6 +818,25 @@ onMounted(async () => {
   margin-top: 6px;
   color: #6b7280;
   font-size: 14px;
+}
+
+.market-tabs {
+  --el-tabs-header-height: 44px;
+}
+
+.tab-label-with-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-badge {
+  line-height: 1;
+}
+
+.market-action-btn {
+  padding: 0;
+  min-width: 22px;
 }
 
 .panel-card {
@@ -488,38 +866,36 @@ onMounted(async () => {
   margin-top: 12px;
 }
 
-.detail-panel {
-  margin-top: 4px;
-}
-
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
   gap: 8px 12px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
-.desc {
+.detail-desc {
   margin-bottom: 12px;
   color: #4b5563;
   line-height: 1.6;
 }
 
-.import-actions {
-  margin-top: 12px;
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.empty-tip {
-  color: #9ca3af;
-  font-size: 14px;
-  padding: 12px 0;
+.provider-desc {
+  margin-top: 6px;
+  line-height: 1.5;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 @media (max-width: 992px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
   .search-actions {
+    flex-wrap: wrap;
+  }
+
+  .panel-header {
     flex-wrap: wrap;
   }
 }

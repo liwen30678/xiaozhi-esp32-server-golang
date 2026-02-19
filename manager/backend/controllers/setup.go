@@ -90,6 +90,7 @@ func (sc *SetupController) InitializeDatabase(c *gin.Context) {
 		&models.Device{},
 		&models.Agent{},
 		&models.Config{},
+		&models.MCPMarketService{},
 		&models.GlobalRole{},
 		&models.SpeakerGroup{},
 		&models.SpeakerSample{},

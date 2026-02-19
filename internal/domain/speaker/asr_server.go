@@ -23,8 +23,8 @@ func NewAsrServerProvider(config map[string]interface{}) (*AsrServerProvider, er
 		return nil, fmt.Errorf("配置中缺少 service.base_url 字段")
 	}
 
-	// 读取阈值配置，默认值为 0.6
-	threshold := float32(0.6)
+	// 读取阈值配置，默认值为 0.4
+	threshold := float32(0.4)
 	if thresholdVal, ok := config["threshold"]; ok {
 		switch v := thresholdVal.(type) {
 		case float64:
@@ -38,8 +38,8 @@ func NewAsrServerProvider(config map[string]interface{}) (*AsrServerProvider, er
 		}
 		// 验证阈值范围
 		if threshold < 0 || threshold > 1 {
-			log.Warnf("阈值 %.4f 超出有效范围 [0.0, 1.0]，使用默认值 0.6", threshold)
-			threshold = 0.6
+			log.Warnf("阈值 %.4f 超出有效范围 [0.0, 1.0]，使用默认值 0.4", threshold)
+			threshold = 0.4
 		}
 	}
 

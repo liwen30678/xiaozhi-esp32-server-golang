@@ -78,16 +78,17 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	}
 
 	type ConfigResponse struct {
-		VAD           models.Config               `json:"vad"`
-		ASR           models.Config               `json:"asr"`
-		LLM           models.Config               `json:"llm"`
-		TTS           models.Config               `json:"tts"`
-		Memory        models.Config               `json:"memory"`
-		VoiceIdentify map[string]SpeakerGroupInfo `json:"voice_identify"`
-		Prompt        string                      `json:"prompt"`
-		AgentID       string                      `json:"agent_id"`
-		MemoryMode    string                      `json:"memory_mode"`
-		ConfigSource  string                      `json:"config_source"` // 新增：配置来源
+		VAD             models.Config               `json:"vad"`
+		ASR             models.Config               `json:"asr"`
+		LLM             models.Config               `json:"llm"`
+		TTS             models.Config               `json:"tts"`
+		Memory          models.Config               `json:"memory"`
+		VoiceIdentify   map[string]SpeakerGroupInfo `json:"voice_identify"`
+		Prompt          string                      `json:"prompt"`
+		AgentID         string                      `json:"agent_id"`
+		MemoryMode      string                      `json:"memory_mode"`
+		MCPServiceNames string                      `json:"mcp_service_names"`
+		ConfigSource    string                      `json:"config_source"` // 新增：配置来源
 	}
 
 	var response ConfigResponse
@@ -130,6 +131,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 	if deviceFound && agent.ID != 0 {
 		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+		response.MCPServiceNames = normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
 	}
 
 	// ==================== 配置获取逻辑（带优先级） ====================
@@ -564,7 +566,20 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	if configs, exists := configsByType["mcp"]; exists && len(configs) > 0 {
 		mcpData, localMcpData := selectAndParseMCPConfig(configs)
 		if mcpData != nil {
-			response["mcp"] = mcpData
+			if mcpMap := asMap(mcpData); mcpMap != nil {
+				mergedMCP, mergeWarnings, err := ac.mergeMCPWithEnabledMarketServices(mcpMap)
+				if err != nil {
+					log.Printf("聚合市场MCP服务失败，回退为人工配置: %v", err)
+					response["mcp"] = mcpMap
+				} else {
+					response["mcp"] = mergedMCP
+					if len(mergeWarnings) > 0 {
+						log.Printf("聚合市场MCP服务告警: %s", strings.Join(mergeWarnings, " | "))
+					}
+				}
+			} else {
+				response["mcp"] = mcpData
+			}
 		}
 		if localMcpData != nil {
 			response["local_mcp"] = localMcpData
@@ -574,6 +589,24 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	// 处理独立的local_mcp配置（如果存在）
 	if configs, exists := configsByType["local_mcp"]; exists && len(configs) > 0 {
 		response["local_mcp"] = selectAndParseConfig(configs)
+	}
+
+	// 当未配置人工 mcp(type=mcp) 但已存在市场导入服务时，补齐默认 mcp/local_mcp，确保可下发聚合结果
+	if _, exists := response["mcp"]; !exists {
+		mergedMCP, mergeWarnings, err := ac.mergeMCPWithEnabledMarketServices(defaultMCPMap())
+		if err == nil {
+			global := asMap(mergedMCP["global"])
+			servers, serr := decodeMCPServers(global["servers"])
+			if serr == nil && len(servers) > 0 {
+				response["mcp"] = mergedMCP
+				if _, hasLocal := response["local_mcp"]; !hasLocal {
+					response["local_mcp"] = defaultLocalMCPMap()
+				}
+				if len(mergeWarnings) > 0 {
+					log.Printf("聚合市场MCP服务告警: %s", strings.Join(mergeWarnings, " | "))
+				}
+			}
+		}
 	}
 
 	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold、enable）
@@ -2457,6 +2490,12 @@ func (ac *AdminController) CreateAgent(c *gin.Context) {
 		return
 	}
 	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := ac.DB.Create(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建智能体失败"})
@@ -2480,6 +2519,12 @@ func (ac *AdminController) UpdateAgent(c *gin.Context) {
 		return
 	}
 	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := ac.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})

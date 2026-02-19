@@ -36,18 +36,19 @@ type Device struct {
 
 // 智能体模型
 type Agent struct {
-	ID           uint      `json:"id" gorm:"primarykey"`
-	UserID       uint      `json:"user_id" gorm:"not null"`
-	Name         string    `json:"name" gorm:"type:varchar(100);not null"`              // 昵称
-	CustomPrompt string    `json:"custom_prompt" gorm:"type:text"`                      // 角色介绍(prompt)
-	LLMConfigID  *string   `json:"llm_config_id" gorm:"type:varchar(100)"`              // 语言模型配置ID
-	TTSConfigID  *string   `json:"tts_config_id" gorm:"type:varchar(100)"`              // 音色配置ID
-	Voice        *string   `json:"voice" gorm:"type:varchar(200)"`                      // 音色值
-	ASRSpeed     string    `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`  // 语音识别速度: normal/patient/fast
-	MemoryMode   string    `json:"memory_mode" gorm:"type:varchar(20);default:'short'"` // 记忆模式: none/short/long
-	Status       string    `json:"status" gorm:"type:varchar(20);default:'active'"`     // active, inactive
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              uint      `json:"id" gorm:"primarykey"`
+	UserID          uint      `json:"user_id" gorm:"not null"`
+	Name            string    `json:"name" gorm:"type:varchar(100);not null"`              // 昵称
+	CustomPrompt    string    `json:"custom_prompt" gorm:"type:text"`                      // 角色介绍(prompt)
+	LLMConfigID     *string   `json:"llm_config_id" gorm:"type:varchar(100)"`              // 语言模型配置ID
+	TTSConfigID     *string   `json:"tts_config_id" gorm:"type:varchar(100)"`              // 音色配置ID
+	Voice           *string   `json:"voice" gorm:"type:varchar(200)"`                      // 音色值
+	ASRSpeed        string    `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`  // 语音识别速度: normal/patient/fast
+	MemoryMode      string    `json:"memory_mode" gorm:"type:varchar(20);default:'short'"` // 记忆模式: none/short/long
+	MCPServiceNames string    `json:"mcp_service_names" gorm:"type:text"`                  // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
+	Status          string    `json:"status" gorm:"type:varchar(20);default:'active'"`     // active, inactive
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // 通用配置模型
@@ -60,6 +61,26 @@ type Config struct {
 	JsonData  string    `json:"json_data" gorm:"type:text"`                                                        // JSON配置数据
 	Enabled   bool      `json:"enabled" gorm:"default:true"`
 	IsDefault bool      `json:"is_default" gorm:"default:false"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MCPMarketService 市场导入的MCP服务配置
+// 人工配置仍存放在 Config(type=mcp).json_data 中，市场配置拆分到独立表。
+type MCPMarketService struct {
+	ID          uint   `json:"id" gorm:"primarykey"`
+	Name        string `json:"name" gorm:"type:varchar(150);not null"`
+	Enabled     bool   `json:"enabled" gorm:"default:true;index"`
+	Transport   string `json:"transport" gorm:"type:varchar(32);not null"` // sse / streamablehttp
+	URL         string `json:"url" gorm:"type:text;not null"`
+	URLHash     string `json:"url_hash" gorm:"type:varchar(512);not null;uniqueIndex:idx_mcp_market_services_url_hash"`
+	HeadersJSON string `json:"headers_json" gorm:"type:text"`
+
+	MarketID    *uint  `json:"market_id" gorm:"index"` // 关联 configs(type=mcp_market).id
+	ProviderID  string `json:"provider_id" gorm:"type:varchar(50);index"`
+	ServiceID   string `json:"service_id" gorm:"type:varchar(255);index"`
+	ServiceName string `json:"service_name" gorm:"type:varchar(255)"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

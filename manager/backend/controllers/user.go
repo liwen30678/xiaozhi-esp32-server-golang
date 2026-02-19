@@ -246,13 +246,14 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var req struct {
-		Name         string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt string  `json:"custom_prompt"`
-		LLMConfigID  *string `json:"llm_config_id"`
-		TTSConfigID  *string `json:"tts_config_id"`
-		Voice        *string `json:"voice"`
-		ASRSpeed     string  `json:"asr_speed"`
-		MemoryMode   string  `json:"memory_mode"`
+		Name            string  `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt    string  `json:"custom_prompt"`
+		LLMConfigID     *string `json:"llm_config_id"`
+		TTSConfigID     *string `json:"tts_config_id"`
+		Voice           *string `json:"voice"`
+		ASRSpeed        string  `json:"asr_speed"`
+		MemoryMode      string  `json:"memory_mode"`
+		MCPServiceNames string  `json:"mcp_service_names"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -265,17 +266,23 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		req.ASRSpeed = "normal"
 	}
 	req.MemoryMode = normalizeMemoryMode(req.MemoryMode)
+	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	agent := models.Agent{
-		UserID:       userID.(uint),
-		Name:         req.Name,
-		CustomPrompt: req.CustomPrompt,
-		LLMConfigID:  req.LLMConfigID,
-		TTSConfigID:  req.TTSConfigID,
-		Voice:        req.Voice,
-		ASRSpeed:     req.ASRSpeed,
-		MemoryMode:   req.MemoryMode,
-		Status:       "active",
+		UserID:          userID.(uint),
+		Name:            req.Name,
+		CustomPrompt:    req.CustomPrompt,
+		LLMConfigID:     req.LLMConfigID,
+		TTSConfigID:     req.TTSConfigID,
+		Voice:           req.Voice,
+		ASRSpeed:        req.ASRSpeed,
+		MemoryMode:      req.MemoryMode,
+		MCPServiceNames: normalizedMCPServiceNames,
+		Status:          "active",
 	}
 
 	if err := uc.DB.Create(&agent).Error; err != nil {
@@ -335,13 +342,14 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt string  `json:"custom_prompt"`
-		LLMConfigID  *string `json:"llm_config_id"`
-		TTSConfigID  *string `json:"tts_config_id"`
-		Voice        *string `json:"voice"`
-		ASRSpeed     string  `json:"asr_speed"`
-		MemoryMode   *string `json:"memory_mode"`
+		Name            string  `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt    string  `json:"custom_prompt"`
+		LLMConfigID     *string `json:"llm_config_id"`
+		TTSConfigID     *string `json:"tts_config_id"`
+		Voice           *string `json:"voice"`
+		ASRSpeed        string  `json:"asr_speed"`
+		MemoryMode      *string `json:"memory_mode"`
+		MCPServiceNames string  `json:"mcp_service_names"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -366,6 +374,12 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	} else if strings.TrimSpace(agent.MemoryMode) == "" {
 		agent.MemoryMode = "short"
 	}
+	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := uc.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})
@@ -632,6 +646,30 @@ func (uc *UserController) CallAgentMcpTool(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+func (uc *UserController) GetAgentMCPServiceOptions(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	id := c.Param("id")
+
+	var agent models.Agent
+	if err := uc.DB.Where("id = ? AND user_id = ?", id, userID).First(&agent).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "智能体不存在"})
+		return
+	}
+
+	options, err := listEnabledGlobalMCPServiceNames(uc.DB)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取MCP服务选项失败: %v", err)})
+		return
+	}
+
+	normalized := normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"options":           options,
+		"selected":          splitMCPServiceNames(normalized),
+		"mcp_service_names": normalized,
+	}})
 }
 
 // CallDeviceMcpTool 调用设备维度MCP工具（用户版本）

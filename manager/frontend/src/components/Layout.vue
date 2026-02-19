@@ -48,8 +48,11 @@
           <el-menu-item index="/admin/mqtt-config">MQTT配置</el-menu-item>
           <el-menu-item index="/admin/mqtt-server-config">MQTT Server配置</el-menu-item>
           <el-menu-item index="/admin/udp-config">UDP配置</el-menu-item>
-          <el-menu-item index="/admin/mcp-config">MCP配置</el-menu-item>
-          <el-menu-item index="/admin/mcp-market">MCP市场</el-menu-item>
+          <el-sub-menu index="/admin/mcp-config-group">
+            <template #title>MCP配置</template>
+            <el-menu-item index="/admin/mcp-config">配置</el-menu-item>
+            <el-menu-item index="/admin/mcp-market">MCP市场</el-menu-item>
+          </el-sub-menu>
           <el-menu-item index="/admin/speaker-config">声纹识别配置</el-menu-item>
           <el-menu-item index="/admin/chat-settings">聊天设置</el-menu-item>
         </el-sub-menu>
