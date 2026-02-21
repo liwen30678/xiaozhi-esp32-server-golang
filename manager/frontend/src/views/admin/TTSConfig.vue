@@ -118,6 +118,7 @@ import { Plus } from '@element-plus/icons-vue'
 import api from '../../utils/api'
 import { testSingleConfig, testWithData, parseJsonData } from '../../utils/configTest'
 import TTSConfigForm from './forms/TTSConfigForm.vue'
+import { TTS_PROVIDERS_WITH_VOICES } from './forms/ttsProviderOptions'
 
 const configs = ref([])
 const testingId = ref(null)
@@ -684,8 +685,7 @@ const loadVoiceOptions = async (provider) => {
   }
   
   // 只有这些 provider 需要从后端获取音色列表
-  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai']
-  if (!providersWithVoices.includes(provider)) {
+  if (!TTS_PROVIDERS_WITH_VOICES.includes(provider)) {
     voiceOptions.value = []
     return
   }

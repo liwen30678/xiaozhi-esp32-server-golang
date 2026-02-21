@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	log "xiaozhi-esp32-server-golang/logger"
@@ -55,14 +56,18 @@ func CheckMCPConfig() {
 			problemCount++
 		}
 
-		// 检查SSE URL
-		if config.SSEUrl == "" {
+		transportType, endpoint, err := endpointForConfig(config)
+		if err != nil {
 			status = "❌"
-			issues = append(issues, "SSE URL为空")
+			issues = append(issues, err.Error())
 			problemCount++
 		} else {
-			// 检查URL格式
-			if !strings.HasPrefix(config.SSEUrl, "http://") && !strings.HasPrefix(config.SSEUrl, "https://") {
+			if _, parseErr := url.ParseRequestURI(endpoint); parseErr != nil {
+				status = "❌"
+				issues = append(issues, "URL格式不正确")
+				problemCount++
+			}
+			if transportType == "sse" && !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 				status = "⚠️"
 				issues = append(issues, "SSE URL格式可能不正确")
 			}
@@ -80,7 +85,7 @@ func CheckMCPConfig() {
 		}
 
 		log.Infof("  [%d] %s %s (URL: %s, 启用: %v)%s",
-			i+1, status, config.Name, config.SSEUrl, config.Enabled, issueStr)
+			i+1, status, config.Name, endpointForLog(config), config.Enabled, issueStr)
 	}
 
 	// 总结
@@ -91,4 +96,15 @@ func CheckMCPConfig() {
 	}
 
 	log.Info("=== MCP配置检查完成 ===")
+}
+
+func endpointForLog(config MCPServerConfig) string {
+	_, endpoint, err := endpointForConfig(config)
+	if err != nil {
+		if strings.TrimSpace(config.Url) != "" {
+			return config.Url
+		}
+		return config.SSEUrl
+	}
+	return endpoint
 }

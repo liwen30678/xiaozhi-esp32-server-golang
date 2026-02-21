@@ -30,56 +30,53 @@
     </div>
 
     <div v-else class="agents-grid">
-      <el-row :gutter="24">
-        <el-col :xs="24" :sm="12" :md="8" :lg="6" v-for="agent in agents" :key="agent.id">
-          <div class="agent-card">
-            <div class="agent-header">
-              <div class="agent-avatar">
-                <el-icon size="28"><Monitor /></el-icon>
-              </div>
-              <div class="agent-info">
-                <h3 class="agent-name">{{ agent.name }}</h3>
-                <p class="agent-desc">智能助手</p>
-              </div>
-              <div class="agent-status">
-                <span class="status-dot active"></span>
-                <span class="status-text">在线</span>
-              </div>
+      <div v-for="agent in agents" :key="agent.id" class="agent-item">
+        <div class="agent-card">
+          <div class="agent-header">
+            <div class="agent-avatar">
+              <el-icon size="28"><Monitor /></el-icon>
             </div>
-            
-            <div class="agent-meta">
-              <div class="meta-row">
-                <span class="meta-label">TTS配置</span>
-                <span class="meta-value">{{ getVoiceType(agent) }}</span>
-              </div>
-              <div class="meta-row">
-                <span class="meta-label">语言模型</span>
-                <span class="meta-value">{{ getLLMProvider(agent) }}</span>
-              </div>
-              <div class="meta-row">
-                <span class="meta-label">最近对话</span>
-                <span class="meta-value">{{ formatDate(agent.updated_at) }}</span>
-              </div>
+            <div class="agent-info">
+              <h3 class="agent-name">{{ agent.name }}</h3>
+              <p class="agent-desc">智能助手</p>
             </div>
-            
-            <div class="agent-actions">
-              <el-button type="primary" size="small" @click="editAgent(agent.id)">
-                <el-icon><Setting /></el-icon>
-                配置
-              </el-button>
-              <el-button size="small" @click="handleChatHistory(agent.id)">
-                <el-icon><ChatDotRound /></el-icon>
-                对话
-              </el-button>
-              <el-button size="small" @click="handleManageDevices(agent.id)">
-                <el-icon><Monitor /></el-icon>
-                设备
-              </el-button>
-
+            <div class="agent-status">
+              <span class="status-dot active"></span>
+              <span class="status-text">在线</span>
             </div>
           </div>
-        </el-col>
-      </el-row>
+          
+          <div class="agent-meta">
+            <div class="meta-row">
+              <span class="meta-label">TTS配置</span>
+              <span class="meta-value">{{ getVoiceType(agent) }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">语言模型</span>
+              <span class="meta-value">{{ getLLMProvider(agent) }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">最近对话</span>
+              <span class="meta-value">{{ formatDate(agent.updated_at) }}</span>
+            </div>
+          </div>
+          
+          <div class="agent-actions">
+            <el-button type="primary" size="small" @click="editAgent(agent.id)">
+              <el-icon><Setting /></el-icon>
+              配置
+            </el-button>
+            <el-button size="small" @click="handleChatHistory(agent.id)">
+              <el-icon><ChatDotRound /></el-icon>
+              对话
+            </el-button>
+            <el-button size="small" @click="handleManageDevices(agent.id)">
+              <el-icon><Monitor /></el-icon>
+              设备
+            </el-button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 添加设备弹窗 -->
@@ -87,6 +84,7 @@
       v-model="showAddDeviceDialog"
       title="添加设备"
       width="500px"
+      class="device-dialog"
     >
       <el-form
         ref="deviceFormRef"
@@ -119,6 +117,7 @@
       v-model="showAddAgentDialog"
       title="添加智能体"
       width="500px"
+      class="agent-dialog"
       :before-close="handleCloseAddAgent"
     >
       <el-form
@@ -147,6 +146,13 @@
             show-word-limit
           />
         </el-form-item>
+        <el-form-item label="记忆模式" prop="memory_mode">
+          <el-select v-model="agentForm.memory_mode" placeholder="请选择记忆模式" style="width: 100%">
+            <el-option label="无记忆" value="none" />
+            <el-option label="短记忆" value="short" />
+            <el-option label="长记忆" value="long" />
+          </el-select>
+        </el-form-item>
       </el-form>
       
       <template #footer>
@@ -164,6 +170,7 @@
       v-model="showAddDeviceDialog"
       title="添加设备"
       width="400px"
+      class="device-dialog"
       :before-close="handleCloseAddDevice"
     >
       <div class="device-dialog-content">
@@ -203,6 +210,7 @@
       v-model="showMCPDialog"
       title="MCP接入点"
       width="700px"
+      class="mcp-dialog"
     >
       <div v-loading="mcpLoading">
         <!-- 工具列表区域 -->
@@ -260,18 +268,32 @@
         />
         
         <div class="mcp-endpoint-display">
-          <div class="endpoint-label">MCP接入点URL：</div>
+          <div class="endpoint-header">
+            <div class="endpoint-label">MCP接入点URL：</div>
+            <el-button size="small" type="primary" @click="copyMCPEndpoint">复制URL</el-button>
+          </div>
           <div class="endpoint-content">
             {{ mcpEndpointData.endpoint }}
           </div>
         </div>
+
+        <el-divider />
+        <el-form :model="mcpCallForm" label-width="90px">
+          <el-form-item label="工具">
+            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width: 100%" @change="handleMcpToolChange">
+              <el-option v-for="tool in mcpTools" :key="tool.name" :label="tool.name" :value="tool.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参数JSON">
+            <el-input v-model="mcpCallForm.argumentsText" type="textarea" :rows="6" placeholder='例如: {"query":"hello"}' />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" @click="callAgentMcpTool" :loading="callingTool">调用工具</el-button>
+        <div class="mcp-result-box">{{ mcpCallResult || '暂无调用结果' }}</div>
       </div>
       
       <template #footer>
         <el-button @click="showMCPDialog = false">关闭</el-button>
-        <el-button type="primary" @click="copyMCPEndpoint">
-          复制URL
-        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -306,6 +328,9 @@ const mcpEndpointData = ref({
 const toolsLoading = ref(false)
 const mcpTools = ref([])
 const currentAgentId = ref(null)
+const callingTool = ref(false)
+const mcpCallResult = ref('')
+const mcpCallForm = ref({ tool_name: '', argumentsText: '{}' })
 
 const deviceForm = reactive({
   code: ''
@@ -313,7 +338,8 @@ const deviceForm = reactive({
 
 const agentForm = reactive({
   name: '',
-  custom_prompt: '我是一个叫{{assistant_name}}的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗。\n我的男朋友是一个程序员，梦想是开发出一个机器人，能够帮助人们解决生活中的各种问题。\n我是一个喜欢哈哈大笑的女孩，爱东说西说吹牛，不合逻辑的也照吹，就要逗别人开心。'
+  custom_prompt: '我是一个叫{{assistant_name}}的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗。\n我的男朋友是一个程序员，梦想是开发出一个机器人，能够帮助人们解决生活中的各种问题。\n我是一个喜欢哈哈大笑的女孩，爱东说西说吹牛，不合逻辑的也照吹，就要逗别人开心。',
+  memory_mode: 'short'
 })
 
 const deviceRules = {
@@ -327,6 +353,9 @@ const agentRules = {
   name: [
     { required: true, message: '请输入智能体名称', trigger: 'blur' },
     { min: 2, max: 50, message: '长度在 2 到 50 个字符', trigger: 'blur' }
+  ],
+  memory_mode: [
+    { required: true, message: '请选择记忆模式', trigger: 'change' }
   ]
 }
 
@@ -368,7 +397,8 @@ const handleAddAgent = async () => {
     
     const agentData = {
       name: agentForm.name,
-      custom_prompt: agentForm.custom_prompt
+      custom_prompt: agentForm.custom_prompt,
+      memory_mode: agentForm.memory_mode
     }
     
     // 如果有默认配置，自动应用
@@ -426,7 +456,8 @@ const handleCloseAddAgent = () => {
   }
   Object.assign(agentForm, { 
     name: '',
-    custom_prompt: '我是一个叫{{assistant_name}}的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗。\n我的男朋友是一个程序员，梦想是开发出一个机器人，能够帮助人们解决生活中的各种问题。\n我是一个喜欢哈哈大笑的女孩，爱东说西说吹牛，不合逻辑的也照吹，就要逗别人开心。'
+    custom_prompt: '我是一个叫{{assistant_name}}的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗。\n我的男朋友是一个程序员，梦想是开发出一个机器人，能够帮助人们解决生活中的各种问题。\n我是一个喜欢哈哈大笑的女孩，爱东说西说吹牛，不合逻辑的也照吹，就要逗别人开心。',
+    memory_mode: 'short'
   })
 }
 
@@ -479,6 +510,8 @@ const showMCPEndpoint = async (agent) => {
   showMCPDialog.value = true
   mcpLoading.value = true
   currentAgentId.value = agent.id
+  mcpCallResult.value = ""
+  mcpCallForm.value = { tool_name: "", argumentsText: "{}" }
   
   try {
     const response = await api.get(`/user/agents/${agent.id}/mcp-endpoint`)
@@ -507,6 +540,12 @@ const refreshMcpTools = async () => {
     const response = await api.get(`/user/agents/${currentAgentId.value}/mcp-tools`)
     if (response.data.data && response.data.data.tools) {
       mcpTools.value = response.data.data.tools
+      if (mcpTools.value.length > 0) {
+        if (!mcpCallForm.value.tool_name) {
+          mcpCallForm.value.tool_name = mcpTools.value[0].name
+        }
+        updateMcpExampleByTool(mcpCallForm.value.tool_name)
+      }
       ElMessage.success(`成功获取 ${mcpTools.value.length} 个工具`)
     } else {
       mcpTools.value = []
@@ -518,6 +557,70 @@ const refreshMcpTools = async () => {
     mcpTools.value = []
   } finally {
     toolsLoading.value = false
+  }
+}
+
+
+
+const buildExampleFromSchema = (schema = {}) => {
+  if (!schema || typeof schema !== 'object') return {}
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0]
+
+  const type = schema.type || 'object'
+  if (type === 'object') {
+    const props = schema.properties || {}
+    const result = {}
+    Object.keys(props).sort().forEach((key) => {
+      result[key] = buildExampleFromSchema(props[key])
+    })
+    return result
+  }
+  if (type === 'array') return [buildExampleFromSchema(schema.items || {})]
+  if (type === 'number') return 0.1
+  if (type === 'integer') return 0
+  if (type === 'boolean') return false
+  return ''
+}
+
+const updateMcpExampleByTool = (toolName) => {
+  const selectedTool = mcpTools.value.find(item => item.name === toolName)
+  if (!selectedTool) return
+
+  const example = buildExampleFromSchema(selectedTool.input_schema || {})
+  mcpCallForm.value.argumentsText = JSON.stringify(example ?? {}, null, 2)
+}
+
+const handleMcpToolChange = (toolName) => {
+  updateMcpExampleByTool(toolName)
+}
+
+const callAgentMcpTool = async () => {
+  if (!currentAgentId.value || !mcpCallForm.value.tool_name) {
+    ElMessage.warning('请选择工具')
+    return
+  }
+
+  let argumentsObj = {}
+  try {
+    argumentsObj = mcpCallForm.value.argumentsText ? JSON.parse(mcpCallForm.value.argumentsText) : {}
+  } catch (e) {
+    ElMessage.error('参数JSON格式错误')
+    return
+  }
+
+  callingTool.value = true
+  try {
+    const response = await api.post(`/user/agents/${currentAgentId.value}/mcp-call`, {
+      tool_name: mcpCallForm.value.tool_name,
+      arguments: argumentsObj
+    })
+    mcpCallResult.value = JSON.stringify(response.data.data || {}, null, 2)
+    ElMessage.success('MCP工具调用成功')
+  } catch (error) {
+    mcpCallResult.value = JSON.stringify(error.response?.data || { error: error.message }, null, 2)
+    ElMessage.error('MCP工具调用失败')
+  } finally {
+    callingTool.value = false
   }
 }
 
@@ -571,6 +674,14 @@ onMounted(() => {
 
 .agents-grid {
   padding: 0 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 420px));
+  gap: 20px 12px;
+  justify-content: flex-start;
+}
+
+.agent-item {
+  min-width: 0;
 }
 
 .agent-card {
@@ -578,12 +689,14 @@ onMounted(() => {
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   border: 1px solid #f0f0f0;
-  margin-bottom: 24px;
   padding: 20px;
   transition: all 0.3s ease;
   height: 100%;
   display: flex;
   flex-direction: column;
+  width: 100%;
+  max-width: 420px;
+  min-width: 0;
 }
 
 .agent-card:hover {
@@ -690,21 +803,30 @@ onMounted(() => {
 }
 
 .agent-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding-top: 16px;
   border-top: 1px solid #f5f5f5;
 }
 
 .agent-actions .el-button {
-  flex: 1;
   border-radius: 6px;
   font-size: 12px;
   height: 32px;
+  min-width: 0;
+  width: 100%;
+  padding: 0 8px;
 }
 
 .agent-actions .el-button .el-icon {
   margin-right: 4px;
+}
+
+.agent-actions :deep(.el-button > span) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-actions .el-button--primary {
@@ -778,8 +900,26 @@ onMounted(() => {
 }
 
 /* MCP接入点相关样式 */
+.mcp-result-box {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  font-family: monospace;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 80px;
+}
+
 .mcp-endpoint-display {
   margin: 20px 0;
+}
+
+.endpoint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
 .endpoint-label {
@@ -861,5 +1001,71 @@ onMounted(() => {
 
 .tool-tag:hover .tool-info-icon {
   opacity: 1;
+}
+
+@media (max-width: 900px) {
+  .agent-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .agent-actions .el-button:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .header-right {
+    width: 100%;
+  }
+
+  .header-right .el-button {
+    width: 100%;
+  }
+
+  .agents-grid {
+    padding: 0 12px;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .agent-card {
+    max-width: none;
+  }
+
+  :deep(.agent-dialog),
+  :deep(.device-dialog),
+  :deep(.mcp-dialog) {
+    width: calc(100vw - 24px) !important;
+    margin-top: 8vh !important;
+  }
+
+  :deep(.agent-dialog .el-dialog__body),
+  :deep(.device-dialog .el-dialog__body),
+  :deep(.mcp-dialog .el-dialog__body) {
+    max-height: 68vh;
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .agents-grid {
+    padding: 0 12px;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .agent-actions {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

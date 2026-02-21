@@ -44,12 +44,12 @@
             :max="1" 
             :step="0.1" 
             :precision="2"
-            placeholder="0.6"
+            placeholder="0.4"
             style="width: 100%"
           />
           <div class="form-tip">
             <el-icon><InfoFilled /></el-icon>
-            声纹识别阈值，范围 0.0-1.0，默认 0.6。值越大识别越严格
+            声纹识别阈值，范围 0.0-1.0，默认 0.4。值越大识别越严格
           </div>
         </el-form-item>
         
@@ -80,7 +80,7 @@ const currentConfig = ref(null)
 
 const form = reactive({
   base_url: 'http://192.168.208.214:8080',
-  threshold: 0.6,
+  threshold: 0.4,
   enabled: true
 })
 
@@ -131,7 +131,7 @@ const loadConfig = async () => {
         form.threshold = configObj.threshold
       } else {
         // 默认值
-        form.threshold = 0.6
+        form.threshold = 0.4
       }
       // 开关对应 json_data.enable（业务启用），不使用接口返回的 enabled 列
       form.enabled = configObj.enable !== undefined ? configObj.enable : true

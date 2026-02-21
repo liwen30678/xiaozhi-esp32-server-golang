@@ -255,22 +255,25 @@ func (app *App) ReloadMqttUdpWithFlags(doMqttReload, doUdpReload bool) {
 }
 
 // ReloadMCP 热更 MCP：禁用时仅停止全局 MCP；启用时已启动则重启全局 MCP，未启动则启动 MCP 集群
-func (app *App) ReloadMCP() {
+func (app *App) ReloadMCP() error {
 	if !viper.GetBool("mcp.global.enabled") {
 		// 禁用：只停不启，避免依赖 Start() 内判断或合并时序
-		mcp.GetGlobalMCPManager().Stop()
-		return
+		if err := mcp.GetGlobalMCPManager().Stop(); err != nil {
+			return err
+		}
+		return nil
 	}
 	mgr := mcp.GetMCPManager()
 	if mgr.IsStarted() {
 		if err := mgr.RestartManager("global"); err != nil {
-			log.Errorf("ReloadMCP RestartManager(global): %v", err)
+			return err
 		}
-		return
+		return nil
 	}
 	if err := mcp.StartMCPManagers(); err != nil {
-		log.Errorf("ReloadMCP StartMCPManagers: %v", err)
+		return err
 	}
+	return nil
 }
 
 // 所有协议新连接都走这里
@@ -395,12 +398,14 @@ func (s *App) DeviceOffline(deviceID string) {
 
 func (a *App) registerHandler() {
 	providerType := viper.GetString("config_provider.type")
+	log.Infof("registerHandler: config_provider.type=%s", providerType)
 	provider, err := user_config.GetProvider(providerType)
 	if err != nil {
 		log.Errorf("GetProvider err: %+v", err)
 		return
 	}
 	provider.RegisterMessageEventHandler(context.Background(), config_types.EventHandleMessageInject, a.HandleInjectMsg)
+	log.Infof("registerHandler: registered paths=[%s]", config_types.EventHandleMessageInject)
 }
 
 // 向客户端注入消息

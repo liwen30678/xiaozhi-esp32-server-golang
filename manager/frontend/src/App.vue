@@ -44,7 +44,12 @@ export default {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   color: #2c3e50;
-  height: 100vh;
+  height: 100dvh;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 * {
@@ -53,9 +58,6 @@ export default {
   box-sizing: border-box;
 }
 
-body {
-  height: 100vh;
-}
 
 /* 移动端样式优化 */
 @media (max-width: 767px) {

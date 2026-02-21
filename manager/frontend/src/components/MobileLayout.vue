@@ -6,7 +6,7 @@
       class="mobile-nav-bar"
     >
       <template #right>
-        <van-icon name="user-o" @click="handleUserClick" />
+        <van-icon name="user-o" class="user-entry-icon" @click="handleUserClick" />
       </template>
     </MobileNavBar>
     
@@ -125,21 +125,23 @@ watch(
 
 <style scoped>
 .mobile-layout {
-  min-height: 100vh;
+  height: 100dvh;
   background-color: #f7f8fa;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .mobile-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding-bottom: 0;
   -webkit-overflow-scrolling: touch;
 }
 
 .mobile-content.with-tabbar {
-  padding-bottom: 50px; /* 为底部标签栏留出空间 */
+  padding-bottom: calc(50px + env(safe-area-inset-bottom)); /* 为底部标签栏留出空间 */
 }
 
 /* 页面切换动画 */
@@ -151,6 +153,15 @@ watch(
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+
+.user-entry-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
 }
 
 /* 用户菜单样式 */

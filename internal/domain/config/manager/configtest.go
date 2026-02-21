@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -26,8 +27,34 @@ const DefaultTestWavPath = "internal/testdata/config_test.wav"
 // DefaultTestText LLM/TTS 固定测试文本
 const DefaultTestText = "配置测试"
 
-// 用于 VAD/ASR 的备用 PCM：1 秒静音 16kHz 单声道，无文件时使用
-var fallbackPCM = make([]float32, 16000)
+// 用于 VAD/ASR 的备用 PCM：约 1 秒模拟语音 16kHz 单声道，无文件时使用
+// 使用合成噪声模拟真实语音，以便 ASR 服务端能正常处理（特别是 Manual 模式需要 commit）
+var fallbackPCM = func() []float32 {
+	pcm := make([]float32, 16000)
+	// 生成模拟语音信号：使用多个正弦波叠加 + 噪声
+	// 模拟中文"配置测试"的基本频率范围
+	// 增加幅度以使服务端能识别为有效音频（Manual 模式要求更高）
+	for i := range pcm {
+		t := float64(i) / 16000.0
+		// 基频 + 谐波模拟语音，大幅增加幅度
+		sample := float32(0.5 * math.Sin(2*math.Pi*t*400))   // 基频 400Hz，幅度 0.5
+		sample += float32(0.25 * math.Sin(2*math.Pi*t*800))  // 谐波，幅度 0.25
+		sample += float32(0.15 * math.Sin(2*math.Pi*t*1200)) // 谐波，幅度 0.15
+		sample += float32(0.1 * math.Sin(2*math.Pi*t*2000))  // 谐波，幅度 0.1
+		// 添加噪声，大幅增加噪声水平
+		sample += (float32(i%100)-50) / 2000 // 噪声幅度增加到 0.05
+		// 应用包络（淡入淡出）
+		env := float32(1.0)
+		if i < 1000 {
+			env = float32(i) / 1000
+		} else if i > 15000 {
+			env = float32(16000-i) / 1000
+		}
+		pcm[i] = sample * env
+	}
+	log.Debugf("[config_test] fallbackPCM 生成: len=%d", len(pcm))
+	return pcm
+}()
 
 // loadTestWav 加载固定 WAV 为 float32 PCM，若文件不存在则返回 nil 与 nil error（调用方用 fallbackPCM）
 func loadTestWav(path string) ([]float32, error) {
@@ -94,8 +121,10 @@ func RunConfigTest(data map[string]interface{}, testText string) (vadResult, asr
 
 	pcm, _ := loadTestWav(DefaultTestWavPath)
 	if pcm == nil || len(pcm) == 0 {
+		log.Debugf("[config_test] WAV 文件加载失败或为空，使用 fallbackPCM")
 		pcm = fallbackPCM
 	}
+	log.Debugf("[config_test] 使用 PCM 数据: len=%d", len(pcm))
 
 	// VAD：统计处理耗时（从调用 IsVAD 到返回）
 	if v, ok := data["vad"].(map[string]interface{}); ok {
@@ -135,6 +164,7 @@ func RunConfigTest(data map[string]interface{}, testText string) (vadResult, asr
 			cfg, ok := val.(map[string]interface{})
 			if !ok {
 				asrResult[configID] = map[string]interface{}{"ok": false, "message": "配置格式无效"}
+				log.Debugf("[config_test] ASR config_id=%s 配置格式无效", configID)
 				continue
 			}
 			// 资源池 creator 需要引擎类型（funasr/doubao），用 config_id 会报「不支持的ASR引擎类型」

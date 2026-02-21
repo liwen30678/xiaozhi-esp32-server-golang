@@ -7,8 +7,10 @@ const (
 )
 
 const (
-	AsrTypeFunAsr = "funasr"
-	AsrTypeDoubao = "doubao"
+	AsrTypeFunAsr      = "funasr"
+	AsrTypeDoubao      = "doubao"
+	AsrTypeAliyunFunASR = "aliyun_funasr"
+	AsrTypeAliyunQwen3 = "aliyun_qwen3"
 )
 
 const (

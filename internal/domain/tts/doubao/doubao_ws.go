@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,6 +143,10 @@ func (p *DoubaoWSProvider) TextToSpeech(ctx context.Context, text string, sample
 
 // TextToSpeech 将文本转换为语音，返回音频帧数据和错误
 func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) (outputOpusChan chan []byte, err error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+
 	var operation string
 	if p.UseStream {
 		operation = optSubmit // 流式合成
@@ -220,7 +225,6 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 		defer wg.Done()
 		defer p.sendMutex.Unlock()
 		defer func() {
-			pipeReader.Close()
 			pipeWriter.Close()
 		}()
 		// 流式合成
@@ -237,7 +241,9 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 
 			resp, err := parseResponse(message)
 			if err != nil {
-				log.Errorf("解析响应失败: %v", err)
+				// 解析失败时必须清连接，避免当前连接残留响应污染下一次TTS请求
+				log.Errorf("解析响应失败: %v，清空连接", err)
+				p.clearConnection()
 				return
 			}
 
@@ -257,7 +263,11 @@ func (p *DoubaoWSProvider) TextToSpeechStream(ctx context.Context, text string, 
 				chunkCount++
 				// 存储用于最终返回
 				//allAudio = append(allAudio, resp.Audio...)
-				pipeWriter.Write(resp.Audio)
+				if _, err := pipeWriter.Write(resp.Audio); err != nil {
+					log.Errorf("写入音频管道失败: %v，清空连接", err)
+					p.clearConnection()
+					return
+				}
 			}
 
 			if resp.IsLast {

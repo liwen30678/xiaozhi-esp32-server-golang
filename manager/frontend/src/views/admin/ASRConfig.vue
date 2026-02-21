@@ -124,6 +124,22 @@ const showDialog = ref(false)
 const editingConfig = ref(null)
 const formRef = ref()
 
+const validateAliyunPcm = (rule, value, callback) => {
+  if (value !== 'pcm') {
+    callback(new Error('格式必须为pcm'))
+    return
+  }
+  callback()
+}
+
+const validateAliyun16000 = (rule, value, callback) => {
+  if (Number(value) !== 16000) {
+    callback(new Error('采样率必须为16000'))
+    return
+  }
+  callback()
+}
+
 const form = reactive({
   name: '',
   config_id: '',
@@ -141,6 +157,16 @@ const form = reactive({
     timeout: 30,
     auto_end: false
   },
+  aliyun_funasr: {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/',
+    model: 'fun-asr-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    vocabulary_id: '',
+    disfluency_removal_enabled: false,
+    timeout: 30
+  },
   doubao: {
     appid: '',
     access_token: '',
@@ -151,6 +177,18 @@ const form = reactive({
     enable_itn: true,
     enable_ddc: false,
     chunk_duration: 200,
+    timeout: 30
+  },
+  aliyun_qwen3: {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+    model: 'qwen3-asr-flash-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    language: 'zh',
+    auto_end: true,
+    vad_threshold: 0.0,
+    vad_silence_ms: 400,
     timeout: 30
   }
 })
@@ -175,6 +213,22 @@ const rules = computed(() => {
       'funasr.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
     }
   }
+  if (form.provider === 'aliyun_funasr') {
+    return {
+      ...base,
+      'aliyun_funasr.ws_url': [{ required: true, message: '请输入WS URL', trigger: 'blur' }],
+      'aliyun_funasr.model': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+      'aliyun_funasr.format': [
+        { required: true, message: '请选择音频格式', trigger: 'change' },
+        { validator: validateAliyunPcm, trigger: 'change' }
+      ],
+      'aliyun_funasr.sample_rate': [
+        { required: true, message: '请选择采样率', trigger: 'change' },
+        { validator: validateAliyun16000, trigger: 'change' }
+      ],
+      'aliyun_funasr.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
+    }
+  }
   if (form.provider === 'doubao') {
     return {
       ...base,
@@ -184,6 +238,17 @@ const rules = computed(() => {
       'doubao.model_name': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
       'doubao.end_window_size': [{ required: true, message: '请输入结束窗口大小', trigger: 'blur' }],
       'doubao.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
+    }
+  }
+  if (form.provider === 'aliyun_qwen3') {
+    return {
+      ...base,
+      'aliyun_qwen3.ws_url': [{ required: true, message: '请输入WS URL', trigger: 'blur' }],
+      'aliyun_qwen3.model': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+      'aliyun_qwen3.format': [{ required: true, message: '请选择音频格式', trigger: 'change' }],
+      'aliyun_qwen3.sample_rate': [{ required: true, message: '请选择采样率', trigger: 'change' }],
+      'aliyun_qwen3.language': [{ required: true, message: '请输入语言', trigger: 'blur' }],
+      'aliyun_qwen3.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
     }
   }
   return base
@@ -224,6 +289,9 @@ const editConfig = (config) => {
         funasrConfig.chunk_size = [5, 10, 5]
       }
       form.funasr = funasrConfig
+    } else if (configObj.aliyun_funasr) {
+      // 旧格式：包含provider层
+      form.aliyun_funasr = { ...form.aliyun_funasr, ...configObj.aliyun_funasr }
     } else if (configObj.doubao) {
       // 旧格式：包含provider层
       form.doubao = { ...form.doubao, ...configObj.doubao }
@@ -237,9 +305,18 @@ const editConfig = (config) => {
         funasrConfig.chunk_size = [5, 10, 5]
       }
       form.funasr = funasrConfig
+    } else if (config.provider === 'aliyun_funasr' && (configObj.ws_url || configObj.model || configObj.api_key)) {
+      // 新格式：直接包含配置内容
+      form.aliyun_funasr = { ...form.aliyun_funasr, ...configObj }
     } else if (config.provider === 'doubao' && (configObj.appid || configObj.access_token)) {
       // 新格式：直接包含配置内容
       form.doubao = { ...form.doubao, ...configObj }
+    } else if (configObj.aliyun_qwen3) {
+      // 旧格式：包含provider层
+      form.aliyun_qwen3 = { ...form.aliyun_qwen3, ...configObj.aliyun_qwen3 }
+    } else if (config.provider === 'aliyun_qwen3' && (configObj.ws_url || configObj.model || configObj.api_key)) {
+      // 新格式：直接包含配置内容
+      form.aliyun_qwen3 = { ...form.aliyun_qwen3, ...configObj }
     }
   } catch (error) {
     console.error('解析配置JSON失败:', error)
@@ -460,6 +537,16 @@ const resetForm = () => {
     timeout: 30,
     auto_end: false
   }
+  form.aliyun_funasr = {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/',
+    model: 'fun-asr-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    vocabulary_id: '',
+    disfluency_removal_enabled: false,
+    timeout: 30
+  }
   form.doubao = {
     appid: '',
     access_token: '',
@@ -470,6 +557,18 @@ const resetForm = () => {
     enable_itn: true,
     enable_ddc: false,
     chunk_duration: 200,
+    timeout: 30
+  }
+  form.aliyun_qwen3 = {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+    model: 'qwen3-asr-flash-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    language: 'zh',
+    auto_end: true,
+    vad_threshold: 0.0,
+    vad_silence_ms: 400,
     timeout: 30
   }
 }

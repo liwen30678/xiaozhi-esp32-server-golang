@@ -18,7 +18,7 @@
       <el-table-column prop="config_id" label="配置ID" width="150" />
       <el-table-column prop="provider" label="提供商" width="120">
         <template #default="scope">
-          <el-tag :type="scope.row.provider === 'memobase' ? 'primary' : 'success'">
+          <el-tag :type="getProviderTagType(scope.row.provider)">
             {{ scope.row.provider }}
           </el-tag>
         </template>
@@ -36,7 +36,6 @@
           <el-switch 
             v-model="scope.row.is_default" 
             @change="toggleDefault(scope.row)"
-            :disabled="scope.row.is_default && getEnabledConfigs.length === 1"
           />
         </template>
       </el-table-column>
@@ -91,6 +90,7 @@
           <el-select v-model="form.provider" placeholder="请选择提供商" style="width: 100%" @change="handleProviderChange">
             <el-option label="Memobase" value="memobase" />
             <el-option label="Mem0" value="mem0" />
+            <el-option label="MemOS" value="memos" />
           </el-select>
         </el-form-item>
         
@@ -126,17 +126,17 @@
         </template>
         
         <!-- Mem0配置字段 -->
-        <template v-if="form.provider === 'mem0'">
+        <template v-if="form.provider === 'mem0' || form.provider === 'memos'">
           <el-form-item label="API密钥" prop="api_key">
-            <el-input v-model="form.api_key" type="password" placeholder="请输入Mem0 API密钥" show-password />
+            <el-input v-model="form.api_key" type="password" :placeholder="form.provider === 'memos' ? '请输入MemOS兼容API密钥' : '请输入Mem0 API密钥'" show-password />
           </el-form-item>
           
           <el-form-item label="基础URL" prop="base_url">
-            <el-input v-model="form.base_url" placeholder="请输入Mem0基础URL" />
+            <el-input v-model="form.base_url" :placeholder="form.provider === 'memos' ? '请输入MemOS服务基础URL' : '请输入Mem0基础URL'" />
           </el-form-item>
-          
 
           
+
           <el-form-item label="启用搜索" prop="enable_search">
             <el-switch v-model="form.enable_search" />
           </el-form-item>
@@ -189,13 +189,22 @@ const form = reactive({
   base_url: '',
   enable_search: true,
   search_threshold: 0.5,
-  search_top_k: 3
+  search_top_k: 3,
+  timeout_ms: 10000
 })
 
 // 默认URL配置
 const defaultUrls = {
   memobase: 'https://api.memobase.dev',
-  mem0: 'https://api.mem0.ai'
+  mem0: 'https://api.mem0.ai',
+  memos: 'https://memos.memtensor.cn/api/openmem/v1'
+}
+
+
+const getProviderTagType = (provider) => {
+  if (provider === 'memobase') return 'primary'
+  if (provider === 'memos') return 'warning'
+  return 'success'
 }
 
 const handleProviderChange = (value) => {
@@ -205,6 +214,7 @@ const handleProviderChange = (value) => {
   form.enable_search = true
   form.search_threshold = 0.5
   form.search_top_k = 3
+  form.timeout_ms = 10000
 }
 
 // 生成配置JSON字符串
@@ -216,7 +226,11 @@ const generateConfig = () => {
     search_threshold: form.search_threshold,
     search_top_k: form.search_top_k
   }
-  
+
+  if (form.provider === 'memos') {
+    config.timeout_ms = form.timeout_ms
+  }
+
   return JSON.stringify(config)
 }
 
@@ -229,6 +243,7 @@ const parseConfig = (jsonData) => {
     form.enable_search = config.enable_search !== undefined ? config.enable_search : true
     form.search_threshold = config.search_threshold !== undefined ? config.search_threshold : 0.5
     form.search_top_k = config.search_top_k !== undefined ? config.search_top_k : 3
+    form.timeout_ms = config.timeout_ms !== undefined ? config.timeout_ms : 10000
   } catch (error) {
     console.error('解析配置失败:', error)
   }
@@ -251,10 +266,6 @@ const rules = {
     { required: true, message: '请输入基础URL', trigger: 'blur' }
   ]
 }
-
-const getEnabledConfigs = computed(() => {
-  return safeConfigs.value.filter(config => config.enabled)
-})
 
 const formatDate = (dateString) => {
   return new Date(dateString).toLocaleString('zh-CN')
@@ -380,7 +391,16 @@ const toggleDefault = async (config) => {
       ElMessage.success('已设为默认配置')
       await loadConfigs()
     } else {
-      config.is_default = true
+      await api.put(`/admin/memory-configs/${config.id}`, {
+        name: config.name,
+        config_id: config.config_id,
+        provider: config.provider,
+        enabled: config.enabled,
+        is_default: false,
+        json_data: config.json_data || ''
+      })
+      ElMessage.success('已取消默认配置（不启用长记忆）')
+      await loadConfigs()
     }
   } catch (error) {
     config.is_default = !config.is_default
@@ -400,7 +420,8 @@ const handleAddConfig = () => {
     base_url: defaultUrls['memobase'], // 设置默认URL
     enable_search: true,
     search_threshold: 0.5,
-    search_top_k: 3
+    search_top_k: 3,
+    timeout_ms: 10000,
   })
   
   editingConfig.value = null
@@ -422,7 +443,8 @@ const handleDialogClose = () => {
     base_url: '',
     enable_search: true,
     search_threshold: 0.5,
-    search_top_k: 3
+    search_top_k: 3,
+    timeout_ms: 10000,
   })
   
   if (formRef.value) {

@@ -194,6 +194,9 @@ func (h *SessionEndHandler) Process(ctx context.Context, data interface{}) error
 	if clientState.MemoryProvider == nil {
 		return nil
 	}
+	if clientState.GetMemoryMode() != MemoryModeLong {
+		return nil
+	}
 
 	log.Debugf("HandleSessionEnd: deviceId: %s", clientState.DeviceID)
 

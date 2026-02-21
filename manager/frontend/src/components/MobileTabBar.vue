@@ -27,7 +27,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 
-const activeTab = ref(0)
+const activeTab = ref('')
 
 // 根据用户角色定义标签栏
 const tabs = computed(() => {
@@ -43,7 +43,7 @@ const tabs = computed(() => {
     return [
       { name: 'console', label: '首页', icon: 'home-o', path: '/console' },
       { name: 'agents', label: '智能体', icon: 'apps-o', path: '/agents' },
-      { name: 'mine', label: '我的', icon: 'user-o', path: '/user/speakers' }
+      { name: 'speakers', label: '声纹', icon: 'user-o', path: '/user/speakers' }
     ]
   }
 })
@@ -51,7 +51,7 @@ const tabs = computed(() => {
 // 根据当前路由设置活动标签
 const updateActiveTab = () => {
   const currentPath = route.path
-  const tabIndex = tabs.value.findIndex(tab => {
+  const currentTab = tabs.value.find(tab => {
     if (tab.path === currentPath) {
       return true
     }
@@ -62,14 +62,14 @@ const updateActiveTab = () => {
     return false
   })
   
-  if (tabIndex >= 0) {
-    activeTab.value = tabIndex
+  if (currentTab) {
+    activeTab.value = currentTab.name
   }
 }
 
 // 标签切换处理
-const handleTabChange = (index) => {
-  const tab = tabs.value[index]
+const handleTabChange = (name) => {
+  const tab = tabs.value.find(item => item.name === name)
   if (tab && tab.path !== route.path) {
     router.push(tab.path)
   }
@@ -93,6 +93,10 @@ onMounted(() => {
 .mobile-tabbar {
   border-top: 1px solid #ebedf0;
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.1);
+}
+
+:deep(.van-tabbar) {
+  z-index: 1200;
 }
 
 :deep(.van-tabbar-item--active) {

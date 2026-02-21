@@ -27,10 +27,24 @@
           <el-icon><Monitor /></el-icon>
           <span>智能体管理</span>
         </el-menu-item>
-        
+
+        <el-menu-item v-if="!authStore.isAdmin" index="/user/roles">
+          <el-icon><User /></el-icon>
+          <span>我的角色</span>
+        </el-menu-item>
+
         <el-menu-item v-if="!authStore.isAdmin" index="/speakers">
           <el-icon><Microphone /></el-icon>
           <span>声纹管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="!authStore.isAdmin" index="/voice-clones">
+          <el-icon><Microphone /></el-icon>
+          <span>声音复刻</span>
+        </el-menu-item>
+
+        <el-menu-item v-if="!authStore.isAdmin" index="/user/knowledge-bases">
+          <el-icon><Document /></el-icon>
+          <span>我的知识库</span>
         </el-menu-item>
         
         <!-- 服务配置 -->
@@ -43,8 +57,13 @@
           <el-menu-item index="/admin/mqtt-config">MQTT配置</el-menu-item>
           <el-menu-item index="/admin/mqtt-server-config">MQTT Server配置</el-menu-item>
           <el-menu-item index="/admin/udp-config">UDP配置</el-menu-item>
-          <el-menu-item index="/admin/mcp-config">MCP配置</el-menu-item>
+          <el-sub-menu index="/admin/mcp-config-group">
+            <template #title>MCP配置</template>
+            <el-menu-item index="/admin/mcp-config">配置</el-menu-item>
+            <el-menu-item index="/admin/mcp-market">MCP市场</el-menu-item>
+          </el-sub-menu>
           <el-menu-item index="/admin/speaker-config">声纹识别配置</el-menu-item>
+          <el-menu-item index="/admin/chat-settings">聊天设置</el-menu-item>
         </el-sub-menu>
         
         <!-- AI配置 -->
@@ -59,6 +78,7 @@
           <el-menu-item index="/admin/tts-config">TTS配置</el-menu-item>
           <el-menu-item index="/admin/vision-config">Vision配置</el-menu-item>
           <el-menu-item index="/admin/memory-config">Memory配置</el-menu-item>
+          <el-menu-item index="/admin/knowledge-search-config">知识库检索配置</el-menu-item>
         </el-sub-menu>
         
         <!-- 系统监控 -->
@@ -167,7 +187,8 @@ import {
   Microphone,
   DataAnalysis,
   Guide,
-  Upload
+  Upload,
+  Document
 } from '@element-plus/icons-vue'
 
 const router = useRouter()

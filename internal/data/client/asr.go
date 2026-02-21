@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"strings"
 	"sync"
 	asr_types "xiaozhi-esp32-server-golang/internal/domain/asr/types"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -44,6 +45,7 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 
 	// 使用局部变量跟踪是否已发送首次字符事件
 	firstTextSent := false
+	lastAliyunText := ""
 
 	for {
 		select {
@@ -78,6 +80,19 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 
 				if a.AutoEnd || result.IsFinal {
 					return result.Text, true, nil
+				}
+			} else if a.AsrType == "aliyun_funasr" {
+				if result.Text != "" {
+					if lastAliyunText == "" || strings.HasPrefix(result.Text, lastAliyunText) || strings.HasPrefix(lastAliyunText, result.Text) {
+						a.AsrResult.Reset()
+						a.AsrResult.WriteString(result.Text)
+					} else {
+						a.AsrResult.WriteString(result.Text)
+					}
+					lastAliyunText = result.Text
+				}
+				if a.AutoEnd || result.IsFinal {
+					return a.AsrResult.String(), true, nil
 				}
 			} else {
 				// 其他情况按原有逻辑执行

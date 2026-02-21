@@ -37,9 +37,10 @@
           {{ formatDateTime(row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="280">
+      <el-table-column label="操作" width="360">
         <template #default="{ row }">
           <el-button size="small" @click="openEditDialog(row)">编辑</el-button>
+          <el-button size="small" type="success" @click="openQuotaDialog(row)" :disabled="row.role === 'admin'">复刻额度</el-button>
           <el-button size="small" type="warning" @click="openResetPasswordDialog(row)">
             重置密码
           </el-button>
@@ -148,6 +149,36 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 声音复刻额度对话框 -->
+    <el-dialog
+      v-model="quotaDialogVisible"
+      :title="`声音复刻额度 - ${quotaUser.username || ''}`"
+      width="900px"
+      @close="resetQuotaDialog"
+    >
+      <div class="quota-hint">按 TTS 配置分配复刻次数：-1 不限，0 禁止创建，正整数表示最大可复刻次数。</div>
+      <el-table :data="quotaRows" v-loading="quotaLoading" style="margin-top: 12px">
+        <el-table-column prop="tts_config_name" label="TTS配置名称" min-width="180" />
+        <el-table-column prop="tts_config_id" label="TTS Config ID" min-width="180" />
+        <el-table-column prop="provider" label="Provider" width="120" />
+        <el-table-column label="已使用" width="100">
+          <template #default="{ row }">{{ row.used_count }}</template>
+        </el-table-column>
+        <el-table-column label="剩余" width="100">
+          <template #default="{ row }">{{ row.remaining_count < 0 ? '不限' : row.remaining_count }}</template>
+        </el-table-column>
+        <el-table-column label="最大次数" width="180">
+          <template #default="{ row }">
+            <el-input-number v-model="row.max_count" :min="-1" :step="1" :precision="0" controls-position="right" style="width: 140px" />
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="quotaDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="quotaSaving" @click="saveQuotaSettings">保存额度</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -164,6 +195,11 @@ const userDialogVisible = ref(false)
 const resetPasswordDialogVisible = ref(false)
 const userSubmitLoading = ref(false)
 const resetPasswordLoading = ref(false)
+const quotaDialogVisible = ref(false)
+const quotaLoading = ref(false)
+const quotaSaving = ref(false)
+const quotaRows = ref([])
+const quotaUser = ref({})
 const isEditMode = ref(false)
 const currentUser = ref({})
 const searchKeyword = ref('')
@@ -341,6 +377,66 @@ const openResetPasswordDialog = (user) => {
   resetPasswordDialogVisible.value = true
 }
 
+// 打开复刻额度设置
+const openQuotaDialog = async (user) => {
+  quotaUser.value = user
+  quotaDialogVisible.value = true
+  await loadQuotaSettings(user.id)
+}
+
+const loadQuotaSettings = async (userID) => {
+  quotaLoading.value = true
+  try {
+    const response = await api.get(`/admin/users/${userID}/voice-clone-quotas`)
+    const quotas = response.data?.data?.quotas || []
+    quotaRows.value = quotas.map((item) => ({
+      ...item,
+      max_count: Number.isFinite(Number(item.max_count)) ? Number(item.max_count) : -1,
+      used_count: Number(item.used_count || 0),
+      remaining_count: Number.isFinite(Number(item.remaining_count)) ? Number(item.remaining_count) : -1
+    }))
+  } catch (error) {
+    ElMessage.error('加载复刻额度失败')
+    quotaRows.value = []
+  } finally {
+    quotaLoading.value = false
+  }
+}
+
+const saveQuotaSettings = async () => {
+  if (!quotaUser.value?.id) return
+  const items = quotaRows.value.map((row) => ({
+    tts_config_id: row.tts_config_id,
+    max_count: Number(row.max_count)
+  }))
+  for (const item of items) {
+    if (!item.tts_config_id) {
+      ElMessage.error('存在无效的 tts_config_id')
+      return
+    }
+    if (!Number.isInteger(item.max_count) || item.max_count < -1) {
+      ElMessage.error('max_count 只能是大于等于 -1 的整数')
+      return
+    }
+  }
+
+  quotaSaving.value = true
+  try {
+    await api.put(`/admin/users/${quotaUser.value.id}/voice-clone-quotas`, { items })
+    ElMessage.success('复刻额度保存成功')
+    await loadQuotaSettings(quotaUser.value.id)
+  } catch (error) {
+    ElMessage.error('保存复刻额度失败')
+  } finally {
+    quotaSaving.value = false
+  }
+}
+
+const resetQuotaDialog = () => {
+  quotaRows.value = []
+  quotaUser.value = {}
+}
+
 // 重置密码表单
 const resetPasswordForm = () => {
   passwordForm.newPassword = ''
@@ -419,5 +515,10 @@ onMounted(() => {
 .header-right {
   display: flex;
   align-items: center;
+}
+
+.quota-hint {
+  color: #666;
+  font-size: 13px;
 }
 </style>

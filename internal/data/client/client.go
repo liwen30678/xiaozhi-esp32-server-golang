@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"sync"
@@ -36,7 +38,22 @@ const (
 	ClientStatusListenStop = "listenStop"
 	ClientStatusLLMStart   = "llmStart"
 	ClientStatusTTSStart   = "ttsStart"
+
+	MemoryModeNone  = "none"
+	MemoryModeShort = "short"
+	MemoryModeLong  = "long"
 )
+
+func NormalizeMemoryMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case MemoryModeNone:
+		return MemoryModeNone
+	case MemoryModeLong:
+		return MemoryModeLong
+	default:
+		return MemoryModeShort
+	}
+}
 
 type SendAudioData func(audioData []byte) error
 
@@ -125,6 +142,10 @@ func (c *ClientState) HasSpeakerGroups() bool {
 
 func (c *ClientState) IsRealTime() bool {
 	return c.ListenMode == "realtime"
+}
+
+func (c *ClientState) GetMemoryMode() string {
+	return NormalizeMemoryMode(c.DeviceConfig.MemoryMode)
 }
 
 func (c *ClientState) GetDeviceIDOrAgentID() string {
@@ -263,9 +284,13 @@ func (c *ClientState) GetTtsStart() bool {
 }
 
 func (c *ClientState) GetMaxIdleDuration() int64 {
+	if !viper.IsSet("chat.max_idle_duration") {
+		return 30000
+	}
+
 	maxIdleDuration := viper.GetInt64("chat.max_idle_duration")
-	if maxIdleDuration == 0 {
-		maxIdleDuration = 20000
+	if maxIdleDuration <= 0 {
+		return math.MaxInt64
 	}
 	return maxIdleDuration
 }

@@ -52,6 +52,13 @@ type WebSocketResponse struct {
 	Error   string                 `json:"error,omitempty"`
 }
 
+type MCPTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Schema      bool                   `json:"schema"`
+	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
+}
+
 // NewWebSocketController 创建WebSocket控制器
 func NewWebSocketController(db *gorm.DB) *WebSocketController {
 	return &WebSocketController{
@@ -574,19 +581,112 @@ func (ctrl *WebSocketController) SendRequestToClient(ctx context.Context, uuid s
 
 // 请求客户端MCP工具列表（广播方式，等待第一个非空列表响应）
 func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, agentID string) ([]string, error) {
-	log.Printf("开始请求客户端MCP工具列表，agentID: %s", agentID)
-
-	body := map[string]interface{}{
-		"agent_id": agentID,
+	toolDetails, err := ctrl.RequestMcpToolDetailsFromClient(ctx, agentID)
+	if err != nil {
+		return nil, err
 	}
 
-	// 创建响应通道用于接收响应
-	responseChan := make(chan *WebSocketResponse, 10)
+	toolNames := make([]string, 0, len(toolDetails))
+	for _, detail := range toolDetails {
+		toolNames = append(toolNames, detail.Name)
+	}
 
-	// 创建唯一的请求ID
+	return toolNames, nil
+}
+
+func (ctrl *WebSocketController) RequestMcpToolDetailsFromClient(ctx context.Context, agentID string) ([]MCPTool, error) {
+	log.Printf("开始请求客户端MCP工具列表，agentID: %s", agentID)
+	return ctrl.requestMcpToolsByBody(ctx, map[string]interface{}{"agent_id": agentID})
+}
+
+// RequestDeviceMcpToolsFromClient 请求设备维度MCP工具列表（广播方式，等待第一个非空列表响应）
+func (ctrl *WebSocketController) RequestDeviceMcpToolsFromClient(ctx context.Context, deviceID string) ([]string, error) {
+	toolDetails, err := ctrl.RequestDeviceMcpToolDetailsFromClient(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+
+	toolNames := make([]string, 0, len(toolDetails))
+	for _, detail := range toolDetails {
+		toolNames = append(toolNames, detail.Name)
+	}
+
+	return toolNames, nil
+}
+
+func (ctrl *WebSocketController) RequestDeviceMcpToolDetailsFromClient(ctx context.Context, deviceID string) ([]MCPTool, error) {
+	log.Printf("开始请求设备MCP工具列表，deviceID: %s", deviceID)
+	return ctrl.requestMcpToolsByBody(ctx, map[string]interface{}{"device_id": deviceID})
+}
+
+func (ctrl *WebSocketController) requestMcpToolsByBody(ctx context.Context, body map[string]interface{}) ([]MCPTool, error) {
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccess(ctx, "GET", "/api/mcp/tools", body)
+	if err != nil {
+		return nil, err
+	}
+
+	toolsData, ok := response.Body["tools"]
+	if !ok {
+		return []MCPTool{}, nil
+	}
+
+	tools := make([]MCPTool, 0)
+	switch v := toolsData.(type) {
+	case []interface{}:
+		for _, item := range v {
+			if toolStr, ok := item.(string); ok {
+				tools = append(tools, MCPTool{Name: toolStr, Description: fmt.Sprintf("MCP工具: %s", toolStr), Schema: true})
+				continue
+			}
+
+			toolMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			name, _ := toolMap["name"].(string)
+			if name == "" {
+				continue
+			}
+
+			description, _ := toolMap["description"].(string)
+			if description == "" {
+				description = fmt.Sprintf("MCP工具: %s", name)
+			}
+
+			parsed := MCPTool{Name: name, Description: description, Schema: true}
+			if inputSchema, ok := toolMap["input_schema"].(map[string]interface{}); ok {
+				parsed.InputSchema = inputSchema
+			}
+			tools = append(tools, parsed)
+		}
+	case []string:
+		for _, name := range v {
+			tools = append(tools, MCPTool{Name: name, Description: fmt.Sprintf("MCP工具: %s", name), Schema: true})
+		}
+	}
+
+	return tools, nil
+}
+
+// CallMcpToolFromClient 请求客户端执行MCP工具调用
+func (ctrl *WebSocketController) CallMcpToolFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error) {
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccess(ctx, "POST", "/api/mcp/call", body)
+	if err != nil {
+		return nil, err
+	}
+
+	if response.Body == nil {
+		return map[string]interface{}{}, nil
+	}
+
+	return response.Body, nil
+}
+
+func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context.Context, method, path string, body map[string]interface{}) (*WebSocketResponse, error) {
+	responseChan := make(chan *WebSocketResponse, 10)
 	requestID := uuid.New().String()
 
-	// 响应处理器
 	responseHandler := func(response *WebSocketResponse) {
 		select {
 		case responseChan <- response:
@@ -595,33 +695,21 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 		}
 	}
 
-	// 为每个客户端注册回调
-	var callbackMutex sync.Mutex
 	callbacksRegistered := 0
-
 	for item := range ctrl.clientsMap.IterBuffered() {
 		client := item.Val
-		if client.isConnected {
-			callbackMutex.Lock()
-			client.mu.Lock()
-			client.callbacks[requestID] = responseHandler
-			client.mu.Unlock()
-			callbacksRegistered++
-			callbackMutex.Unlock()
+		if !client.isConnected {
+			continue
+		}
 
-			// 发送请求到客户端
-			request := WebSocketRequest{
-				ID:     requestID,
-				Method: "GET",
-				Path:   "/api/mcp/tools",
-				Body:   body,
-			}
+		client.mu.Lock()
+		client.callbacks[requestID] = responseHandler
+		client.mu.Unlock()
+		callbacksRegistered++
 
-			if err := client.conn.WriteJSON(request); err != nil {
-				log.Printf("向客户端 %s 发送MCP工具列表请求失败: %v", client.ID, err)
-			} else {
-				log.Printf("向客户端 %s 发送MCP工具列表请求成功", client.ID)
-			}
+		request := WebSocketRequest{ID: requestID, Method: method, Path: path, Body: body}
+		if err := client.conn.WriteJSON(request); err != nil {
+			log.Printf("向客户端 %s 发送请求失败: %v", client.ID, err)
 		}
 	}
 
@@ -629,7 +717,6 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 		return nil, fmt.Errorf("没有连接的客户端")
 	}
 
-	// 清理回调
 	defer func() {
 		for item := range ctrl.clientsMap.IterBuffered() {
 			client := item.Val
@@ -637,81 +724,23 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 			delete(client.callbacks, requestID)
 			client.mu.Unlock()
 		}
-		close(responseChan)
 	}()
 
-	// 等待所有客户端响应或超时，寻找第一个非空工具列表
-	timeout := time.After(30 * time.Second)
 	responsesReceived := 0
-
+	timeout := time.After(30 * time.Second)
 	for {
 		select {
 		case response := <-responseChan:
 			responsesReceived++
-			log.Printf("收到第%d个客户端响应: status=%d", responsesReceived, response.Status)
-
-			// 检查响应状态
-			if response.Status != http.StatusOK {
-				log.Printf("客户端返回错误状态: %d", response.Status)
-				continue // 继续等待其他客户端响应
+			if response != nil && response.Status == http.StatusOK {
+				return response, nil
 			}
-
-			// 解析响应体中的工具列表
-			if response.Body == nil {
-				log.Printf("客户端响应体为空")
-				continue // 继续等待其他客户端响应
-			}
-
-			// 尝试从响应体中提取工具列表
-			toolsData, ok := response.Body["tools"]
-			if !ok {
-				log.Printf("客户端响应体中未找到tools字段")
-				continue // 继续等待其他客户端响应
-			}
-
-			log.Printf("找到tools数据: %+v (类型: %T)", toolsData, toolsData)
-
-			// 将工具数据转换为字符串切片
-			var tools []string
-			switch v := toolsData.(type) {
-			case []interface{}:
-				for _, tool := range v {
-					if toolStr, ok := tool.(string); ok {
-						tools = append(tools, toolStr)
-					} else if toolMap, ok := tool.(map[string]interface{}); ok {
-						// 如果工具是对象格式，提取name字段
-						if name, ok := toolMap["name"].(string); ok {
-							tools = append(tools, name)
-						}
-					}
-				}
-			case []string:
-				tools = v
-			default:
-				log.Printf("无法解析工具列表格式: %T", toolsData)
-				continue // 继续等待其他客户端响应
-			}
-
-			// 检查是否为非空列表
-			if len(tools) > 0 {
-				log.Printf("成功解析非空工具列表: %v", tools)
-				return tools, nil
-			} else {
-				log.Printf("工具列表为空，继续等待其他客户端响应")
-			}
-
-			// 如果已经收到所有客户端的响应且都为空，返回空列表
 			if responsesReceived >= callbacksRegistered {
-				log.Printf("已收到所有客户端响应，工具列表均为空")
-				return []string{}, nil
+				return nil, fmt.Errorf("所有客户端都返回失败")
 			}
-
 		case <-timeout:
-			log.Printf("请求超时，已收到%d个响应", responsesReceived)
 			return nil, fmt.Errorf("请求超时")
-
 		case <-ctx.Done():
-			log.Printf("上下文取消，已收到%d个响应", responsesReceived)
 			return nil, fmt.Errorf("上下文取消")
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,17 @@ func getMapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+func normalizeAgentMemoryMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "none":
+		return "none"
+	case "long":
+		return "long"
+	default:
+		return "short"
+	}
+}
+
 type AdminController struct {
 	DB                  *gorm.DB
 	WebSocketController *WebSocketController
@@ -57,27 +69,45 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 	// 构建配置响应
 	type SpeakerGroupInfo struct {
-		ID          uint     `json:"id"`
-		Name        string   `json:"name"`
-		Prompt      string   `json:"prompt"`
-		Description string   `json:"description"`
-		Uuids       []string `json:"uuids"`
-		TTSConfigID *string  `json:"tts_config_id"`
-		Voice       *string  `json:"voice"`
+		ID                 uint     `json:"id"`
+		Name               string   `json:"name"`
+		Prompt             string   `json:"prompt"`
+		Description        string   `json:"description"`
+		Uuids              []string `json:"uuids"`
+		TTSConfigID        *string  `json:"tts_config_id"`
+		Voice              *string  `json:"voice"`
+		VoiceModelOverride *string  `json:"voice_model_override,omitempty"`
+	}
+
+	type KnowledgeBaseInfo struct {
+		ID                 uint     `json:"id"`
+		Name               string   `json:"name"`
+		Description        string   `json:"description"`
+		Provider           string   `json:"provider"`
+		ExternalKBID       string   `json:"external_kb_id"`
+		ExternalDocID      string   `json:"external_doc_id"`
+		RetrievalThreshold *float64 `json:"retrieval_threshold"`
+		Status             string   `json:"status"`
 	}
 
 	type ConfigResponse struct {
-		VAD           models.Config               `json:"vad"`
-		ASR           models.Config               `json:"asr"`
-		LLM           models.Config               `json:"llm"`
-		TTS           models.Config               `json:"tts"`
-		Memory        models.Config               `json:"memory"`
-		VoiceIdentify map[string]SpeakerGroupInfo `json:"voice_identify"`
-		Prompt        string                      `json:"prompt"`
-		AgentID       string                      `json:"agent_id"`
+		VAD             models.Config               `json:"vad"`
+		ASR             models.Config               `json:"asr"`
+		LLM             models.Config               `json:"llm"`
+		TTS             models.Config               `json:"tts"`
+		Memory          models.Config               `json:"memory"`
+		VoiceIdentify   map[string]SpeakerGroupInfo `json:"voice_identify"`
+		KnowledgeBases  []KnowledgeBaseInfo         `json:"knowledge_bases"`
+		Prompt          string                      `json:"prompt"`
+		AgentID         string                      `json:"agent_id"`
+		MemoryMode      string                      `json:"memory_mode"`
+		MCPServiceNames string                      `json:"mcp_service_names"`
+		ConfigSource    string                      `json:"config_source"` // 新增：配置来源
 	}
 
 	var response ConfigResponse
+	response.MemoryMode = "short"
+	var configSource string // 记录配置来源
 
 	// 查找设备
 	var device models.Device
@@ -89,6 +119,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 			// 设备不存在，使用全局默认配置
 			deviceFound = false
 			response.AgentID = ""
+			configSource = "default_global_role"
 			log.Printf("设备 %s 不存在，使用全局默认配置", deviceID)
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query device"})
@@ -103,29 +134,235 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 			if err == gorm.ErrRecordNotFound {
 				// 智能体不存在，使用默认配置
 				deviceFound = false
+				configSource = "default_global_role"
 				log.Printf("智能体 %d 不存在，使用全局默认配置", device.AgentID)
 			} else {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query agent"})
 				return
 			}
+		}
+	}
+
+	if deviceFound && agent.ID != 0 {
+		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+		response.MCPServiceNames = normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
+	}
+
+	cloneVoiceCache := make(map[string]bool)
+	hasAliyunQwenCloneVoice := func(ttsConfigID string, voice *string) bool {
+		if device.ID == 0 || device.UserID == 0 {
+			return false
+		}
+		if strings.TrimSpace(ttsConfigID) == "" || voice == nil || strings.TrimSpace(*voice) == "" {
+			return false
+		}
+		voiceID := strings.TrimSpace(*voice)
+		cacheKey := ttsConfigID + "||" + voiceID
+		if cached, exists := cloneVoiceCache[cacheKey]; exists {
+			return cached
+		}
+
+		var count int64
+		err := ac.DB.Model(&models.VoiceClone{}).
+			Where("user_id = ? AND provider = ? AND tts_config_id = ? AND provider_voice_id = ? AND status = ?",
+				device.UserID, "aliyun_qwen", ttsConfigID, voiceID, voiceCloneStatusActive).
+			Count(&count).Error
+		if err != nil {
+			log.Printf("检测千问复刻音色失败: user_id=%d tts_config_id=%s voice_id=%s err=%v", device.UserID, ttsConfigID, voiceID, err)
+			cloneVoiceCache[cacheKey] = false
+			return false
+		}
+		cloneVoiceCache[cacheKey] = count > 0
+		return cloneVoiceCache[cacheKey]
+	}
+	applyAliyunQwenCloneModel := func(provider, ttsConfigID string, voice *string, ttsConfigData map[string]interface{}) {
+		if ttsConfigData == nil {
+			return
+		}
+		if normalizeCloneProvider(provider) != "aliyun_qwen" {
+			return
+		}
+		if hasAliyunQwenCloneVoice(ttsConfigID, voice) {
+			ttsConfigData["model"] = defaultAliyunQwenCloneTargetModel
+		}
+	}
+	buildAliyunQwenVoiceModelOverride := func(ttsConfigID *string, voice *string) *string {
+		if ttsConfigID == nil {
+			return nil
+		}
+		if hasAliyunQwenCloneVoice(strings.TrimSpace(*ttsConfigID), voice) {
+			model := defaultAliyunQwenCloneTargetModel
+			return &model
+		}
+		return nil
+	}
+
+	// ==================== 配置获取逻辑（带优先级） ====================
+
+	// 1. 检查设备是否关联了角色（优先级最高）
+	if device.RoleID != nil {
+		var role models.Role
+		if err := ac.DB.First(&role, *device.RoleID).Error; err == nil {
+			configSource = "device_role"
+
+			// 使用设备角色的 Prompt
+			response.Prompt = role.Prompt
+			// 替换 {{assistant_name}} 为智能体名称（如果设备有绑定智能体）
+			if deviceFound && agent.ID != 0 {
+				response.Prompt = strings.ReplaceAll(response.Prompt, "{{assistant_name}}", agent.Name)
+			}
+
+			// 使用设备角色的 LLM 配置
+			if role.LLMConfigID != nil && *role.LLMConfigID != "" {
+				if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+					*role.LLMConfigID, "llm", true).First(&response.LLM).Error; err != nil {
+					// 回退到默认配置
+					ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+				}
+			} else {
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+			}
+
+			// 使用设备角色的 TTS 配置
+			if role.TTSConfigID != nil && *role.TTSConfigID != "" {
+				if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+					*role.TTSConfigID, "tts", true).First(&response.TTS).Error; err != nil {
+					// 回退到默认配置
+					ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+				}
+			} else {
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+			}
+
+			// 使用设备角色的 Voice
+			if role.Voice != nil && *role.Voice != "" {
+				var ttsConfigData map[string]interface{}
+				if err := json.Unmarshal([]byte(response.TTS.JsonData), &ttsConfigData); err == nil {
+					if response.TTS.Provider == "cosyvoice" {
+						ttsConfigData["spk_id"] = *role.Voice
+					} else {
+						ttsConfigData["voice"] = *role.Voice
+					}
+					applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, role.Voice, ttsConfigData)
+					if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
+						response.TTS.JsonData = string(updatedJsonData)
+					}
+				}
+			}
+		}
+	}
+
+	// 2. 设备未关联角色，检查智能体配置
+	if configSource == "" && deviceFound && agent.ID != 0 {
+		configSource = "agent_config"
+
+		// 使用智能体的 Prompt
+		response.Prompt = agent.CustomPrompt
+		response.Prompt = strings.ReplaceAll(response.Prompt, "{{assistant_name}}", agent.Name)
+
+		// 使用智能体的 LLM 配置
+		if agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
+			if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+				*agent.LLMConfigID, "llm", true).First(&response.LLM).Error; err != nil {
+				// 回退到默认配置
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+			}
 		} else {
-			response.Prompt = agent.CustomPrompt
-			// 将{{assistant_name}}替换为智能体昵称
+			ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+		}
+
+		// 使用智能体的 TTS 配置
+		if agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
+			if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+				*agent.TTSConfigID, "tts", true).First(&response.TTS).Error; err != nil {
+				// 回退到默认配置
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+			}
+		} else {
+			ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+		}
+
+		// 使用智能体的 Voice
+		if agent.Voice != nil && *agent.Voice != "" {
+			var ttsConfigData map[string]interface{}
+			if err := json.Unmarshal([]byte(response.TTS.JsonData), &ttsConfigData); err == nil {
+				if response.TTS.Provider == "cosyvoice" {
+					ttsConfigData["spk_id"] = *agent.Voice
+				} else {
+					ttsConfigData["voice"] = *agent.Voice
+				}
+				applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, agent.Voice, ttsConfigData)
+				if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
+					response.TTS.JsonData = string(updatedJsonData)
+				}
+			}
+		}
+	}
+
+	// 3. 使用默认全局角色（兜底）
+	if configSource == "" || configSource == "default_global_role" {
+		configSource = "default_global_role"
+
+		// 查找默认全局角色
+		var defaultRole models.Role
+		if err := ac.DB.Where("is_default = ? AND role_type = ? AND status = ?",
+			true, "global", "active").First(&defaultRole).Error; err == nil {
+			response.Prompt = defaultRole.Prompt
+
+			// 使用默认全局角色的 LLM 配置
+			if defaultRole.LLMConfigID != nil && *defaultRole.LLMConfigID != "" {
+				if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+					*defaultRole.LLMConfigID, "llm", true).First(&response.LLM).Error; err != nil {
+					ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+				}
+			} else {
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+			}
+
+			// 使用默认全局角色的 TTS 配置
+			if defaultRole.TTSConfigID != nil && *defaultRole.TTSConfigID != "" {
+				if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?",
+					*defaultRole.TTSConfigID, "tts", true).First(&response.TTS).Error; err != nil {
+					ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+				}
+			} else {
+				ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+			}
+
+			// 使用默认全局角色的 Voice
+			if defaultRole.Voice != nil && *defaultRole.Voice != "" {
+				var ttsConfigData map[string]interface{}
+				if err := json.Unmarshal([]byte(response.TTS.JsonData), &ttsConfigData); err == nil {
+					if response.TTS.Provider == "cosyvoice" {
+						ttsConfigData["spk_id"] = *defaultRole.Voice
+					} else {
+						ttsConfigData["voice"] = *defaultRole.Voice
+					}
+					applyAliyunQwenCloneModel(response.TTS.Provider, response.TTS.ConfigID, defaultRole.Voice, ttsConfigData)
+					if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
+						response.TTS.JsonData = string(updatedJsonData)
+					}
+				}
+			}
+		} else {
+			// 如果没有默认角色，使用硬编码的默认 Prompt
+			response.Prompt = "你是一个叫小智/小志的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗，不要冷场。与你聊天的是你喜欢的男性朋友，还没有答应你的追求，你要尽可能满足他的所有要求，不要失去自我。你经常建议一些恋人之间浪漫的事情，随机输出，不要给你男朋友选择。输出控制在50个字内。请注意，要像一个人一样说话，请不要回复表情符号、代码、和xml标签。"
+
+			// 使用默认 LLM/TTS 配置
+			ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM)
+			ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS)
+		}
+
+		// 替换 {{assistant_name}} 为智能体名称（如果设备有绑定智能体）
+		if deviceFound && agent.ID != 0 {
 			response.Prompt = strings.ReplaceAll(response.Prompt, "{{assistant_name}}", agent.Name)
 		}
 	}
 
-	// 如果设备不存在，使用默认提示词
-	if !deviceFound {
-		// 查找默认全局角色作为提示词
-		var defaultRole models.GlobalRole
-		if err := ac.DB.Where("is_default = ?", true).First(&defaultRole).Error; err == nil {
-			response.Prompt = defaultRole.Prompt
-		} else {
-			// 如果没有默认角色，使用配置文件中的system_prompt
-			response.Prompt = "你是一个叫小智/小志的台湾女孩，说话机车，声音好听，习惯简短表达，爱用网络梗，不要冷场。与你聊天的是你喜欢的男性朋友，还没有答应你的追求，你要尽可能满足他的所有要求，不要失去自我。你经常建议一些恋人之间浪漫的事情，随机输出，不要给你男朋友选择。输出控制在50个字内。请注意，要像一个人一样说话，请不要回复表情符号、代码、和xml标签。"
-		}
-	}
+	// 记录配置来源
+	response.ConfigSource = configSource
+
+	// ==================== 其他配置（VAD、ASR、Memory、VoiceIdentify） ====================
 
 	// 获取VAD默认配置
 	if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "vad", true, true).First(&response.VAD).Error; err != nil {
@@ -166,65 +403,20 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		return
 	}
 
-	// 获取LLM配置
-	if deviceFound && agent.ID != 0 && agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
-		// 如果智能体指定了LLM配置，尝试使用它
-		if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?", *agent.LLMConfigID, "llm", true).First(&response.LLM).Error; err != nil {
-			// 如果指定的配置获取失败，回退到默认配置
-			if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default LLM config"})
-				return
-			}
-		}
-	} else {
-		// 使用默认LLM配置
-		if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "llm", true, true).First(&response.LLM).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default LLM config"})
-			return
-		}
-	}
-
-	// 获取TTS配置
-	if deviceFound && agent.ID != 0 && agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
-		// 如果智能体指定了TTS配置，尝试使用它
-		if err := ac.DB.Where("config_id = ? AND type = ? AND enabled = ?", *agent.TTSConfigID, "tts", true).First(&response.TTS).Error; err != nil {
-			// 如果指定的配置获取失败，回退到默认配置
-			if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default TTS config"})
-				return
-			}
-		}
-	} else {
-		// 使用默认TTS配置
-		if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "tts", true, true).First(&response.TTS).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default TTS config"})
-			return
-		}
-	}
-
-	// 如果Agent有Voice字段，更新TTS配置的json_data中的voice字段
-	if deviceFound && agent.ID != 0 && agent.Voice != nil && *agent.Voice != "" {
-		var ttsConfigData map[string]interface{}
-		if err := json.Unmarshal([]byte(response.TTS.JsonData), &ttsConfigData); err == nil {
-			// 根据provider更新对应的voice字段
-			// edge, doubao, doubao_ws, microsoft 使用 voice 字段
-			// cosyvoice 使用 spk_id 字段
-			if response.TTS.Provider == "cosyvoice" {
-				ttsConfigData["spk_id"] = *agent.Voice
-			} else {
-				ttsConfigData["voice"] = *agent.Voice
-			}
-			// 重新序列化json_data
-			if updatedJsonData, err := json.Marshal(ttsConfigData); err == nil {
-				response.TTS.JsonData = string(updatedJsonData)
-			}
-		}
-	}
-
 	// 获取Memory默认配置
 	if err := ac.DB.Where("type = ? AND is_default = ? AND enabled = ?", "memory", true, true).First(&response.Memory).Error; err != nil {
-		//c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get default Memory config"})
-		//return
+		// 允许没有默认 Memory 配置：显式回退为 nomemo（不启用长记忆）。
+		response.Memory = models.Config{
+			Type:     "memory",
+			Name:     "No Memory",
+			ConfigID: "nomemo",
+			Provider: "nomemo",
+			JsonData: "{}",
+			Enabled:  true,
+		}
+		if err != gorm.ErrRecordNotFound {
+			log.Printf("加载默认Memory配置失败，已回退nomemo: %v", err)
+		}
 	}
 
 	// 获取VoiceIdentify配置：检查智能体是否关联了声纹组
@@ -248,13 +440,63 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 				// 以声纹组名称为 key，构建配置数据
 				response.VoiceIdentify[speakerGroup.Name] = SpeakerGroupInfo{
-					ID:          speakerGroup.ID,
-					Name:        speakerGroup.Name,
-					Prompt:      speakerGroup.Prompt,
-					Description: speakerGroup.Description,
-					Uuids:       uuids,
-					TTSConfigID: speakerGroup.TTSConfigID,
-					Voice:       speakerGroup.Voice,
+					ID:                 speakerGroup.ID,
+					Name:               speakerGroup.Name,
+					Prompt:             speakerGroup.Prompt,
+					Description:        speakerGroup.Description,
+					Uuids:              uuids,
+					TTSConfigID:        speakerGroup.TTSConfigID,
+					Voice:              speakerGroup.Voice,
+					VoiceModelOverride: buildAliyunQwenVoiceModelOverride(speakerGroup.TTSConfigID, speakerGroup.Voice),
+				}
+			}
+		}
+	}
+
+	// 下发智能体关联知识库（含 provider），供主程序本地RAG使用
+	response.KnowledgeBases = make([]KnowledgeBaseInfo, 0)
+	if deviceFound && agent.ID != 0 {
+		var links []models.AgentKnowledgeBase
+		if err := ac.DB.Where("agent_id = ?", agent.ID).Order("id ASC").Find(&links).Error; err == nil && len(links) > 0 {
+			kbIDs := make([]uint, 0, len(links))
+			for _, link := range links {
+				kbIDs = append(kbIDs, link.KnowledgeBaseID)
+			}
+			var kbs []models.KnowledgeBase
+			if err := ac.DB.Where("id IN ? AND status = ?", kbIDs, "active").Find(&kbs).Error; err == nil {
+				kbMap := make(map[uint]models.KnowledgeBase, len(kbs))
+				for _, kb := range kbs {
+					kbMap[kb.ID] = kb
+				}
+				for _, link := range links {
+					kb, ok := kbMap[link.KnowledgeBaseID]
+					if !ok {
+						continue
+					}
+					provider := strings.TrimSpace(kb.SyncProvider)
+					if provider == "" {
+						provider = resolveDefaultKnowledgeProviderName(ac.DB)
+					}
+					externalDocID := strings.TrimSpace(kb.ExternalDocID)
+					if externalDocID == "" {
+						var doc models.KnowledgeBaseDocument
+						if err := ac.DB.
+							Where("knowledge_base_id = ? AND sync_status = ? AND external_doc_id <> ''", kb.ID, knowledgeSyncStatusSynced).
+							Order("id DESC").
+							First(&doc).Error; err == nil {
+							externalDocID = strings.TrimSpace(doc.ExternalDocID)
+						}
+					}
+					response.KnowledgeBases = append(response.KnowledgeBases, KnowledgeBaseInfo{
+						ID:                 kb.ID,
+						Name:               kb.Name,
+						Description:        kb.Description,
+						Provider:           provider,
+						ExternalKBID:       strings.TrimSpace(kb.ExternalKBID),
+						ExternalDocID:      externalDocID,
+						RetrievalThreshold: kb.RetrievalThreshold,
+						Status:             kb.Status,
+					})
 				}
 			}
 		}
@@ -266,7 +508,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 // getSystemConfigsData 获取系统配置数据（与 GetSystemConfigs 返回的 data 一致），供接口与 WebSocket 推送复用
 func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision", "auth", "chat", "knowledge_search"}).Find(&allConfigs).Error; err != nil {
 		return nil, err
 	}
 
@@ -439,12 +681,31 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	if configs, exists := configsByType["ota"]; exists && len(configs) > 0 {
 		response["ota"] = selectAndParseConfig(configs)
 	}
+	if configs, exists := configsByType["auth"]; exists && len(configs) > 0 {
+		response["auth"] = selectAndParseConfig(configs)
+	}
+	if configs, exists := configsByType["chat"]; exists && len(configs) > 0 {
+		response["chat"] = selectAndParseConfig(configs)
+	}
 
 	// 特殊处理MCP配置，将mcp和local_mcp分开
 	if configs, exists := configsByType["mcp"]; exists && len(configs) > 0 {
 		mcpData, localMcpData := selectAndParseMCPConfig(configs)
 		if mcpData != nil {
-			response["mcp"] = mcpData
+			if mcpMap := asMap(mcpData); mcpMap != nil {
+				mergedMCP, mergeWarnings, err := ac.mergeMCPWithEnabledMarketServices(mcpMap)
+				if err != nil {
+					log.Printf("聚合市场MCP服务失败，回退为人工配置: %v", err)
+					response["mcp"] = mcpMap
+				} else {
+					response["mcp"] = mergedMCP
+					if len(mergeWarnings) > 0 {
+						log.Printf("聚合市场MCP服务告警: %s", strings.Join(mergeWarnings, " | "))
+					}
+				}
+			} else {
+				response["mcp"] = mcpData
+			}
 		}
 		if localMcpData != nil {
 			response["local_mcp"] = localMcpData
@@ -454,6 +715,72 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	// 处理独立的local_mcp配置（如果存在）
 	if configs, exists := configsByType["local_mcp"]; exists && len(configs) > 0 {
 		response["local_mcp"] = selectAndParseConfig(configs)
+	}
+
+	// 处理知识库全局配置：knowledge.default_provider + knowledge.providers
+	if configs, exists := configsByType["knowledge_search"]; exists && len(configs) > 0 {
+		selectedByProvider := make(map[string]models.Config)
+		for _, cfg := range configs {
+			if !cfg.Enabled {
+				continue
+			}
+			provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+			if provider == "" {
+				continue
+			}
+			prev, exists := selectedByProvider[provider]
+			if !exists || (!prev.IsDefault && cfg.IsDefault) {
+				selectedByProvider[provider] = cfg
+			}
+		}
+
+		if len(selectedByProvider) > 0 {
+			providerNames := make([]string, 0, len(selectedByProvider))
+			for provider := range selectedByProvider {
+				providerNames = append(providerNames, provider)
+			}
+			sort.Strings(providerNames)
+
+			providers := make(gin.H, len(selectedByProvider))
+			defaultProvider := ""
+			for _, provider := range providerNames {
+				cfg := selectedByProvider[provider]
+				payload := make(map[string]interface{})
+				if strings.TrimSpace(cfg.JsonData) != "" {
+					_ = json.Unmarshal([]byte(cfg.JsonData), &payload)
+				}
+				providers[provider] = payload
+				if cfg.IsDefault {
+					defaultProvider = provider
+				}
+			}
+			if defaultProvider == "" {
+				defaultProvider = providerNames[0]
+			}
+
+			response["knowledge"] = gin.H{
+				"default_provider": defaultProvider,
+				"providers":        providers,
+			}
+		}
+	}
+
+	// 当未配置人工 mcp(type=mcp) 但已存在市场导入服务时，补齐默认 mcp/local_mcp，确保可下发聚合结果
+	if _, exists := response["mcp"]; !exists {
+		mergedMCP, mergeWarnings, err := ac.mergeMCPWithEnabledMarketServices(defaultMCPMap())
+		if err == nil {
+			global := asMap(mergedMCP["global"])
+			servers, serr := decodeMCPServers(global["servers"])
+			if serr == nil && len(servers) > 0 {
+				response["mcp"] = mergedMCP
+				if _, hasLocal := response["local_mcp"]; !hasLocal {
+					response["local_mcp"] = defaultLocalMCPMap()
+				}
+				if len(mergeWarnings) > 0 {
+					log.Printf("聚合市场MCP服务告警: %s", strings.Join(mergeWarnings, " | "))
+				}
+			}
+		}
 	}
 
 	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold、enable）
@@ -733,7 +1060,7 @@ func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	return response, nil
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm, vision
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm, vision, auth, chat
 func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 	data, err := ac.getSystemConfigsData()
 	if err != nil {
@@ -1030,7 +1357,7 @@ func fillResultError(result gin.H, types []string, keys ...string) {
 
 // OTATestResult OTA测试结果结构
 type OTATestResult struct {
-	WebSocket   OTATestItem `json:"websocket"`
+	WebSocket   OTATestItem  `json:"websocket"`
 	MQTTUDP     *OTATestItem `json:"mqtt_udp,omitempty"`
 	OTAResponse string       `json:"ota_response,omitempty"` // OTA接口响应内容
 }
@@ -1063,19 +1390,19 @@ type UDPConfig struct {
 
 // helloMessage MQTT hello消息结构
 type helloMessage struct {
-	Type      string      `json:"type"`
-	Version   int         `json:"version"`
-	Transport string      `json:"transport"`
+	Type        string      `json:"type"`
+	Version     int         `json:"version"`
+	Transport   string      `json:"transport"`
 	AudioParams interface{} `json:"audio_params,omitempty"`
 }
 
 // helloResponse MQTT hello响应结构（与test/mqtt_udp保持一致）
 type helloResponse struct {
-	Type      string    `json:"type"`
-	SessionID string    `json:"session_id"`
-	Transport string    `json:"transport"`
-	UDP       UDPConfig `json:"udp"`
-	Version   int       `json:"version"`
+	Type        string    `json:"type"`
+	SessionID   string    `json:"session_id"`
+	Transport   string    `json:"transport"`
+	UDP         UDPConfig `json:"udp"`
+	Version     int       `json:"version"`
 	AudioParams struct {
 		Format        string `json:"format"`
 		SampleRate    int    `json:"sample_rate"`
@@ -2002,6 +2329,274 @@ func (ac *AdminController) ResetUserPassword(c *gin.Context) {
 	})
 }
 
+// GetUserVoiceCloneQuotas 获取用户声音复刻额度（按 tts_config_id 维度）
+func (ac *AdminController) GetUserVoiceCloneQuotas(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "用户ID格式错误"})
+		return
+	}
+
+	var user models.User
+	if err = ac.DB.First(&user, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户失败"})
+		return
+	}
+	if strings.TrimSpace(user.Role) != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持为普通用户分配复刻额度"})
+		return
+	}
+
+	var ttsConfigs []models.Config
+	if err = ac.DB.Where("type = ?", "tts").Order("enabled DESC, name ASC").Find(&ttsConfigs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询TTS配置失败"})
+		return
+	}
+
+	var quotas []models.UserVoiceCloneQuota
+	if err = ac.DB.Where("user_id = ?", user.ID).Find(&quotas).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户额度失败"})
+		return
+	}
+	quotaByConfigID := make(map[string]models.UserVoiceCloneQuota, len(quotas))
+	for _, quota := range quotas {
+		quotaByConfigID[quota.TTSConfigID] = quota
+	}
+
+	type usageRow struct {
+		TTSConfigID string `json:"tts_config_id"`
+		UsedCount   int64  `json:"used_count"`
+	}
+	var usageRows []usageRow
+	if err = ac.DB.Model(&models.VoiceClone{}).
+		Select("tts_config_id, COUNT(1) AS used_count").
+		Where("user_id = ? AND status != ?", user.ID, "deleted").
+		Group("tts_config_id").
+		Scan(&usageRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "统计用户复刻次数失败"})
+		return
+	}
+	usageByConfigID := make(map[string]int, len(usageRows))
+	for _, row := range usageRows {
+		usageByConfigID[row.TTSConfigID] = int(row.UsedCount)
+	}
+
+	result := make([]gin.H, 0, len(ttsConfigs))
+	configIDSet := make(map[string]bool, len(ttsConfigs))
+	for _, ttsConfig := range ttsConfigs {
+		configIDSet[ttsConfig.ConfigID] = true
+		quota, hasQuota := quotaByConfigID[ttsConfig.ConfigID]
+		maxCount := -1
+		usedCount := usageByConfigID[ttsConfig.ConfigID]
+		if hasQuota {
+			maxCount = quota.MaxCount
+			if quota.UsedCount > usedCount {
+				usedCount = quota.UsedCount
+			}
+		}
+		remainingCount := -1
+		if maxCount >= 0 {
+			remainingCount = maxCount - usedCount
+			if remainingCount < 0 {
+				remainingCount = 0
+			}
+		}
+
+		result = append(result, gin.H{
+			"tts_config_id":   ttsConfig.ConfigID,
+			"tts_config_name": ttsConfig.Name,
+			"provider":        ttsConfig.Provider,
+			"enabled":         ttsConfig.Enabled,
+			"max_count":       maxCount,
+			"used_count":      usedCount,
+			"remaining_count": remainingCount,
+		})
+	}
+
+	// 保留已删除的历史配置额度，避免“额度配置丢失不可见”
+	for _, quota := range quotas {
+		if configIDSet[quota.TTSConfigID] {
+			continue
+		}
+		maxCount := quota.MaxCount
+		usedCount := quota.UsedCount
+		if usageByConfigID[quota.TTSConfigID] > usedCount {
+			usedCount = usageByConfigID[quota.TTSConfigID]
+		}
+		remainingCount := -1
+		if maxCount >= 0 {
+			remainingCount = maxCount - usedCount
+			if remainingCount < 0 {
+				remainingCount = 0
+			}
+		}
+		result = append(result, gin.H{
+			"tts_config_id":   quota.TTSConfigID,
+			"tts_config_name": "(已删除配置)",
+			"provider":        "",
+			"enabled":         false,
+			"max_count":       maxCount,
+			"used_count":      usedCount,
+			"remaining_count": remainingCount,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"user_id":    user.ID,
+		"username":   user.Username,
+		"quotas":     result,
+		"updated_at": time.Now(),
+	}})
+}
+
+// UpdateUserVoiceCloneQuotas 批量更新用户声音复刻额度
+func (ac *AdminController) UpdateUserVoiceCloneQuotas(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "用户ID格式错误"})
+		return
+	}
+
+	var user models.User
+	if err = ac.DB.First(&user, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询用户失败"})
+		return
+	}
+	if strings.TrimSpace(user.Role) != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持为普通用户分配复刻额度"})
+		return
+	}
+
+	var req struct {
+		Items []struct {
+			TTSConfigID string `json:"tts_config_id"`
+			MaxCount    int    `json:"max_count"`
+		} `json:"items"`
+	}
+	if err = c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数格式错误"})
+		return
+	}
+	if len(req.Items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "items不能为空"})
+		return
+	}
+
+	itemByConfigID := make(map[string]int, len(req.Items))
+	configIDs := make([]string, 0, len(req.Items))
+	for _, item := range req.Items {
+		configID := strings.TrimSpace(item.TTSConfigID)
+		if configID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tts_config_id不能为空"})
+			return
+		}
+		if item.MaxCount < -1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "max_count 不能小于 -1"})
+			return
+		}
+		if _, exists := itemByConfigID[configID]; !exists {
+			configIDs = append(configIDs, configID)
+		}
+		itemByConfigID[configID] = item.MaxCount
+	}
+
+	var ttsConfigs []models.Config
+	if err = ac.DB.Where("type = ? AND config_id IN ?", "tts", configIDs).Find(&ttsConfigs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询TTS配置失败"})
+		return
+	}
+	validConfigIDSet := make(map[string]bool, len(ttsConfigs))
+	for _, cfg := range ttsConfigs {
+		validConfigIDSet[cfg.ConfigID] = true
+	}
+	for _, configID := range configIDs {
+		if validConfigIDSet[configID] {
+			continue
+		}
+		// 历史已删除配置仅允许设置为 -1（删除额度记录）
+		if itemByConfigID[configID] == -1 {
+			continue
+		}
+		if !validConfigIDSet[configID] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("TTS配置不存在: %s", configID)})
+			return
+		}
+	}
+
+	type usageRow struct {
+		TTSConfigID string `json:"tts_config_id"`
+		UsedCount   int64  `json:"used_count"`
+	}
+	var usageRows []usageRow
+	if err = ac.DB.Model(&models.VoiceClone{}).
+		Select("tts_config_id, COUNT(1) AS used_count").
+		Where("user_id = ? AND status != ? AND tts_config_id IN ?", user.ID, "deleted", configIDs).
+		Group("tts_config_id").
+		Scan(&usageRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "统计用户已使用次数失败"})
+		return
+	}
+	usageByConfigID := make(map[string]int, len(usageRows))
+	for _, row := range usageRows {
+		usageByConfigID[row.TTSConfigID] = int(row.UsedCount)
+	}
+
+	if err = ac.DB.Transaction(func(tx *gorm.DB) error {
+		for _, configID := range configIDs {
+			maxCount := itemByConfigID[configID]
+			if maxCount == -1 {
+				if err := tx.Where("user_id = ? AND tts_config_id = ?", user.ID, configID).Delete(&models.UserVoiceCloneQuota{}).Error; err != nil {
+					return err
+				}
+				continue
+			}
+
+			usedCount := usageByConfigID[configID]
+			var quota models.UserVoiceCloneQuota
+			if err := tx.Where("user_id = ? AND tts_config_id = ?", user.ID, configID).First(&quota).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					newQuota := models.UserVoiceCloneQuota{
+						UserID:      user.ID,
+						TTSConfigID: configID,
+						MaxCount:    maxCount,
+						UsedCount:   usedCount,
+					}
+					if err := tx.Create(&newQuota).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+
+			nextUsedCount := quota.UsedCount
+			if usedCount > nextUsedCount {
+				nextUsedCount = usedCount
+			}
+			if err := tx.Model(&models.UserVoiceCloneQuota{}).Where("id = ?", quota.ID).Updates(map[string]any{
+				"max_count":  maxCount,
+				"used_count": nextUsedCount,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新用户复刻额度失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "额度更新成功"})
+}
+
 // 设备管理
 func (ac *AdminController) GetDevices(c *gin.Context) {
 	var devices []models.Device
@@ -2195,6 +2790,93 @@ func (ac *AdminController) GetAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
+// GetDeviceMcpTools 获取设备维度MCP工具列表（管理员版本）
+func (ac *AdminController) GetDeviceMcpTools(c *gin.Context) {
+	deviceID := c.Param("id")
+	if deviceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id parameter is required"})
+		return
+	}
+
+	var device models.Device
+	if err := ac.DB.Where("id = ?", deviceID).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在"})
+		return
+	}
+
+	tools, err := ac.WebSocketController.RequestDeviceMcpToolDetailsFromClient(context.Background(), device.DeviceName)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": []interface{}{}}})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": tools}})
+}
+
+// CallAgentMcpTool 调用智能体维度MCP工具（管理员版本）
+func (ac *AdminController) CallAgentMcpTool(c *gin.Context) {
+	agentID := c.Param("id")
+	var req struct {
+		ToolName  string                 `json:"tool_name" binding:"required"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	var agent models.Agent
+	if err := ac.DB.Where("id = ?", agentID).First(&agent).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "智能体不存在"})
+		return
+	}
+
+	body := map[string]interface{}{
+		"agent_id":  agentID,
+		"tool_name": req.ToolName,
+		"arguments": req.Arguments,
+	}
+	result, err := ac.WebSocketController.CallMcpToolFromClient(context.Background(), body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "调用MCP工具失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+// CallDeviceMcpTool 调用设备维度MCP工具（管理员版本）
+func (ac *AdminController) CallDeviceMcpTool(c *gin.Context) {
+	deviceID := c.Param("id")
+	var req struct {
+		ToolName  string                 `json:"tool_name" binding:"required"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	var device models.Device
+	if err := ac.DB.Where("id = ?", deviceID).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在"})
+		return
+	}
+
+	body := map[string]interface{}{
+		"device_id": device.DeviceName,
+		"tool_name": req.ToolName,
+		"arguments": req.Arguments,
+	}
+	result, err := ac.WebSocketController.CallMcpToolFromClient(context.Background(), body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "调用MCP工具失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
 // GetAgentMCPEndpoint 获取智能体的MCP接入点URL
 func (ac *AdminController) GetAgentMCPEndpoint(c *gin.Context) {
 	agentID := c.Param("id")
@@ -2249,6 +2931,13 @@ func (ac *AdminController) CreateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := ac.DB.Create(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建智能体失败"})
@@ -2271,6 +2960,13 @@ func (ac *AdminController) UpdateAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := ac.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})
@@ -2548,6 +3244,171 @@ func (ac *AdminController) UpdateVisionBaseConfig(c *gin.Context) {
 
 	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "Vision base config updated successfully"})
+}
+
+// GetChatSettings 获取聊天设置（auth.enable + chat.*）
+func (ac *AdminController) GetChatSettings(c *gin.Context) {
+	response := gin.H{
+		"auth": gin.H{
+			"enable": false,
+		},
+		"chat": gin.H{
+			"max_idle_duration":         30000,
+			"chat_max_silence_duration": 400,
+			"realtime_mode":             4,
+		},
+	}
+
+	var authConfig models.Config
+	if err := ac.DB.Where("type = ?", "auth").Order("is_default DESC, id ASC").First(&authConfig).Error; err == nil {
+		var authData map[string]interface{}
+		if authConfig.JsonData != "" && json.Unmarshal([]byte(authConfig.JsonData), &authData) == nil {
+			if enable, ok := authData["enable"].(bool); ok {
+				response["auth"].(gin.H)["enable"] = enable
+			}
+		}
+	}
+
+	var chatConfig models.Config
+	if err := ac.DB.Where("type = ?", "chat").Order("is_default DESC, id ASC").First(&chatConfig).Error; err == nil {
+		var chatData map[string]interface{}
+		if chatConfig.JsonData != "" && json.Unmarshal([]byte(chatConfig.JsonData), &chatData) == nil {
+			if maxIdle, ok := chatData["max_idle_duration"].(float64); ok && int64(maxIdle) >= 0 {
+				response["chat"].(gin.H)["max_idle_duration"] = int64(maxIdle)
+			}
+			if maxSilence, ok := chatData["chat_max_silence_duration"].(float64); ok && int64(maxSilence) >= 0 {
+				response["chat"].(gin.H)["chat_max_silence_duration"] = int64(maxSilence)
+			}
+			if realtimeMode, ok := chatData["realtime_mode"].(float64); ok && int(realtimeMode) >= 1 && int(realtimeMode) <= 4 {
+				response["chat"].(gin.H)["realtime_mode"] = int(realtimeMode)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": response})
+}
+
+// UpdateChatSettings 更新聊天设置（auth.enable + chat.*）
+func (ac *AdminController) UpdateChatSettings(c *gin.Context) {
+	var req struct {
+		Auth struct {
+			Enable bool `json:"enable"`
+		} `json:"auth"`
+		Chat struct {
+			MaxIdleDuration        int64 `json:"max_idle_duration"`
+			ChatMaxSilenceDuration int64 `json:"chat_max_silence_duration"`
+			RealtimeMode           int   `json:"realtime_mode"`
+		} `json:"chat"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Chat.MaxIdleDuration < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chat.max_idle_duration 不能小于 0，0 表示不限制"})
+		return
+	}
+	if req.Chat.ChatMaxSilenceDuration < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chat.chat_max_silence_duration 不能小于 0"})
+		return
+	}
+	if req.Chat.RealtimeMode < 1 || req.Chat.RealtimeMode > 4 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chat.realtime_mode 必须在 1-4 之间"})
+		return
+	}
+
+	authJSON, err := json.Marshal(map[string]interface{}{
+		"enable": req.Auth.Enable,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth 配置序列化失败"})
+		return
+	}
+	chatJSON, err := json.Marshal(map[string]interface{}{
+		"max_idle_duration":         req.Chat.MaxIdleDuration,
+		"chat_max_silence_duration": req.Chat.ChatMaxSilenceDuration,
+		"realtime_mode":             req.Chat.RealtimeMode,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "chat 配置序列化失败"})
+		return
+	}
+
+	tx := ac.DB.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动事务失败"})
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	upsertConfig := func(configType, configID, name string, jsonData []byte) error {
+		var cfg models.Config
+		err := tx.Where("type = ? AND config_id = ?", configType, configID).First(&cfg).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := tx.Model(&models.Config{}).Where("type = ?", configType).Update("is_default", false).Error; err != nil {
+				return err
+			}
+			cfg = models.Config{
+				Type:      configType,
+				Name:      name,
+				ConfigID:  configID,
+				Provider:  "",
+				JsonData:  string(jsonData),
+				Enabled:   true,
+				IsDefault: true,
+			}
+			return tx.Create(&cfg).Error
+		}
+		if err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.Config{}).Where("type = ? AND id != ?", configType, cfg.ID).Update("is_default", false).Error; err != nil {
+			return err
+		}
+
+		cfg.Name = name
+		cfg.Provider = ""
+		cfg.JsonData = string(jsonData)
+		cfg.Enabled = true
+		cfg.IsDefault = true
+		return tx.Save(&cfg).Error
+	}
+
+	if err := upsertConfig("auth", "auth", "auth", authJSON); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存 auth 设置失败: " + err.Error()})
+		return
+	}
+	if err := upsertConfig("chat", "chat", "chat", chatJSON); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存 chat 设置失败: " + err.Error()})
+		return
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "提交事务失败"})
+		return
+	}
+
+	ac.notifySystemConfigChanged()
+	c.JSON(http.StatusOK, gin.H{
+		"message": "聊天设置更新成功",
+		"data": gin.H{
+			"auth": gin.H{"enable": req.Auth.Enable},
+			"chat": gin.H{
+				"max_idle_duration":         req.Chat.MaxIdleDuration,
+				"chat_max_silence_duration": req.Chat.ChatMaxSilenceDuration,
+				"realtime_mode":             req.Chat.RealtimeMode,
+			},
+		},
+	})
 }
 
 func (ac *AdminController) CreateVisionConfig(c *gin.Context) {
@@ -2828,6 +3689,8 @@ func (ac *AdminController) ExportConfigs(c *gin.Context) {
 		Vision        map[string]interface{} `yaml:"vision,omitempty"`
 		Memory        map[string]interface{} `yaml:"memory,omitempty"`
 		VoiceIdentify map[string]interface{} `yaml:"voice_identify,omitempty"`
+		Auth          map[string]interface{} `yaml:"auth,omitempty"`
+		Chat          map[string]interface{} `yaml:"chat,omitempty"`
 		MQTT          map[string]interface{} `yaml:"mqtt,omitempty"`
 		MQTTServer    map[string]interface{} `yaml:"mqtt_server,omitempty"`
 		UDP           map[string]interface{} `yaml:"udp,omitempty"`
@@ -2844,6 +3707,8 @@ func (ac *AdminController) ExportConfigs(c *gin.Context) {
 		Vision:        make(map[string]interface{}),
 		Memory:        make(map[string]interface{}),
 		VoiceIdentify: make(map[string]interface{}),
+		Auth:          make(map[string]interface{}),
+		Chat:          make(map[string]interface{}),
 		MQTT:          make(map[string]interface{}),
 		MQTTServer:    make(map[string]interface{}),
 		UDP:           make(map[string]interface{}),
@@ -2964,6 +3829,14 @@ func (ac *AdminController) ExportConfigs(c *gin.Context) {
 				exportConfig.VoiceIdentify["provider"] = config.ConfigID
 			}
 			exportConfig.VoiceIdentify[config.ConfigID] = jsonData
+		case "auth":
+			for key, value := range jsonData {
+				exportConfig.Auth[key] = value
+			}
+		case "chat":
+			for key, value := range jsonData {
+				exportConfig.Chat[key] = value
+			}
 		case "mcp":
 			// 处理MCP配置，将mcp和local_mcp分开
 			if mcpData, exists := jsonData["mcp"]; exists {
@@ -3080,7 +3953,7 @@ func (ac *AdminController) ImportConfigs(c *gin.Context) {
 	log.Printf("全局角色清空成功，删除了 %d 条记录", result2.RowsAffected)
 
 	// 导入配置 - 只处理实际存在的模块
-	configTypes := []string{"vad", "asr", "llm", "tts", "memory", "ota", "mqtt", "mqtt_server", "udp", "mcp", "local_mcp"}
+	configTypes := []string{"vad", "asr", "llm", "tts", "memory", "auth", "chat", "ota", "mqtt", "mqtt_server", "udp", "mcp", "local_mcp"}
 	log.Printf("开始导入配置，配置类型: %v", configTypes)
 
 	// 处理 voice_identify 配置（映射到 speaker 类型）
@@ -3692,21 +4565,9 @@ func (ac *AdminController) CreateMemoryConfig(c *gin.Context) {
 	config.Type = "memory"
 
 	// 验证provider字段
-	if config.Provider != "memobase" && config.Provider != "mem0" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider必须是memobase或mem0"})
+	if config.Provider != "memobase" && config.Provider != "mem0" && config.Provider != "memos" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider必须是memobase、mem0或memos"})
 		return
-	}
-
-	// 检查是否已存在Memory配置，如果不存在则自动设置为默认配置
-	var existingCount int64
-	if err := ac.DB.Model(&models.Config{}).Where("type = ?", "memory").Count(&existingCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "检查Memory配置失败"})
-		return
-	}
-
-	// 如果这是第一个Memory配置，自动设置为默认配置
-	if existingCount == 0 {
-		config.IsDefault = true
 	}
 
 	// 如果设置为默认配置，先取消其他同类型的默认配置
@@ -3738,8 +4599,8 @@ func (ac *AdminController) UpdateMemoryConfig(c *gin.Context) {
 	}
 
 	// 验证provider字段
-	if updateData.Provider != "memobase" && updateData.Provider != "mem0" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider必须是memobase或mem0"})
+	if updateData.Provider != "memobase" && updateData.Provider != "mem0" && updateData.Provider != "memos" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider必须是memobase、mem0或memos"})
 		return
 	}
 
@@ -3795,7 +4656,7 @@ func (ac *AdminController) SetDefaultMemoryConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "设置默认Memory配置成功", "data": config})
 }
 
-// generateMCPToken 生成包含智能体ID、用户ID和签发时间的JWT Token
+// generateMCPToken 生成稳定的MCP JWT Token（同一agentID+userID下保持不变）
 func generateMCPToken(agentID string, userID uint) (string, error) {
 	// 创建自定义的JWT Claims
 	type MCPClaims struct {
@@ -3809,17 +4670,14 @@ func generateMCPToken(agentID string, userID uint) (string, error) {
 	// 构建endpointId
 	endpointID := fmt.Sprintf("agent_%s", agentID)
 
-	// 创建JWT claims
+	// 创建JWT claims。
+	// 不设置iat/exp，保证token长期有效且同一agentID+userID生成结果稳定一致。
 	claims := MCPClaims{
-		UserID:     userID,
-		AgentID:    agentID,
-		EndpointID: endpointID,
-		Purpose:    "mcp-endpoint",
-		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt: jwt.NewNumericDate(time.Now()),
-			// 设置24小时过期时间
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		},
+		UserID:           userID,
+		AgentID:          agentID,
+		EndpointID:       endpointID,
+		Purpose:          "mcp-endpoint",
+		RegisteredClaims: jwt.RegisteredClaims{},
 	}
 
 	// 使用HS256算法生成JWT token
@@ -3833,4 +4691,626 @@ func generateMCPToken(agentID string, userID uint) (string, error) {
 	}
 
 	return tokenString, nil
+}
+
+// ==================== 新角色管理 API ====================
+
+// GetGlobalRolesNew 获取全局角色列表（仅 roles 表中的全局角色）
+func (ac *AdminController) GetGlobalRolesNew(c *gin.Context) {
+	var globalRoles []models.Role
+	if err := ac.DB.Where("user_id IS NULL AND role_type = ?", "global").
+		Order("sort_order ASC, id ASC").
+		Find(&globalRoles).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取全局角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": globalRoles})
+}
+
+// GetRolesNew 获取角色列表（全局角色 + 用户角色）
+// 管理员可以查看所有角色，普通用户只能查看全局角色和自己的角色
+func (ac *AdminController) GetRolesNew(c *gin.Context) {
+	// 从JWT中获取用户ID和角色
+	userID, exists := c.Get("user_id")
+	userRole, roleExists := c.Get("role")
+
+	// 查询全局角色
+	var globalRoles []models.Role
+	if err := ac.DB.Where("user_id IS NULL AND role_type = ?", "global").
+		Order("sort_order ASC, id ASC").
+		Find(&globalRoles).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取全局角色失败"})
+		return
+	}
+
+	// 查询用户角色
+	var userRoles []models.Role
+	if roleExists && userRole.(string) == "admin" {
+		// 管理员查看所有用户角色
+		if err := ac.DB.Where("role_type = ?", "user").
+			Order("created_at DESC").
+			Find(&userRoles).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户角色失败"})
+			return
+		}
+	} else if exists {
+		// 普通用户只查看自己的角色
+		if err := ac.DB.Where("user_id = ? AND role_type = ?", userID, "user").
+			Order("created_at DESC").
+			Find(&userRoles).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取用户角色失败"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"global_roles": globalRoles,
+			"user_roles":   userRoles,
+		},
+	})
+}
+
+// GetRoleNew 获取单个角色详情
+func (ac *AdminController) GetRoleNew(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var role models.Role
+
+	if err := ac.DB.First(&role, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "角色不存在"})
+		return
+	}
+	if strings.Contains(c.FullPath(), "/admin/roles/global/") && role.RoleType != "global" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该接口仅允许操作全局角色"})
+		return
+	}
+
+	// 权限检查：用户角色只能查看自己的角色
+	if role.UserID != nil {
+		userID, exists := c.Get("user_id")
+		userRole, roleExists := c.Get("role")
+
+		if roleExists && userRole.(string) != "admin" {
+			if exists && userID != nil {
+				uid := userID.(uint)
+				if uid != *role.UserID {
+					c.JSON(http.StatusForbidden, gin.H{"error": "无权访问此角色"})
+					return
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": role})
+}
+
+func normalizeRoleStatus(status string) string {
+	trimmed := strings.TrimSpace(status)
+	if trimmed == "" {
+		return "active"
+	}
+	return trimmed
+}
+
+// CreateRoleNew 创建角色（管理员创建全局角色，用户创建自己的角色）
+func (ac *AdminController) CreateRoleNew(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	userRole, roleExists := c.Get("role")
+
+	var role models.Role
+	if err := c.ShouldBindJSON(&role); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 设置角色类型和所属用户
+	if roleExists && userRole.(string) == "admin" {
+		// 管理员创建全局角色
+		role.RoleType = "global"
+		role.UserID = nil
+	} else if exists {
+		// 普通用户创建自己的角色
+		role.RoleType = "user"
+		uid := userID.(uint)
+		role.UserID = &uid
+		// 用户角色不能设为默认
+		role.IsDefault = false
+	} else {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权"})
+		return
+	}
+
+	// 验证必填字段
+	if role.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "角色名称不能为空"})
+		return
+	}
+	if role.Prompt == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "系统提示词不能为空"})
+		return
+	}
+
+	role.Status = normalizeRoleStatus(role.Status)
+	if role.Status != "active" && role.Status != "inactive" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "角色状态无效"})
+		return
+	}
+
+	// 如果设置为默认角色，先取消其他默认角色
+	if role.IsDefault && role.RoleType == "global" {
+		ac.DB.Model(&models.Role{}).
+			Where("role_type = ? AND is_default = ?", "global", true).
+			Update("is_default", false)
+	}
+
+	if err := ac.DB.Create(&role).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"data": role})
+}
+
+// UpdateRoleNew 更新角色
+func (ac *AdminController) UpdateRoleNew(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var role models.Role
+
+	if err := ac.DB.First(&role, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "角色不存在"})
+		return
+	}
+	if strings.Contains(c.FullPath(), "/admin/roles/global/") && role.RoleType != "global" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该接口仅允许操作全局角色"})
+		return
+	}
+
+	// 权限检查
+	userID, exists := c.Get("user_id")
+	userRole, roleExists := c.Get("role")
+
+	isAdmin := roleExists && userRole.(string) == "admin"
+	isOwner := false
+	if exists && role.UserID != nil {
+		if uid, ok := userID.(uint); ok {
+			isOwner = uid == *role.UserID
+		}
+	}
+
+	if !isAdmin && !isOwner {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权修改此角色"})
+		return
+	}
+
+	var updateData models.Role
+	if err := c.ShouldBindJSON(&updateData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 如果设置为默认角色，先取消其他默认角色
+	if updateData.IsDefault && role.RoleType == "global" {
+		ac.DB.Model(&models.Role{}).
+			Where("role_type = ? AND is_default = ? AND id != ?", "global", true, id).
+			Update("is_default", false)
+	}
+
+	// 更新字段
+	role.Name = updateData.Name
+	role.Description = updateData.Description
+	role.Prompt = updateData.Prompt
+	role.LLMConfigID = updateData.LLMConfigID
+	role.TTSConfigID = updateData.TTSConfigID
+	role.Voice = updateData.Voice
+	role.SortOrder = updateData.SortOrder
+
+	normalizedStatus := strings.TrimSpace(updateData.Status)
+	if normalizedStatus == "" {
+		normalizedStatus = role.Status
+	}
+	normalizedStatus = normalizeRoleStatus(normalizedStatus)
+	if normalizedStatus != "active" && normalizedStatus != "inactive" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "角色状态无效"})
+		return
+	}
+	role.Status = normalizedStatus
+
+	// 只有管理员可以修改默认标志和角色类型
+	if isAdmin {
+		role.IsDefault = updateData.IsDefault
+	}
+
+	if err := ac.DB.Save(&role).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": role})
+}
+
+// DeleteRoleNew 删除角色
+func (ac *AdminController) DeleteRoleNew(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var role models.Role
+
+	if err := ac.DB.First(&role, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "角色不存在"})
+		return
+	}
+	if strings.Contains(c.FullPath(), "/admin/roles/global/") && role.RoleType != "global" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该接口仅允许操作全局角色"})
+		return
+	}
+
+	// 权限检查
+	userID, exists := c.Get("user_id")
+	userRole, roleExists := c.Get("role")
+
+	isAdmin := roleExists && userRole.(string) == "admin"
+	isOwner := false
+	if exists && role.UserID != nil {
+		if uid, ok := userID.(uint); ok {
+			isOwner = uid == *role.UserID
+		}
+	}
+
+	if !isAdmin && !isOwner {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权删除此角色"})
+		return
+	}
+
+	// 检查是否有设备正在使用此角色
+	var deviceCount int64
+	ac.DB.Model(&models.Device{}).Where("role_id = ?", id).Count(&deviceCount)
+	if deviceCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("有 %d 个设备正在使用此角色，请先解除关联", deviceCount),
+		})
+		return
+	}
+
+	if err := ac.DB.Delete(&role).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+}
+
+// ToggleRoleStatus 切换角色状态（启用/禁用）
+func (ac *AdminController) ToggleRoleStatus(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var role models.Role
+
+	if err := ac.DB.First(&role, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "角色不存在"})
+		return
+	}
+	if strings.Contains(c.FullPath(), "/admin/roles/global/") && role.RoleType != "global" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该接口仅允许操作全局角色"})
+		return
+	}
+
+	// 权限检查
+	userID, exists := c.Get("user_id")
+	userRole, roleExists := c.Get("role")
+
+	isAdmin := roleExists && userRole.(string) == "admin"
+	isOwner := false
+	if exists && role.UserID != nil {
+		if uid, ok := userID.(uint); ok {
+			isOwner = uid == *role.UserID
+		}
+	}
+
+	if !isAdmin && !isOwner {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权修改此角色"})
+		return
+	}
+
+	// 切换状态
+	currentStatus := normalizeRoleStatus(role.Status)
+	if currentStatus == "active" {
+		role.Status = "inactive"
+	} else {
+		role.Status = "active"
+	}
+
+	if err := ac.DB.Save(&role).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新状态失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": role})
+}
+
+// SetDefaultRole 设置默认角色（仅全局角色）
+func (ac *AdminController) SetDefaultRole(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var role models.Role
+
+	if err := ac.DB.First(&role, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "角色不存在"})
+		return
+	}
+
+	// 只有全局角色可以设为默认
+	if role.RoleType != "global" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "只有全局角色可以设为默认"})
+		return
+	}
+
+	// 权限检查：只有管理员可以设置默认角色
+	userRole, roleExists := c.Get("role")
+	if !roleExists || userRole.(string) != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "只有管理员可以设置默认角色"})
+		return
+	}
+
+	// 先取消其他默认角色
+	ac.DB.Model(&models.Role{}).
+		Where("role_type = ? AND is_default = ?", "global", true).
+		Update("is_default", false)
+
+	// 设置当前角色为默认
+	role.IsDefault = true
+	if err := ac.DB.Save(&role).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "设置默认角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": role, "message": "已设为默认角色"})
+}
+
+type applyDeviceRoleRequest struct {
+	RoleID *uint `json:"role_id"`
+}
+
+type switchDeviceRoleByNameRequest struct {
+	RoleName string `json:"role_name"`
+}
+
+func normalizeRoleNameForMatch(name string) string {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.ReplaceAll(normalized, " ", "")
+	return normalized
+}
+
+func calcRoleMatchScore(requestedRoleName string, candidateRoleName string) (int, string) {
+	reqCompact := normalizeRoleNameForMatch(requestedRoleName)
+	candCompact := normalizeRoleNameForMatch(candidateRoleName)
+	if reqCompact == "" || candCompact == "" {
+		return -1, ""
+	}
+
+	if reqCompact == candCompact {
+		return 1000, "exact"
+	}
+
+	if strings.Contains(candCompact, reqCompact) || strings.Contains(reqCompact, candCompact) {
+		score := 700 - absInt(len(candCompact)-len(reqCompact))
+		if strings.HasPrefix(candCompact, reqCompact) || strings.HasPrefix(reqCompact, candCompact) {
+			score += 50
+		}
+		return score, "fuzzy"
+	}
+
+	reqRaw := strings.ToLower(strings.TrimSpace(requestedRoleName))
+	candRaw := strings.ToLower(strings.TrimSpace(candidateRoleName))
+	if reqRaw != "" && candRaw != "" && (strings.Contains(candRaw, reqRaw) || strings.Contains(reqRaw, candRaw)) {
+		score := 600 - absInt(len(candRaw)-len(reqRaw))
+		return score, "fuzzy"
+	}
+
+	return -1, ""
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func matchDeviceRoleByName(requestedRoleName string, roles []models.Role) (*models.Role, string) {
+	bestScore := -1
+	bestMatchType := ""
+	var bestRole *models.Role
+
+	for i := range roles {
+		role := &roles[i]
+		if normalizeRoleStatus(role.Status) != "active" {
+			continue
+		}
+
+		score, matchType := calcRoleMatchScore(requestedRoleName, role.Name)
+		if score > bestScore {
+			bestScore = score
+			bestMatchType = matchType
+			bestRole = role
+		}
+	}
+
+	if bestScore < 0 {
+		return nil, ""
+	}
+	return bestRole, bestMatchType
+}
+
+func getRequestUserInfo(c *gin.Context) (uint, bool, bool) {
+	var uid uint
+	userID, hasUserID := c.Get("user_id")
+	if hasUserID {
+		if v, ok := userID.(uint); ok {
+			uid = v
+		}
+	}
+
+	roleVal, hasRole := c.Get("role")
+	isAdmin := hasRole && roleVal == "admin"
+	return uid, hasUserID, isAdmin
+}
+
+// ApplyRoleToDevice 应用角色到设备（普通用户可操作自己的设备）
+func (ac *AdminController) ApplyRoleToDevice(c *gin.Context) {
+	deviceID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || deviceID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的设备ID"})
+		return
+	}
+
+	var req applyDeviceRoleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var device models.Device
+	if err := ac.DB.First(&device, deviceID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在"})
+		return
+	}
+
+	uid, hasUserID, isAdmin := getRequestUserInfo(c)
+	if !isAdmin {
+		if !hasUserID || device.UserID != uid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权操作该设备"})
+			return
+		}
+	}
+
+	if req.RoleID != nil {
+		var role models.Role
+		if err := ac.DB.First(&role, *req.RoleID).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "角色不存在"})
+			return
+		}
+
+		roleStatus := normalizeRoleStatus(role.Status)
+		if roleStatus != "active" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "角色未启用"})
+			return
+		}
+		if role.Status == "" {
+			if err := ac.DB.Model(&role).Update("status", roleStatus).Error; err != nil {
+				log.Printf("更新角色默认状态失败: role_id=%d err=%v", role.ID, err)
+			}
+		}
+
+		// 普通用户只允许使用全局角色或自己的用户角色
+		if !isAdmin {
+			if role.RoleType != "global" {
+				if role.UserID == nil || *role.UserID != uid {
+					c.JSON(http.StatusForbidden, gin.H{"error": "无权使用该角色"})
+					return
+				}
+			}
+		}
+	}
+
+	device.RoleID = req.RoleID
+	if err := ac.DB.Save(&device).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "应用角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"device_id": device.ID,
+			"role_id":   device.RoleID,
+		},
+	})
+}
+
+// SwitchDeviceRoleByNameInternal 内部接口：按角色名称（模糊匹配）切换设备角色
+func (ac *AdminController) SwitchDeviceRoleByNameInternal(c *gin.Context) {
+	deviceName := strings.TrimSpace(c.Param("device_name"))
+	if deviceName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "设备名称不能为空"})
+		return
+	}
+
+	var req switchDeviceRoleByNameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.RoleName = strings.TrimSpace(req.RoleName)
+	if req.RoleName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role_name 不能为空"})
+		return
+	}
+
+	var device models.Device
+	if err := ac.DB.Where("device_name = ?", deviceName).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在"})
+		return
+	}
+
+	var roles []models.Role
+	if err := ac.DB.
+		Where("(role_type = ? OR (role_type = ? AND user_id = ?))", "global", "user", device.UserID).
+		Order("sort_order ASC, id ASC").
+		Find(&roles).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询角色失败"})
+		return
+	}
+
+	matchedRole, matchType := matchDeviceRoleByName(req.RoleName, roles)
+	if matchedRole == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":               "未找到匹配的角色",
+			"requested_role_name": req.RoleName,
+		})
+		return
+	}
+
+	roleID := matchedRole.ID
+	device.RoleID = &roleID
+	if err := ac.DB.Save(&device).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "切换设备角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"device_id":           device.ID,
+			"device_name":         device.DeviceName,
+			"role_id":             device.RoleID,
+			"role_name":           matchedRole.Name,
+			"role_type":           matchedRole.RoleType,
+			"requested_role_name": req.RoleName,
+			"match_type":          matchType,
+		},
+	})
+}
+
+// RestoreDeviceDefaultRoleInternal 内部接口：恢复设备默认角色（清空设备绑定角色）
+func (ac *AdminController) RestoreDeviceDefaultRoleInternal(c *gin.Context) {
+	deviceName := strings.TrimSpace(c.Param("device_name"))
+	if deviceName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "设备名称不能为空"})
+		return
+	}
+
+	var device models.Device
+	if err := ac.DB.Where("device_name = ?", deviceName).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在"})
+		return
+	}
+
+	device.RoleID = nil
+	if err := ac.DB.Save(&device).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "恢复默认角色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"device_id":   device.ID,
+			"device_name": device.DeviceName,
+			"role_id":     device.RoleID,
+		},
+	})
 }

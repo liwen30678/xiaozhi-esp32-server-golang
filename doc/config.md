@@ -15,7 +15,7 @@
 - **mqtt_server**：内置 MQTT 服务器参数（可选 TLS）。
 - **udp**：UDP 服务器相关参数。
 - **vad**：语音活动检测（VAD）相关配置，支持 webrtc_vad/silero_vad。
-- **asr**：自动语音识别（ASR）配置，支持 funasr。
+- **asr**：自动语音识别（ASR）配置，支持 funasr / aliyun_funasr / doubao。
 - **tts**：语音合成（TTS）配置，支持多种引擎（doubao, edge, xiaozhi等）。
 - **llm**：大语言模型（LLM）配置，支持多种 OpenAI 兼容模型。
 - **vision**：视觉模型相关配置。
@@ -116,24 +116,35 @@ vad:
     model_path: "config/models/vad/silero_vad.onnx"
     threshold: 0.5
     min_silence_duration_ms: 100
-    sample_rate: 16000
+    sample_rate: 16000     # only 16000
     channels: 1
     pool_size: 10
     acquire_timeout_ms: 3000
 
 # 自动语音识别（ASR）配置
 asr:
-  provider: "funasr"
+  provider: "funasr"  # funasr / aliyun_funasr / doubao
   funasr:
     host: "127.0.0.1"
     port: "10096"
     mode: "offline"
-    sample_rate: 16000
+    sample_rate: 16000     # only 16000
     chunk_size: [5, 10, 5]
     chunk_interval: 10
     max_connections: 5
     timeout: 30
     auto_end: true  # 是否自动结束
+
+  # Aliyun FunASR
+  aliyun_funasr:
+    api_key: ""
+    ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
+    model: "fun-asr-realtime"
+    format: "pcm"
+    sample_rate: 16000     # only 16000
+    vocabulary_id: ""
+    disfluency_removal_enabled: false
+    timeout: 30
 
 # 语音合成（TTS）配置
 tts:
@@ -169,7 +180,7 @@ tts:
   edge_offline:
     server_url: "ws://localhost:8080/tts"
     timeout: 30
-    sample_rate: 16000
+    sample_rate: 16000     # only 16000
     channels: 1
     frame_duration: 20
   xiaozhi:

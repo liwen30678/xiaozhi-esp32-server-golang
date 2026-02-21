@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"xiaozhi/manager/backend/models"
@@ -19,8 +20,60 @@ import (
 type UserController struct {
 	DB                  *gorm.DB
 	WebSocketController interface {
-		RequestMcpToolsFromClient(ctx context.Context, agentID string) ([]string, error)
+		RequestMcpToolDetailsFromClient(ctx context.Context, agentID string) ([]MCPTool, error)
+		RequestDeviceMcpToolDetailsFromClient(ctx context.Context, deviceID string) ([]MCPTool, error)
+		CallMcpToolFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error)
 		InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool) error
+	}
+}
+
+// UserConfigResponse 普通用户可见的配置响应（不包含 json_data 等敏感字段）
+type UserConfigResponse struct {
+	ID        uint      `json:"id"`
+	Type      string    `json:"type"`
+	Name      string    `json:"name"`
+	ConfigID  string    `json:"config_id"`
+	Provider  string    `json:"provider"`
+	Enabled   bool      `json:"enabled"`
+	IsDefault bool      `json:"is_default"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func toUserConfigResponse(cfg *models.Config) *UserConfigResponse {
+	if cfg == nil {
+		return nil
+	}
+
+	return &UserConfigResponse{
+		ID:        cfg.ID,
+		Type:      cfg.Type,
+		Name:      cfg.Name,
+		ConfigID:  cfg.ConfigID,
+		Provider:  cfg.Provider,
+		Enabled:   cfg.Enabled,
+		IsDefault: cfg.IsDefault,
+		CreatedAt: cfg.CreatedAt,
+		UpdatedAt: cfg.UpdatedAt,
+	}
+}
+
+func toUserConfigResponseList(configs []models.Config) []UserConfigResponse {
+	result := make([]UserConfigResponse, 0, len(configs))
+	for i := range configs {
+		result = append(result, *toUserConfigResponse(&configs[i]))
+	}
+	return result
+}
+
+func normalizeMemoryMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "none":
+		return "none"
+	case "long":
+		return "long"
+	default:
+		return "short"
 	}
 }
 
@@ -198,8 +251,9 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 	// 手动加载关联的配置信息
 	type AgentWithConfigs struct {
 		models.Agent
-		LLMConfig *models.Config `json:"llm_config,omitempty"`
-		TTSConfig *models.Config `json:"tts_config,omitempty"`
+		LLMConfig        *UserConfigResponse `json:"llm_config,omitempty"`
+		TTSConfig        *UserConfigResponse `json:"tts_config,omitempty"`
+		KnowledgeBaseIDs []uint              `json:"knowledge_base_ids,omitempty"`
 	}
 
 	var result []AgentWithConfigs
@@ -210,7 +264,7 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 		if agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
 			var llmConfig models.Config
 			if err := uc.DB.Where("config_id = ? AND type = ?", *agent.LLMConfigID, "llm").First(&llmConfig).Error; err == nil {
-				agentWithConfig.LLMConfig = &llmConfig
+				agentWithConfig.LLMConfig = toUserConfigResponse(&llmConfig)
 			}
 		}
 
@@ -218,8 +272,11 @@ func (uc *UserController) GetAgents(c *gin.Context) {
 		if agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
 			var ttsConfig models.Config
 			if err := uc.DB.Where("config_id = ? AND type = ?", *agent.TTSConfigID, "tts").First(&ttsConfig).Error; err == nil {
-				agentWithConfig.TTSConfig = &ttsConfig
+				agentWithConfig.TTSConfig = toUserConfigResponse(&ttsConfig)
 			}
+		}
+		if ids, err := uc.listAgentKnowledgeBaseIDs(agent.ID); err == nil {
+			agentWithConfig.KnowledgeBaseIDs = ids
 		}
 
 		result = append(result, agentWithConfig)
@@ -232,12 +289,15 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var req struct {
-		Name         string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt string  `json:"custom_prompt"`
-		LLMConfigID  *string `json:"llm_config_id"`
-		TTSConfigID  *string `json:"tts_config_id"`
-		Voice        *string `json:"voice"`
-		ASRSpeed     string  `json:"asr_speed"`
+		Name             string  `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt     string  `json:"custom_prompt"`
+		LLMConfigID      *string `json:"llm_config_id"`
+		TTSConfigID      *string `json:"tts_config_id"`
+		Voice            *string `json:"voice"`
+		ASRSpeed         string  `json:"asr_speed"`
+		MemoryMode       string  `json:"memory_mode"`
+		MCPServiceNames  string  `json:"mcp_service_names"`
+		KnowledgeBaseIDs []uint  `json:"knowledge_base_ids"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -249,24 +309,41 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 	if req.ASRSpeed == "" {
 		req.ASRSpeed = "normal"
 	}
+	req.MemoryMode = normalizeMemoryMode(req.MemoryMode)
+	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := uc.validateKnowledgeBaseOwnership(userID.(uint), req.KnowledgeBaseIDs); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	agent := models.Agent{
-		UserID:       userID.(uint),
-		Name:         req.Name,
-		CustomPrompt: req.CustomPrompt,
-		LLMConfigID:  req.LLMConfigID,
-		TTSConfigID:  req.TTSConfigID,
-		Voice:        req.Voice,
-		ASRSpeed:     req.ASRSpeed,
-		Status:       "active",
+		UserID:          userID.(uint),
+		Name:            req.Name,
+		CustomPrompt:    req.CustomPrompt,
+		LLMConfigID:     req.LLMConfigID,
+		TTSConfigID:     req.TTSConfigID,
+		Voice:           req.Voice,
+		ASRSpeed:        req.ASRSpeed,
+		MemoryMode:      req.MemoryMode,
+		MCPServiceNames: normalizedMCPServiceNames,
+		Status:          "active",
 	}
 
 	if err := uc.DB.Create(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建智能体失败"})
 		return
 	}
+	if err := uc.updateAgentKnowledgeBaseLinks(agent.ID, req.KnowledgeBaseIDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体知识库关联失败"})
+		return
+	}
 
-	c.JSON(http.StatusCreated, gin.H{"success": true, "data": agent})
+	c.JSON(http.StatusCreated, gin.H{"success": true, "data": gin.H{"agent": agent, "knowledge_base_ids": uniqueUintSlice(req.KnowledgeBaseIDs)}})
 }
 
 func (uc *UserController) GetAgent(c *gin.Context) {
@@ -282,8 +359,9 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	// 手动加载关联的配置信息
 	type AgentWithConfigs struct {
 		models.Agent
-		LLMConfig *models.Config `json:"llm_config,omitempty"`
-		TTSConfig *models.Config `json:"tts_config,omitempty"`
+		LLMConfig        *UserConfigResponse `json:"llm_config,omitempty"`
+		TTSConfig        *UserConfigResponse `json:"tts_config,omitempty"`
+		KnowledgeBaseIDs []uint              `json:"knowledge_base_ids,omitempty"`
 	}
 
 	result := AgentWithConfigs{Agent: agent}
@@ -292,7 +370,7 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	if agent.LLMConfigID != nil && *agent.LLMConfigID != "" {
 		var llmConfig models.Config
 		if err := uc.DB.Where("config_id = ? AND type = ?", *agent.LLMConfigID, "llm").First(&llmConfig).Error; err == nil {
-			result.LLMConfig = &llmConfig
+			result.LLMConfig = toUserConfigResponse(&llmConfig)
 		}
 	}
 
@@ -300,8 +378,11 @@ func (uc *UserController) GetAgent(c *gin.Context) {
 	if agent.TTSConfigID != nil && *agent.TTSConfigID != "" {
 		var ttsConfig models.Config
 		if err := uc.DB.Where("config_id = ? AND type = ?", *agent.TTSConfigID, "tts").First(&ttsConfig).Error; err == nil {
-			result.TTSConfig = &ttsConfig
+			result.TTSConfig = toUserConfigResponse(&ttsConfig)
 		}
+	}
+	if ids, err := uc.listAgentKnowledgeBaseIDs(agent.ID); err == nil {
+		result.KnowledgeBaseIDs = ids
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": result})
@@ -318,12 +399,15 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	}
 
 	var req struct {
-		Name         string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt string  `json:"custom_prompt"`
-		LLMConfigID  *string `json:"llm_config_id"`
-		TTSConfigID  *string `json:"tts_config_id"`
-		Voice        *string `json:"voice"`
-		ASRSpeed     string  `json:"asr_speed"`
+		Name             string  `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt     string  `json:"custom_prompt"`
+		LLMConfigID      *string `json:"llm_config_id"`
+		TTSConfigID      *string `json:"tts_config_id"`
+		Voice            *string `json:"voice"`
+		ASRSpeed         string  `json:"asr_speed"`
+		MemoryMode       *string `json:"memory_mode"`
+		MCPServiceNames  string  `json:"mcp_service_names"`
+		KnowledgeBaseIDs []uint  `json:"knowledge_base_ids"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -343,13 +427,32 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	} else {
 		agent.ASRSpeed = "normal"
 	}
+	if req.MemoryMode != nil {
+		agent.MemoryMode = normalizeMemoryMode(*req.MemoryMode)
+	} else if strings.TrimSpace(agent.MemoryMode) == "" {
+		agent.MemoryMode = "short"
+	}
+	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent.MCPServiceNames = normalizedMCPServiceNames
 
 	if err := uc.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})
 		return
 	}
+	if err := uc.validateKnowledgeBaseOwnership(userID.(uint), req.KnowledgeBaseIDs); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := uc.updateAgentKnowledgeBaseLinks(agent.ID, req.KnowledgeBaseIDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体知识库关联失败"})
+		return
+	}
 
-	c.JSON(http.StatusOK, gin.H{"data": agent})
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"agent": agent, "knowledge_base_ids": uniqueUintSlice(req.KnowledgeBaseIDs)}})
 }
 
 func (uc *UserController) DeleteAgent(c *gin.Context) {
@@ -366,6 +469,7 @@ func (uc *UserController) DeleteAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除智能体失败"})
 		return
 	}
+	_ = uc.DB.Where("agent_id = ?", agent.ID).Delete(&models.AgentKnowledgeBase{}).Error
 
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
@@ -490,14 +594,14 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider参数必填"})
 		return
 	}
+	configID := c.Query("config_id")
 
+	var systemVoices []VoiceOption
 	// 特殊处理：阿里云千问，根据配置中的模型过滤音色
 	if provider == "aliyun_qwen" {
-		configID := c.Query("config_id")
 		// 如果没有提供 config_id，则返回不区分模型的基础音色列表（用于管理员配置页等场景）
 		if configID == "" {
-			voices := GetVoiceOptionsByProvider("aliyun_qwen")
-			c.JSON(http.StatusOK, gin.H{"data": voices})
+			systemVoices = GetVoiceOptionsByProvider("aliyun_qwen")
 		} else {
 			// 查找对应的 TTS 配置（type=tts）
 			var cfg models.Config
@@ -518,15 +622,35 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 				qc.Model = "qwen3-tts-flash"
 			}
 
-			voices := GetAliyunQwenVoicesByModel(qc.Model)
-			c.JSON(http.StatusOK, gin.H{"data": voices})
+			systemVoices = GetAliyunQwenVoicesByModel(qc.Model)
 		}
-		return
+	} else {
+		// 其他 provider：根据provider获取固定音色列表
+		systemVoices = GetVoiceOptionsByProvider(provider)
 	}
 
-	// 其他 provider：根据provider获取固定音色列表
-	voices := GetVoiceOptionsByProvider(provider)
-	c.JSON(http.StatusOK, gin.H{"data": voices})
+	result := make([]VoiceOption, 0, len(systemVoices)+8)
+	if userID, ok := c.Get("user_id"); ok && configID != "" {
+		var clones []models.VoiceClone
+		if err := uc.DB.Where("user_id = ? AND provider = ? AND tts_config_id = ? AND status = ?", userID, provider, configID, "active").Order("created_at DESC").Find(&clones).Error; err == nil {
+			for _, clone := range clones {
+				result = append(result, BuildVoiceOptionForClone(clone))
+			}
+		}
+	}
+
+	seen := make(map[string]bool)
+	for _, v := range result {
+		seen[v.Value] = true
+	}
+	for _, v := range systemVoices {
+		if seen[v.Value] {
+			continue
+		}
+		result = append(result, v)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
 // 获取LLM配置列表
@@ -538,7 +662,7 @@ func (uc *UserController) GetLLMConfigs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": configs})
+	c.JSON(http.StatusOK, gin.H{"data": toUserConfigResponseList(configs)})
 }
 
 // 获取TTS配置列表
@@ -550,7 +674,123 @@ func (uc *UserController) GetTTSConfigs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": configs})
+	c.JSON(http.StatusOK, gin.H{"data": toUserConfigResponseList(configs)})
+}
+
+// GetDeviceMcpTools 获取设备维度MCP工具列表（用户版本）
+func (uc *UserController) GetDeviceMcpTools(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	deviceID := c.Param("id")
+	if deviceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "device_id parameter is required"})
+		return
+	}
+
+	var device models.Device
+	if err := uc.DB.Where("id = ? AND user_id = ?", deviceID, userID).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在或不属于当前用户"})
+		return
+	}
+
+	tools, err := uc.WebSocketController.RequestDeviceMcpToolDetailsFromClient(context.Background(), device.DeviceName)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": []interface{}{}}})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": tools}})
+}
+
+// CallAgentMcpTool 调用智能体维度MCP工具（用户版本）
+func (uc *UserController) CallAgentMcpTool(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	agentID := c.Param("id")
+
+	var req struct {
+		ToolName  string                 `json:"tool_name" binding:"required"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	var agent models.Agent
+	if err := uc.DB.Where("id = ? AND user_id = ?", agentID, userID).First(&agent).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "智能体不存在或不属于当前用户"})
+		return
+	}
+
+	body := map[string]interface{}{
+		"agent_id":  agentID,
+		"tool_name": req.ToolName,
+		"arguments": req.Arguments,
+	}
+	result, err := uc.WebSocketController.CallMcpToolFromClient(context.Background(), body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "调用MCP工具失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+func (uc *UserController) GetAgentMCPServiceOptions(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	id := c.Param("id")
+
+	var agent models.Agent
+	if err := uc.DB.Where("id = ? AND user_id = ?", id, userID).First(&agent).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "智能体不存在"})
+		return
+	}
+
+	options, err := listEnabledGlobalMCPServiceNames(uc.DB)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取MCP服务选项失败: %v", err)})
+		return
+	}
+
+	normalized := normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"options":           options,
+		"selected":          splitMCPServiceNames(normalized),
+		"mcp_service_names": normalized,
+	}})
+}
+
+// CallDeviceMcpTool 调用设备维度MCP工具（用户版本）
+func (uc *UserController) CallDeviceMcpTool(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	deviceID := c.Param("id")
+
+	var req struct {
+		ToolName  string                 `json:"tool_name" binding:"required"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	var device models.Device
+	if err := uc.DB.Where("id = ? AND user_id = ?", deviceID, userID).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "设备不存在或不属于当前用户"})
+		return
+	}
+
+	body := map[string]interface{}{
+		"device_id": device.DeviceName,
+		"tool_name": req.ToolName,
+		"arguments": req.Arguments,
+	}
+	result, err := uc.WebSocketController.CallMcpToolFromClient(context.Background(), body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "调用MCP工具失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
 // GetAgentMCPEndpoint 获取智能体的MCP接入点URL（用户版本）
@@ -631,4 +871,18 @@ func (uc *UserController) GetDashboardStats(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, stats)
+}
+
+func (uc *UserController) updateAgentKnowledgeBaseLinks(agentID uint, knowledgeBaseIDs []uint) error {
+	return uc.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("agent_id = ?", agentID).Delete(&models.AgentKnowledgeBase{}).Error; err != nil {
+			return err
+		}
+		for _, kbID := range uniqueUintSlice(knowledgeBaseIDs) {
+			if err := tx.Create(&models.AgentKnowledgeBase{AgentID: agentID, KnowledgeBaseID: kbID}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

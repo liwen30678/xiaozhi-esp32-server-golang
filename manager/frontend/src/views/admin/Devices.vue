@@ -53,10 +53,13 @@
           {{ new Date(row.created_at).toLocaleString() }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200">
+      <el-table-column label="操作" width="300">
         <template #default="{ row }">
           <el-button size="small" @click="editDevice(row)">
             编辑
+          </el-button>
+          <el-button size="small" type="primary" @click="showDeviceMcp(row)">
+            MCP
           </el-button>
           <el-button size="small" type="danger" @click="deleteDevice(row)">
             删除
@@ -66,6 +69,38 @@
     </el-table>
 
     <!-- 添加/编辑设备对话框 -->
+
+    <el-dialog v-model="showMcpDialog" title="设备MCP工具" width="760px">
+      <div v-loading="mcpLoading">
+        <div class="mcp-tools-header">
+          <el-button size="small" type="primary" @click="refreshDeviceMcpTools" :loading="toolsLoading">刷新工具列表</el-button>
+        </div>
+
+        <div v-if="mcpTools.length === 0" class="tools-empty">暂无工具数据</div>
+        <div v-else class="tools-tags">
+          <el-tag v-for="tool in mcpTools" :key="tool.name" class="tool-tag">{{ tool.name }}</el-tag>
+        </div>
+
+        <el-divider />
+
+        <el-form :model="mcpCallForm" label-width="90px">
+          <el-form-item label="工具">
+            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width:100%" @change="handleMcpToolChange">
+              <el-option v-for="tool in mcpTools" :key="tool.name" :label="tool.name" :value="tool.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参数JSON">
+            <el-input v-model="mcpCallForm.argumentsText" type="textarea" :rows="6" placeholder='例如: {"query":"hello"}' />
+          </el-form-item>
+        </el-form>
+
+        <el-button type="primary" @click="callDeviceMcpTool" :loading="callingTool">调用工具</el-button>
+
+        <el-divider />
+        <div class="endpoint-content">{{ mcpCallResult || '暂无调用结果' }}</div>
+      </div>
+    </el-dialog>
+
     <el-dialog
       v-model="showAddDialog"
       :title="editingDevice ? '编辑设备' : '添加设备'"
@@ -126,6 +161,15 @@ const showAddDialog = ref(false)
 const editingDevice = ref(null)
 const saving = ref(false)
 const deviceFormRef = ref()
+
+const showMcpDialog = ref(false)
+const mcpLoading = ref(false)
+const toolsLoading = ref(false)
+const callingTool = ref(false)
+const currentDeviceId = ref(null)
+const mcpTools = ref([])
+const mcpCallResult = ref('')
+const mcpCallForm = ref({ tool_name: '', argumentsText: '{}' })
 const authStore = useAuthStore()
 
 const deviceForm = ref({
@@ -298,6 +342,104 @@ const deleteDevice = async (device) => {
   }
 }
 
+
+
+const showDeviceMcp = async (device) => {
+  currentDeviceId.value = device.id
+  showMcpDialog.value = true
+  mcpLoading.value = true
+  mcpCallResult.value = ''
+  mcpCallForm.value = { tool_name: '', argumentsText: '{}' }
+  try {
+    await refreshDeviceMcpTools()
+  } finally {
+    mcpLoading.value = false
+  }
+}
+
+const refreshDeviceMcpTools = async () => {
+  if (!currentDeviceId.value) return
+  toolsLoading.value = true
+  try {
+    const response = await api.get(`/admin/devices/${currentDeviceId.value}/mcp-tools`)
+    mcpTools.value = response.data.data?.tools || []
+    if (!mcpCallForm.value.tool_name && mcpTools.value.length > 0) {
+      mcpCallForm.value.tool_name = mcpTools.value[0].name
+    }
+  } catch (error) {
+    ElMessage.error('获取设备MCP工具失败')
+    mcpTools.value = []
+  } finally {
+    toolsLoading.value = false
+  }
+}
+
+
+
+const buildExampleFromSchema = (schema = {}) => {
+  if (!schema || typeof schema !== 'object') return {}
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0]
+
+  const type = schema.type || 'object'
+  if (type === 'object') {
+    const props = schema.properties || {}
+    const result = {}
+    Object.keys(props).sort().forEach((key) => {
+      result[key] = buildExampleFromSchema(props[key])
+    })
+    return result
+  }
+  if (type === 'array') {
+    return [buildExampleFromSchema(schema.items || {})]
+  }
+  if (type === 'number') return 0.1
+  if (type === 'integer') return 0
+  if (type === 'boolean') return false
+  return ''
+}
+
+const updateMcpExampleByTool = (toolName) => {
+  const selectedTool = mcpTools.value.find(item => item.name === toolName)
+  if (!selectedTool) return
+
+  const example = buildExampleFromSchema(selectedTool.input_schema || {})
+  mcpCallForm.value.argumentsText = JSON.stringify(example ?? {}, null, 2)
+}
+
+const handleMcpToolChange = (toolName) => {
+  updateMcpExampleByTool(toolName)
+}
+
+const callDeviceMcpTool = async () => {
+  if (!currentDeviceId.value || !mcpCallForm.value.tool_name) {
+    ElMessage.warning('请选择工具')
+    return
+  }
+
+  let argumentsObj = {}
+  try {
+    argumentsObj = mcpCallForm.value.argumentsText ? JSON.parse(mcpCallForm.value.argumentsText) : {}
+  } catch (e) {
+    ElMessage.error('参数JSON格式错误')
+    return
+  }
+
+  callingTool.value = true
+  try {
+    const response = await api.post(`/admin/devices/${currentDeviceId.value}/mcp-call`, {
+      tool_name: mcpCallForm.value.tool_name,
+      arguments: argumentsObj
+    })
+    mcpCallResult.value = JSON.stringify(response.data.data || {}, null, 2)
+    ElMessage.success('MCP工具调用成功')
+  } catch (error) {
+    mcpCallResult.value = JSON.stringify(error.response?.data || { error: error.message }, null, 2)
+    ElMessage.error('MCP工具调用失败')
+  } finally {
+    callingTool.value = false
+  }
+}
+
 const resetForm = () => {
   editingDevice.value = null
   deviceForm.value = {
@@ -354,4 +496,17 @@ onMounted(() => {
   display: flex;
   gap: 12px;
 }
+
+.tools-tags { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+.tools-empty { color:#909399; margin: 8px 0 16px; }
+.endpoint-content {
+  white-space: pre-wrap;
+  font-family: monospace;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 80px;
+}
+.mcp-tools-header { margin-bottom: 12px; }
 </style>

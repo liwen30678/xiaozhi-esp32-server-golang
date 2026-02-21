@@ -42,6 +42,13 @@
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="记忆模式" width="120">
+        <template #default="{ row }">
+          <el-tag :type="getMemoryModeType(row.memory_mode)">
+            {{ getMemoryModeText(row.memory_mode) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="status" label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.status === 'active' ? 'success' : 'info'">
@@ -110,6 +117,13 @@
             <el-option label="正常" value="normal" />
             <el-option label="耐心" value="patient" />
             <el-option label="快速" value="fast" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="记忆模式" prop="memory_mode">
+          <el-select v-model="agentForm.memory_mode" style="width: 100%">
+            <el-option label="无记忆" value="none" />
+            <el-option label="短记忆" value="short" />
+            <el-option label="长记忆" value="long" />
           </el-select>
         </el-form-item>
         <el-form-item label="状态" prop="status">
@@ -189,18 +203,33 @@
         />
         
         <div class="mcp-endpoint-display">
-          <div class="endpoint-label">MCP接入点URL：</div>
+          <div class="endpoint-header">
+            <div class="endpoint-label">MCP接入点URL：</div>
+            <el-button size="small" type="primary" @click="copyMCPEndpoint">复制URL</el-button>
+          </div>
           <div class="endpoint-content">
             {{ mcpEndpointData.endpoint }}
           </div>
         </div>
+
+        <el-divider />
+        <el-form :model="mcpCallForm" label-width="90px">
+          <el-form-item label="工具">
+            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width: 100%" @change="handleMcpToolChange">
+              <el-option v-for="tool in mcpTools" :key="tool.name" :label="tool.name" :value="tool.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参数JSON">
+            <el-input v-model="mcpCallForm.argumentsText" type="textarea" :rows="6" placeholder='例如: {"query":"hello"}' />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" @click="callAgentMcpTool" :loading="callingTool">调用工具</el-button>
+        <div class="endpoint-content" style="margin-top: 12px">{{ mcpCallResult || "暂无调用结果" }}</div>
+
       </div>
       
       <template #footer>
         <el-button @click="showMCPDialog = false">关闭</el-button>
-        <el-button type="primary" @click="copyMCPEndpoint">
-          复制URL
-        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -232,6 +261,9 @@ const mcpEndpointData = ref({
 const toolsLoading = ref(false)
 const mcpTools = ref([])
 const currentAgentId = ref(null)
+const callingTool = ref(false)
+const mcpCallResult = ref('')
+const mcpCallForm = ref({ tool_name: '', argumentsText: '{}' })
 
 const agentForm = ref({
   user_id: null,
@@ -240,6 +272,7 @@ const agentForm = ref({
   llm_config_id: null,
   tts_config_id: null,
   asr_speed: 'normal',
+  memory_mode: 'short',
   status: 'active'
 })
 
@@ -247,6 +280,7 @@ const agentRules = {
   user_id: [{ required: true, message: '请输入用户ID', trigger: 'blur' }],
   name: [{ required: true, message: '请输入智能体昵称', trigger: 'blur' }],
   asr_speed: [{ required: true, message: '请选择语音识别速度', trigger: 'change' }],
+  memory_mode: [{ required: true, message: '请选择记忆模式', trigger: 'change' }],
   status: [{ required: true, message: '请选择状态', trigger: 'change' }]
 }
 
@@ -298,6 +332,7 @@ const editAgent = (agent) => {
     llm_config_id: agent.llm_config_id,
     tts_config_id: agent.tts_config_id,
     asr_speed: agent.asr_speed || 'normal',
+    memory_mode: agent.memory_mode || 'short',
     status: agent.status
   }
   showAddDialog.value = true
@@ -361,6 +396,7 @@ const resetForm = () => {
     llm_config_id: null,
     tts_config_id: null,
     asr_speed: 'normal',
+    memory_mode: 'short',
     status: 'active'
   }
   
@@ -400,11 +436,31 @@ const getASRSpeedType = (speed) => {
   return typeMap[speed] || ''
 }
 
+const getMemoryModeText = (mode) => {
+  const modeMap = {
+    none: '无记忆',
+    short: '短记忆',
+    long: '长记忆'
+  }
+  return modeMap[mode] || '短记忆'
+}
+
+const getMemoryModeType = (mode) => {
+  const typeMap = {
+    none: 'info',
+    short: '',
+    long: 'success'
+  }
+  return typeMap[mode] || ''
+}
+
 // 显示MCP接入点
 const showMCPEndpoint = async (agent) => {
   showMCPDialog.value = true
   mcpLoading.value = true
   currentAgentId.value = agent.id
+  mcpCallResult.value = ""
+  mcpCallForm.value = { tool_name: "", argumentsText: "{}" }
   
   try {
     const response = await api.get(`/admin/agents/${agent.id}/mcp-endpoint`)
@@ -433,6 +489,12 @@ const refreshMcpTools = async () => {
     const response = await api.get(`/admin/agents/${currentAgentId.value}/mcp-tools`)
     if (response.data.data && response.data.data.tools) {
       mcpTools.value = response.data.data.tools
+      if (mcpTools.value.length > 0) {
+        if (!mcpCallForm.value.tool_name) {
+          mcpCallForm.value.tool_name = mcpTools.value[0].name
+        }
+        updateMcpExampleByTool(mcpCallForm.value.tool_name)
+      }
       ElMessage.success(`成功获取 ${mcpTools.value.length} 个工具`)
     } else {
       mcpTools.value = []
@@ -448,6 +510,74 @@ const refreshMcpTools = async () => {
 }
 
 
+
+
+
+
+
+const buildExampleFromSchema = (schema = {}) => {
+  if (!schema || typeof schema !== 'object') return {}
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0]
+
+  const type = schema.type || 'object'
+  if (type === 'object') {
+    const props = schema.properties || {}
+    const result = {}
+    Object.keys(props).sort().forEach((key) => {
+      result[key] = buildExampleFromSchema(props[key])
+    })
+    return result
+  }
+  if (type === 'array') {
+    return [buildExampleFromSchema(schema.items || {})]
+  }
+  if (type === 'number') return 0.1
+  if (type === 'integer') return 0
+  if (type === 'boolean') return false
+  return ''
+}
+
+const updateMcpExampleByTool = (toolName) => {
+  const selectedTool = mcpTools.value.find(item => item.name === toolName)
+  if (!selectedTool) return
+
+  const example = buildExampleFromSchema(selectedTool.input_schema || {})
+  mcpCallForm.value.argumentsText = JSON.stringify(example ?? {}, null, 2)
+}
+
+const handleMcpToolChange = (toolName) => {
+  updateMcpExampleByTool(toolName)
+}
+
+const callAgentMcpTool = async () => {
+  if (!currentAgentId.value || !mcpCallForm.value.tool_name) {
+    ElMessage.warning('请选择工具')
+    return
+  }
+
+  let argumentsObj = {}
+  try {
+    argumentsObj = mcpCallForm.value.argumentsText ? JSON.parse(mcpCallForm.value.argumentsText) : {}
+  } catch (e) {
+    ElMessage.error('参数JSON格式错误')
+    return
+  }
+
+  callingTool.value = true
+  try {
+    const response = await api.post(`/admin/agents/${currentAgentId.value}/mcp-call`, {
+      tool_name: mcpCallForm.value.tool_name,
+      arguments: argumentsObj
+    })
+    mcpCallResult.value = JSON.stringify(response.data.data || {}, null, 2)
+    ElMessage.success('MCP工具调用成功')
+  } catch (error) {
+    mcpCallResult.value = JSON.stringify(error.response?.data || { error: error.message }, null, 2)
+    ElMessage.error('MCP工具调用失败')
+  } finally {
+    callingTool.value = false
+  }
+}
 
 // 复制MCP接入点URL
 const copyMCPEndpoint = async () => {
@@ -496,6 +626,13 @@ onMounted(() => {
 
 .mcp-endpoint-display {
   margin: 20px 0;
+}
+
+.endpoint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
 .endpoint-label {

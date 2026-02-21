@@ -3,7 +3,9 @@
     <el-form-item label="提供商" prop="provider">
       <el-select v-model="model.provider" placeholder="请选择提供商" style="width: 100%" @change="onProviderChange">
         <el-option label="FunASR" value="funasr" />
+        <el-option label="Aliyun FunASR" value="aliyun_funasr" />
         <el-option label="豆包" value="doubao" />
+        <el-option label="Aliyun Qwen3" value="aliyun_qwen3" />
       </el-select>
     </el-form-item>
     <el-form-item label="配置名称" prop="name">
@@ -62,6 +64,40 @@
         </div>
       </el-form-item>
     </div>
+    <div v-if="model.provider === 'aliyun_funasr'">
+      <el-form-item label="API Key" prop="aliyun_funasr.api_key">
+        <el-input v-model="model.aliyun_funasr.api_key" type="password" show-password placeholder="可以为空，读取DASHSCOPE_API_KEY" />
+        <div class="form-tip">
+          <el-icon><InfoFilled /></el-icon>
+          可以为空，默认回退DASHSCOPE_API_KEY
+        </div>
+      </el-form-item>
+      <el-form-item label="WS URL" prop="aliyun_funasr.ws_url">
+        <el-input v-model="model.aliyun_funasr.ws_url" placeholder="wss://dashscope.aliyuncs.com/api-ws/v1/inference/" />
+      </el-form-item>
+      <el-form-item label="模型" prop="aliyun_funasr.model">
+        <el-input v-model="model.aliyun_funasr.model" placeholder="fun-asr-realtime" />
+      </el-form-item>
+      <el-form-item label="音频格式" prop="aliyun_funasr.format">
+        <el-select v-model="model.aliyun_funasr.format" placeholder="请选择格式" style="width: 100%">
+          <el-option label="pcm" value="pcm" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="采样率" prop="aliyun_funasr.sample_rate">
+        <el-select v-model="model.aliyun_funasr.sample_rate" placeholder="请选择采样率" style="width: 100%">
+          <el-option label="16000" :value="16000" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="词表ID" prop="aliyun_funasr.vocabulary_id">
+        <el-input v-model="model.aliyun_funasr.vocabulary_id" placeholder="可以为空" />
+      </el-form-item>
+      <el-form-item label="去口头语" prop="aliyun_funasr.disfluency_removal_enabled">
+        <el-switch v-model="model.aliyun_funasr.disfluency_removal_enabled" />
+      </el-form-item>
+      <el-form-item label="超时时间(秒)" prop="aliyun_funasr.timeout">
+        <el-input-number v-model="model.aliyun_funasr.timeout" :min="1" style="width: 100%" />
+      </el-form-item>
+    </div>
     <div v-if="model.provider === 'doubao'">
       <el-form-item label="应用ID" prop="doubao.appid">
         <el-input v-model="model.doubao.appid" placeholder="请输入应用ID" />
@@ -94,6 +130,56 @@
         <el-input-number v-model="model.doubao.timeout" :min="1" style="width: 100%" />
       </el-form-item>
     </div>
+    <div v-if="model.provider === 'aliyun_qwen3'">
+      <el-form-item label="API Key" prop="aliyun_qwen3.api_key">
+        <el-input v-model="model.aliyun_qwen3.api_key" type="password" show-password placeholder="可以为空，读取DASHSCOPE_API_KEY" />
+        <div class="form-tip">
+          <el-icon><InfoFilled /></el-icon>
+          可以为空，默认回退DASHSCOPE_API_KEY
+        </div>
+      </el-form-item>
+      <el-form-item label="WS URL" prop="aliyun_qwen3.ws_url">
+        <el-input v-model="model.aliyun_qwen3.ws_url" placeholder="wss://dashscope.aliyuncs.com/api-ws/v1/realtime" />
+      </el-form-item>
+      <el-form-item label="模型" prop="aliyun_qwen3.model">
+        <el-input v-model="model.aliyun_qwen3.model" placeholder="qwen3-asr-flash-realtime" />
+      </el-form-item>
+      <el-form-item label="音频格式" prop="aliyun_qwen3.format">
+        <el-select v-model="model.aliyun_qwen3.format" placeholder="请选择格式" style="width: 100%">
+          <el-option label="pcm" value="pcm" />
+          <el-option label="opus" value="opus" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="采样率" prop="aliyun_qwen3.sample_rate">
+        <el-select v-model="model.aliyun_qwen3.sample_rate" placeholder="请选择采样率" style="width: 100%">
+          <el-option label="8000" :value="8000" />
+          <el-option label="16000" :value="16000" />
+        </el-select>
+        <div class="form-tip">
+          <el-icon><InfoFilled /></el-icon>
+          主程序当前仅支持 16000
+        </div>
+      </el-form-item>
+      <el-form-item label="语言" prop="aliyun_qwen3.language">
+        <el-input v-model="model.aliyun_qwen3.language" placeholder="zh" />
+      </el-form-item>
+      <el-form-item label="自动结束" prop="aliyun_qwen3.auto_end">
+        <el-switch v-model="model.aliyun_qwen3.auto_end" />
+        <div class="form-tip">
+          <el-icon><InfoFilled /></el-icon>
+          开启时使用 server_vad，关闭时使用 Manual 模式
+        </div>
+      </el-form-item>
+      <el-form-item label="VAD 阈值" prop="aliyun_qwen3.vad_threshold" v-if="model.aliyun_qwen3?.auto_end">
+        <el-input-number v-model="model.aliyun_qwen3.vad_threshold" :min="0" :max="1" :step="0.1" :precision="2" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="VAD 静音时间(毫秒)" prop="aliyun_qwen3.vad_silence_ms" v-if="model.aliyun_qwen3?.auto_end">
+        <el-input-number v-model="model.aliyun_qwen3.vad_silence_ms" :min="0" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="超时时间(秒)" prop="aliyun_qwen3.timeout">
+        <el-input-number v-model="model.aliyun_qwen3.timeout" :min="1" style="width: 100%" />
+      </el-form-item>
+    </div>
   </el-form>
 </template>
 
@@ -123,7 +209,9 @@ function onProviderChange() {
 function getJsonData() {
   const m = props.model
   if (m.provider === 'funasr') return JSON.stringify(m.funasr || {})
+  if (m.provider === 'aliyun_funasr') return JSON.stringify(m.aliyun_funasr || {})
   if (m.provider === 'doubao') return JSON.stringify(m.doubao || {})
+  if (m.provider === 'aliyun_qwen3') return JSON.stringify(m.aliyun_qwen3 || {})
   return '{}'
 }
 

@@ -121,10 +121,28 @@ const routes = [
             meta: { title: 'MCP配置管理' }
           },
           {
+            path: 'mcp-market',
+            name: 'MCPMarket',
+            component: () => import('../views/admin/MCPMarket.vue'),
+            meta: { title: 'MCP市场' }
+          },
+          {
             path: 'memory-config',
             name: 'MemoryConfig',
             component: () => import('../views/admin/MemoryConfig.vue'),
             meta: { title: 'Memory配置管理' }
+          },
+          {
+            path: 'knowledge-search-config',
+            name: 'KnowledgeSearchConfig',
+            component: () => import('../views/admin/KnowledgeSearchConfig.vue'),
+            meta: { title: '知识库检索配置' }
+          },
+          {
+            path: 'chat-settings',
+            name: 'ChatSettings',
+            component: () => import('../views/admin/ChatSettings.vue'),
+            meta: { title: '聊天设置' }
           },
           {
             path: 'vision-config',
@@ -214,10 +232,28 @@ const routes = [
         meta: { title: '声纹管理' }
       },
       {
+        path: '/voice-clones',
+        name: 'VoiceClones',
+        component: () => import('../views/user/VoiceClones.vue'),
+        meta: { title: '声音复刻' }
+      },
+      {
         path: '/user/agents/:id/history',
         name: 'AgentHistory',
         component: () => import('../views/user/AgentHistory.vue'),
         meta: { title: '聊天历史记录' }
+      },
+      {
+        path: '/user/knowledge-bases',
+        name: 'UserKnowledgeBases',
+        component: () => import('../views/user/KnowledgeBases.vue'),
+        meta: { title: '我的知识库' }
+      },
+      {
+        path: 'user/roles',
+        name: 'UserRoles',
+        component: () => import('../views/user/Roles.vue'),
+        meta: { title: '我的角色' }
       }
     ]
   }

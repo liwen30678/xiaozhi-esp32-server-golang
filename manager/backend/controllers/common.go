@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 
@@ -11,7 +10,7 @@ import (
 
 // WebSocketControllerInterface 定义WebSocket控制器的接口
 type WebSocketControllerInterface interface {
-	RequestMcpToolsFromClient(ctx context.Context, agentID string) ([]string, error)
+	RequestMcpToolDetailsFromClient(ctx context.Context, agentID string) ([]MCPTool, error)
 }
 
 // GetAgentMcpToolsCommon 获取智能体MCP工具列表的公共函数
@@ -52,8 +51,8 @@ func GetAgentMcpToolsCommon(
 	// 创建上下文
 	ctx := context.Background()
 
-	// 调用RequestMcpToolsFromClient获取工具列表
-	toolNames, err := webSocketController.RequestMcpToolsFromClient(ctx, agentID)
+	// 获取工具详情（包含schema与样例）
+	tools, err := webSocketController.RequestMcpToolDetailsFromClient(ctx, agentID)
 	if err != nil {
 		log.Printf("获取MCP工具列表失败: %v", err)
 		// 如果获取失败，返回空列表而不是错误
@@ -61,18 +60,6 @@ func GetAgentMcpToolsCommon(
 		return
 	}
 
-	log.Printf("成功获取MCP工具列表: %v", toolNames)
-
-	// 将工具名称转换为前端期望的格式
-	var tools []gin.H
-	for _, toolName := range toolNames {
-		tools = append(tools, gin.H{
-			"name":        toolName,
-			"description": fmt.Sprintf("MCP工具: %s", toolName),
-			"schema":      true,
-		})
-	}
-
-	log.Printf("转换后的工具列表: %+v", tools)
+	log.Printf("成功获取MCP工具列表: count=%d", len(tools))
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": tools}})
 }

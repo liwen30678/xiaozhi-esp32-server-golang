@@ -172,6 +172,22 @@
             show-word-limit
           />
         </el-form-item>
+        <el-form-item label="我复刻的音色" v-if="cloneVoicePresets.length > 0">
+          <div class="clone-voice-line" v-loading="cloneVoicesLoading">
+            <button
+              v-for="clone in cloneVoicePresets"
+              :key="clone.id"
+              type="button"
+              class="clone-voice-item"
+              :class="{ active: isCloneVoiceSelected(clone) }"
+              :title="`${clone.tts_config_name || clone.tts_config_id} · ${clone.provider_voice_id}`"
+              @click="applyCloneVoice(clone)"
+            >
+              <span class="clone-voice-name">{{ clone.name || clone.provider_voice_id }}</span>
+            </button>
+          </div>
+          <div class="form-help">点击后会自动填充 TTS 配置和音色</div>
+        </el-form-item>
         <el-form-item label="TTS配置" prop="tts_config_id">
           <el-select
             v-model="groupForm.tts_config_id"
@@ -798,6 +814,8 @@ const groupRules = {
 // TTS配置相关
 const ttsConfigs = ref([])
 const currentVoiceOptions = ref([])
+const cloneVoicePresets = ref([])
+const cloneVoicesLoading = ref(false)
 
 // 上传表单
 const uploadForm = reactive({
@@ -880,6 +898,54 @@ const loadTtsConfigs = async () => {
   }
 }
 
+const normalizeCloneStatus = (clone) => {
+  const status = String(clone?.status || '').trim().toLowerCase()
+  const taskStatus = String(clone?.task_status || '').trim().toLowerCase()
+  if (status === 'failed' || taskStatus === 'failed') return 'failed'
+  if (status === 'active' || taskStatus === 'succeeded') return 'active'
+  if (taskStatus === 'queued' || taskStatus === 'processing') return taskStatus
+  if (status === 'queued' || status === 'processing') return status
+  return status || taskStatus || 'unknown'
+}
+
+const loadCloneVoicePresets = async () => {
+  cloneVoicesLoading.value = true
+  try {
+    const response = await api.get('/user/voice-clones')
+    const cloneList = response.data.data || []
+    cloneVoicePresets.value = cloneList
+      .filter(clone => normalizeCloneStatus(clone) === 'active')
+      .filter(clone => clone?.tts_config_id && clone?.provider_voice_id)
+      .map(clone => ({
+        id: clone.id,
+        name: clone.name || clone.provider_voice_id,
+        provider_voice_id: clone.provider_voice_id,
+        tts_config_id: clone.tts_config_id,
+        tts_config_name: clone.tts_config_name || ''
+      }))
+  } catch (error) {
+    console.error('加载复刻音色失败:', error)
+    cloneVoicePresets.value = []
+  } finally {
+    cloneVoicesLoading.value = false
+  }
+}
+
+const isCloneVoiceSelected = (clone) => {
+  return groupForm.tts_config_id === clone?.tts_config_id && groupForm.voice === clone?.provider_voice_id
+}
+
+const applyCloneVoice = async (clone) => {
+  if (!clone) return
+  const ttsConfig = ttsConfigs.value.find(config => config.config_id === clone.tts_config_id)
+  if (!ttsConfig) {
+    return
+  }
+  groupForm.tts_config_id = clone.tts_config_id
+  await handleTtsConfigChange(clone.tts_config_id)
+  groupForm.voice = clone.provider_voice_id
+}
+
 // TTS配置变化时，加载对应的音色选项
 const handleTtsConfigChange = async (configId) => {
   if (!configId) {
@@ -905,9 +971,8 @@ const handleTtsConfigChange = async (configId) => {
     currentVoiceOptions.value = response.data.data || []
   } catch (error) {
     console.error('加载音色列表失败:', error)
-    // 降级到本地提取
-    const jsonData = typeof config.json_data === 'string' ? JSON.parse(config.json_data) : config.json_data
-    currentVoiceOptions.value = extractVoiceOptions(config.provider, jsonData)
+    currentVoiceOptions.value = []
+    ElMessage.warning('加载音色列表失败，请稍后重试')
   }
 }
 
@@ -1060,14 +1125,15 @@ const handleSearch = () => {
 }
 
 // 创建声纹组
-const handleAddGroup = () => {
+const handleAddGroup = async () => {
   groupDialogMode.value = 'add'
   resetGroupForm()
+  await loadCloneVoicePresets()
   showGroupDialog.value = true
 }
 
 // 编辑声纹组
-const handleEditGroup = (group) => {
+const handleEditGroup = async (group) => {
   groupDialogMode.value = 'edit'
   currentGroup.value = group
   groupForm.agent_id = group.agent_id
@@ -1076,10 +1142,11 @@ const handleEditGroup = (group) => {
   groupForm.description = group.description || ''
   groupForm.tts_config_id = group.tts_config_id || null
   groupForm.voice = group.voice || null
+  await loadCloneVoicePresets()
   
   // 如果有TTS配置，加载对应的音色选项
   if (groupForm.tts_config_id) {
-    handleTtsConfigChange(groupForm.tts_config_id)
+    await handleTtsConfigChange(groupForm.tts_config_id)
   }
   
   showGroupDialog.value = true
@@ -2084,6 +2151,7 @@ onMounted(() => {
   loadAgents()
   loadSpeakerGroups()
   loadTtsConfigs()
+  loadCloneVoicePresets()
 })
 
 // 组件卸载前清理资源
@@ -2240,6 +2308,50 @@ onBeforeUnmount(() => {
 .file-size {
   color: #909399;
   font-size: 12px;
+}
+
+.clone-voice-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.clone-voice-item {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #374151;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 1.2;
+  outline: none;
+}
+
+.clone-voice-item:hover {
+  border-color: #93c5fd;
+  background: #f1f7ff;
+}
+
+.clone-voice-item.active {
+  border-color: #3b82f6;
+  background: #e9f2ff;
+  color: #1d4ed8;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.1);
+}
+
+.clone-voice-name {
+  font-size: 12px;
+  font-weight: 500;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 :deep(.el-upload-dragger) {

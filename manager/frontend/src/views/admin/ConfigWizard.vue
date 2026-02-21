@@ -243,6 +243,16 @@ const asrForm = reactive({
     timeout: 30,
     auto_end: false
   },
+  aliyun_funasr: {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/',
+    model: 'fun-asr-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    vocabulary_id: '',
+    disfluency_removal_enabled: false,
+    timeout: 30
+  },
   doubao: {
     appid: '',
     access_token: '',
@@ -254,19 +264,62 @@ const asrForm = reactive({
     enable_ddc: false,
     chunk_duration: 200,
     timeout: 30
+  },
+  aliyun_qwen3: {
+    api_key: '',
+    ws_url: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+    model: 'qwen3-asr-flash-realtime',
+    format: 'pcm',
+    sample_rate: 16000,
+    language: 'zh',
+    auto_end: true,
+    vad_threshold: 0.0,
+    vad_silence_ms: 400,
+    timeout: 30
   }
 })
 const asrFormRef = ref()
+const validateAliyunPcm = (rule, value, callback) => {
+  if (value !== 'pcm') {
+    callback(new Error('格式必须为pcm'))
+    return
+  }
+  callback()
+}
+const validateAliyun16000 = (rule, value, callback) => {
+  if (Number(value) !== 16000) {
+    callback(new Error('采样率必须为16000'))
+    return
+  }
+  callback()
+}
 const asrFormRules = {
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
   config_id: [{ required: true, message: '请输入配置ID', trigger: 'blur' }],
   provider: [{ required: true, message: '请选择提供商', trigger: 'change' }],
   'funasr.host': [{ required: true, message: '请输入主机地址', trigger: 'blur' }],
   'funasr.port': [{ required: true, message: '请输入端口', trigger: 'blur' }],
+  'aliyun_funasr.ws_url': [{ required: true, message: '请输入WS URL', trigger: 'blur' }],
+  'aliyun_funasr.model': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+  'aliyun_funasr.format': [
+    { required: true, message: '请选择音频格式', trigger: 'change' },
+    { validator: validateAliyunPcm, trigger: 'change' }
+  ],
+  'aliyun_funasr.sample_rate': [
+    { required: true, message: '请选择采样率', trigger: 'change' },
+    { validator: validateAliyun16000, trigger: 'change' }
+  ],
+  'aliyun_funasr.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }],
   'doubao.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
   'doubao.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
   'doubao.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
-  'doubao.model_name': [{ required: true, message: '请输入模型名称', trigger: 'blur' }]
+  'doubao.model_name': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+  'aliyun_qwen3.ws_url': [{ required: true, message: '请输入WS URL', trigger: 'blur' }],
+  'aliyun_qwen3.model': [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
+  'aliyun_qwen3.format': [{ required: true, message: '请选择音频格式', trigger: 'change' }],
+  'aliyun_qwen3.sample_rate': [{ required: true, message: '请选择采样率', trigger: 'change' }],
+  'aliyun_qwen3.language': [{ required: true, message: '请输入语言', trigger: 'blur' }],
+  'aliyun_qwen3.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
 }
 
 const llmForm = reactive({
@@ -718,6 +771,10 @@ async function loadAsrIfExists() {
     const data = JSON.parse(config.json_data || '{}')
     if (config.provider === 'doubao') {
       Object.assign(asrForm.doubao, data.doubao || data)
+    } else if (config.provider === 'aliyun_funasr') {
+      Object.assign(asrForm.aliyun_funasr, data.aliyun_funasr || data)
+    } else if (config.provider === 'aliyun_qwen3') {
+      Object.assign(asrForm.aliyun_qwen3, data.aliyun_qwen3 || data)
     } else {
       const obj = data.funasr || data
       const funasr = { ...asrForm.funasr }

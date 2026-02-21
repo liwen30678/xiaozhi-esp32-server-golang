@@ -14,6 +14,7 @@ import (
 	"time"
 
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
@@ -42,6 +43,13 @@ type contextKey int
 const (
 	ttsStopDelayDuration time.Duration = 200 * time.Millisecond
 	fullTextKey          contextKey    = iota
+)
+
+const (
+	interruptExtraKey      = "interrupt"
+	interruptByExtraKey    = "interrupt_by"
+	interruptStageExtraKey = "interrupt_stage"
+	interruptContentSuffix = " [用户打断]"
 )
 
 // GetLastMessageID 获取最近保存的消息的 MessageID（用于两阶段保存）
@@ -324,24 +332,51 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.Message, llmResponseChannel chan llm_common.LLMResponseStruct) (bool, error) {
 	log.Debugf("handleLLMResponse start")
 	defer log.Debugf("handleLLMResponse end")
+
+	// 从 context 中获取 fullText（用于聊天历史）
+	fullText := ctx.Value(fullTextKey).(*strings.Builder)
+	state := l.clientState
+	// toolCalls 使用局部变量（内部工具调用逻辑，不涉及聊天历史）
+	var toolCalls []schema.ToolCall
+	assistantSaved := false
+
+	saveInterruptedAssistant := func() {
+		if assistantSaved {
+			return
+		}
+		if ctx.Err() == nil {
+			return
+		}
+		text := strings.TrimSpace(fullText.String())
+		if text == "" {
+			return
+		}
+		msg := schema.AssistantMessage(text, nil)
+		msg.Extra = map[string]any{
+			interruptExtraKey:      true,
+			interruptByExtraKey:    "user",
+			interruptStageExtraKey: "llm",
+		}
+		if err := l.AddLlmMessage(ctx, msg); err != nil {
+			log.Errorf("保存打断助手消息失败: %v", err)
+			return
+		}
+		assistantSaved = true
+	}
+
 	select {
 	case <-ctx.Done():
+		saveInterruptedAssistant()
 		log.Debugf("handleLLMResponse ctx done, return")
 		return false, nil
 	default:
 	}
 
-	state := l.clientState
-
-	// 从 context 中获取 fullText（用于聊天历史）
-	fullText := ctx.Value(fullTextKey).(*strings.Builder)
-	// toolCalls 使用局部变量（内部工具调用逻辑，不涉及聊天历史）
-	var toolCalls []schema.ToolCall
-
 	for {
 		select {
 		case <-ctx.Done():
 			// 上下文已取消，优先处理取消逻辑
+			saveInterruptedAssistant()
 			log.Infof("%s 上下文已取消，停止处理LLM响应, context done, exit", state.DeviceID)
 			return false, nil
 		default:
@@ -361,7 +396,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 					toolCalls = append(toolCalls, llmResponse.ToolCalls...)
 				}
 
-				if llmResponse.Text != "" {
+				if strings.TrimSpace(llmResponse.Text) != "" {
 					// 处理文本内容响应
 					if err := l.ttsManager.handleTextResponse(ctx, llmResponse, true); err != nil {
 						return true, err
@@ -394,9 +429,11 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 							}
 						}
 						strFullText := fullText.String()
-						if strFullText != "" || len(toolCalls) > 0 {
+						if strings.TrimSpace(strFullText) != "" || len(toolCalls) > 0 {
 							if err := l.AddLlmMessage(ctx, schema.AssistantMessage(strFullText, toolCalls)); err != nil {
 								log.Errorf("保存助手消息失败: %v", err)
+							} else {
+								assistantSaved = true
 							}
 						}
 					}
@@ -409,7 +446,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 							log.Errorf("处理工具调用响应失败: %v", err)
 							return true, fmt.Errorf("处理工具调用响应失败: %v", err)
 						}
-						if !invokeToolSuccess {
+						if !invokeToolSuccess && strings.TrimSpace(llmResponse.Text) != "" {
 							//工具调用失败
 							if err := l.ttsManager.handleTextResponse(ctx, llmResponse, false); err != nil {
 								return true, err
@@ -422,6 +459,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 				}
 			case <-ctx.Done():
 				// 上下文已取消，退出协程
+				saveInterruptedAssistant()
 				log.Infof("%s 上下文已取消，停止处理LLM响应, context done, exit", state.DeviceID)
 				return false, nil
 			}
@@ -475,7 +513,7 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, userMessage *sc
 
 	for _, toolCall := range tools {
 		toolName := toolCall.Function.Name
-		tool, ok := mcp.GetToolByName(state.DeviceID, state.AgentID, toolName)
+		tool, ok := mcp.GetToolByName(state.DeviceID, state.AgentID, toolName, state.DeviceConfig.MCPServiceNames)
 		if !ok || tool == nil {
 			log.Errorf("未找到工具: %s", toolName)
 			addMessageFunc(toolCall, fmt.Sprintf("未找到工具: %s", toolName))
@@ -1048,8 +1086,17 @@ func (l *LLMManager) AddLlmMessage(ctx context.Context, msg *schema.Message) err
 }
 
 func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Message, count int, speakerResult *speaker.IdentifyResult) []*schema.Message {
-	//从dialogue中获取
-	messageList := l.clientState.GetMessages(count)
+	memoryMode := l.clientState.GetMemoryMode()
+	includeHistory := memoryMode != MemoryModeNone
+
+	// 从 dialogue 中获取上下文（none 模式下不加载历史）
+	messageList := make([]*schema.Message, 0)
+	if includeHistory {
+		messageList = l.clientState.GetMessages(count)
+		if userMessage != nil {
+			messageList = trimTrailingUserMessages(messageList)
+		}
+	}
 
 	// 构建 system prompt
 	systemPrompt := l.clientState.SystemPrompt
@@ -1058,7 +1105,7 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 	now := time.Now()
 	systemPrompt += fmt.Sprintf("\n当前时间和日期: %s %s", now.Format("2006年01月02日 15:04:05"), now.Format("Monday"))
 
-	if l.clientState.MemoryContext != "" {
+	if memoryMode == MemoryModeLong && l.clientState.MemoryContext != "" {
 		systemPrompt += fmt.Sprintf("\n用户个性化信息: \n%s", l.clientState.MemoryContext)
 	}
 
@@ -1079,7 +1126,7 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 	}
 
 	//search memory
-	if l.clientState.MemoryProvider != nil && userMessage != nil {
+	if memoryMode == MemoryModeLong && l.clientState.MemoryProvider != nil && userMessage != nil {
 		memoryContext, err := l.clientState.MemoryProvider.Search(ctx, l.clientState.GetDeviceIDOrAgentID(), userMessage.Content, 10, 180)
 		if err != nil {
 			log.Errorf("搜索记忆失败: %v", err)
@@ -1089,6 +1136,8 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 			systemPrompt += fmt.Sprintf("\n历史关联信息: \n%s", memoryContext)
 		}
 	}
+
+	systemPrompt += buildKnowledgeSearchRoutingPolicy(l.clientState.DeviceConfig.KnowledgeBases)
 
 	retMessage := make([]*schema.Message, 0)
 	retMessage = append(retMessage, &schema.Message{
@@ -1102,7 +1151,11 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 			log.Debugf("过滤掉空的assistant消息，避免发送给LLM API")
 			continue
 		}
-		retMessage = append(retMessage, msg)
+		msgCopy := cloneMessageForRequest(msg)
+		if isInterruptedMessage(msgCopy) {
+			msgCopy.Content = decorateInterruptedContent(msgCopy.Content)
+		}
+		retMessage = append(retMessage, msgCopy)
 	}
 	if userMessage != nil {
 		// 检查 retMessage 的最后一条消息是否已经是相同的用户消息，避免重复添加
@@ -1120,4 +1173,118 @@ func (l *LLMManager) GetMessages(ctx context.Context, userMessage *schema.Messag
 		}
 	}
 	return retMessage
+}
+
+func buildKnowledgeSearchRoutingPolicy(knowledgeBases []config_types.KnowledgeBaseRef) string {
+	if len(knowledgeBases) == 0 {
+		return ""
+	}
+
+	availableKBs := make([]string, 0, len(knowledgeBases))
+	for _, kb := range knowledgeBases {
+		if strings.EqualFold(strings.TrimSpace(kb.Status), "inactive") {
+			continue
+		}
+		if strings.TrimSpace(kb.ExternalKBID) == "" {
+			continue
+		}
+		name := strings.TrimSpace(kb.Name)
+		if name == "" {
+			name = strings.TrimSpace(kb.ExternalKBID)
+		}
+		if name == "" {
+			continue
+		}
+		if kb.ID == 0 {
+			continue
+		}
+		desc := strings.TrimSpace(kb.Description)
+		if desc == "" {
+			desc = "无描述"
+		}
+		availableKBs = append(availableKBs, fmt.Sprintf("%d: 名称=%s; 描述=%s", kb.ID, name, desc))
+		if len(availableKBs) >= 8 {
+			break
+		}
+	}
+	if len(availableKBs) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"\n知识库检索规则（工具: search_knowledge）:\n可用知识库(id:名称+描述): %s\n"+
+			"1. 触发条件: 用户询问事实、流程、参数、规则、定义、条款、对比等需要文档依据的问题，或用户明确要求“按知识库/文档回答”。\n"+
+			"2. 不触发条件: 闲聊问候、情绪陪伴、纯创作、纯主观建议。\n"+
+			"3. 调用方式: 每轮最多调用1次，query提炼用户问题核心关键词，top_k默认5；如可判断具体知识库，请传 knowledge_base_ids（可多个）。\n"+
+			"4. 选择规则: 只传与当前问题语义最相关的知识库ID；若无法判断可不传 knowledge_base_ids。\n"+
+			"5. 信息不足处理: 若证据不足，不得编造，直接请用户补充更具体关键词。\n"+
+			"6. 输出要求: 回答时禁止提及“知识库”“检索”“MCP”“工具调用”“命中结果”等来源或过程信息。",
+		strings.Join(availableKBs, "、"),
+	)
+}
+
+func trimTrailingUserMessages(messages []*schema.Message) []*schema.Message {
+	end := len(messages)
+	for end > 0 {
+		msg := messages[end-1]
+		if msg == nil || msg.Role != schema.User {
+			break
+		}
+		end--
+	}
+	return messages[:end]
+}
+
+func isInterruptedMessage(msg *schema.Message) bool {
+	if msg == nil || msg.Extra == nil {
+		return false
+	}
+	v, ok := msg.Extra[interruptExtraKey]
+	if !ok || v == nil {
+		return false
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "true")
+	default:
+		return false
+	}
+}
+
+func decorateInterruptedContent(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+	if strings.HasSuffix(content, interruptContentSuffix) {
+		return content
+	}
+	return content + interruptContentSuffix
+}
+
+func cloneMessageForRequest(msg *schema.Message) *schema.Message {
+	if msg == nil {
+		return nil
+	}
+	msgCopy := *msg
+
+	if msg.ToolCalls != nil {
+		msgCopy.ToolCalls = append([]schema.ToolCall(nil), msg.ToolCalls...)
+	}
+	if msg.MultiContent != nil {
+		msgCopy.MultiContent = append([]schema.ChatMessagePart(nil), msg.MultiContent...)
+	}
+	if msg.Extra != nil {
+		msgCopy.Extra = make(map[string]any, len(msg.Extra))
+		for k, v := range msg.Extra {
+			msgCopy.Extra[k] = v
+		}
+	}
+	if msg.ResponseMeta != nil {
+		respMetaCopy := *msg.ResponseMeta
+		msgCopy.ResponseMeta = &respMetaCopy
+	}
+
+	return &msgCopy
 }

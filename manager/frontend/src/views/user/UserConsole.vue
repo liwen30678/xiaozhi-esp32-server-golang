@@ -286,6 +286,7 @@
       v-model="showInjectMessageDialog"
       title="消息注入"
       width="600px"
+      class="inject-message-dialog"
       :close-on-click-modal="false"
     >
       <el-form
@@ -299,6 +300,7 @@
             v-model="injectForm.device_id"
             placeholder="请选择要注入消息的设备"
             style="width: 100%"
+            popper-class="inject-device-select-popper"
             filterable
           >
             <el-option
@@ -728,6 +730,7 @@ onMounted(() => {
   min-height: 100vh;
   background: #f8f9fa;
   padding: 0;
+  overflow-x: hidden;
 }
 
 /* 页面头部样式 */
@@ -906,13 +909,25 @@ onMounted(() => {
   border-radius: 4px;
   font-weight: 500;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.add-btn :deep(.el-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  line-height: 1;
 }
 
 /* 设备网格 */
 .devices-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 16px;
+  gap: 16px 12px;
 }
 
 .device-item {
@@ -1049,7 +1064,7 @@ onMounted(() => {
 .agents-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 16px;
+  gap: 16px 12px;
 }
 
 .agent-item {
@@ -1234,6 +1249,11 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  .user-console {
+    min-height: auto;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
   .page-header {
     padding: 16px 0;
   }
@@ -1244,6 +1264,29 @@ onMounted(() => {
   
   .welcome-title {
     font-size: 20px;
+  }
+
+  .quick-stats {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .quick-stats .stat-item {
+    width: 100%;
+    min-width: 0;
+    padding: 12px 10px;
+    gap: 8px;
+  }
+
+  .quick-stats .stat-number {
+    font-size: 16px;
+  }
+
+  .quick-stats .stat-label {
+    white-space: nowrap;
+    font-size: 11px;
   }
   
   .main-content {
@@ -1260,6 +1303,62 @@ onMounted(() => {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
+  }
+
+  .action-buttons {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .action-buttons .add-btn,
+  .section-header > .add-btn {
+    flex: 1;
+    min-width: 120px;
+  }
+
+  .feature-item {
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .feature-label {
+    min-width: 56px;
+    flex: none;
+  }
+
+  .feature-value {
+    flex: 1;
+    min-width: 0;
+    text-align: right;
+    word-break: break-all;
+  }
+
+  .dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  :deep(.el-dialog) {
+    width: calc(100vw - 24px) !important;
+    margin-top: 8vh !important;
+  }
+
+  :deep(.el-dialog__body) {
+    max-height: 65vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  :deep(.el-dialog__header) {
+    margin-right: 0;
+  }
+
+  :deep(.el-form-item__label) {
+    line-height: 20px;
+    padding-bottom: 4px;
   }
 }
 
@@ -1314,7 +1413,7 @@ onMounted(() => {
 }
 
 .radio-option {
-  margin-left: 8px;
+  margin-left: 0;
 }
 
 .radio-title {
@@ -1327,17 +1426,103 @@ onMounted(() => {
   font-size: 12px;
   color: #6c757d;
   line-height: 1.4;
+  word-break: break-word;
+}
+
+:deep(.inject-device-select-popper .el-select-dropdown__item) {
+  height: auto;
+  line-height: 1.4;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  white-space: normal;
+}
+
+:deep(.inject-device-select-popper .device-option) {
+  padding: 0;
+}
+
+:deep(.inject-message-dialog .el-radio-group) {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 10px;
+}
+
+:deep(.inject-message-dialog .el-radio) {
+  margin-right: 0;
+  align-items: flex-start;
+  height: auto;
+  line-height: 1.4;
+}
+
+:deep(.inject-message-dialog .el-radio__input) {
+  margin-top: 2px;
+}
+
+:deep(.inject-message-dialog .el-radio__label) {
+  display: block;
+  padding-left: 8px;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+:deep(.inject-message-dialog .el-form-item__content) {
+  min-width: 0;
 }
 
 @media (max-width: 480px) {
-  .quick-stats {
-    flex-direction: column;
-    gap: 8px;
+  .avatar-section {
+    align-items: flex-start;
+  }
+
+  .welcome-title {
+    font-size: 18px;
+  }
+
+  .welcome-subtitle {
+    font-size: 13px;
+  }
+
+  .quick-stats .stat-item {
+    padding: 10px 8px;
+    gap: 6px;
+  }
+
+  .quick-stats .stat-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 12px;
+  }
+
+  .quick-stats .stat-number {
+    font-size: 14px;
+  }
+
+  .quick-stats .stat-label {
+    font-size: 10px;
+  }
+
+  .section-title {
+    font-size: 16px;
+  }
+
+  .action-buttons .add-btn,
+  .section-header > .add-btn {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .radio-option {
+    margin-left: 0;
+  }
+
+  .radio-desc {
+    white-space: normal;
   }
   
   .devices-grid {
     grid-template-columns: 1fr;
-    gap: 12px;
+    gap: 10px;
   }
   
   .agents-grid {
