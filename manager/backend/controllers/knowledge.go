@@ -61,6 +61,42 @@ var allowedKnowledgeRagflowFileExt = map[string]struct{}{
 	".msg":      {},
 }
 
+var allowedKnowledgeWeknoraFileExt = map[string]struct{}{
+	".txt":      {},
+	".text":     {},
+	".md":       {},
+	".markdown": {},
+	".pdf":      {},
+	".doc":      {},
+	".docx":     {},
+	".ppt":      {},
+	".pptx":     {},
+	".xls":      {},
+	".xlsx":     {},
+	".wps":      {},
+	".json":     {},
+	".csv":      {},
+	".log":      {},
+	".xml":      {},
+	".html":     {},
+	".htm":      {},
+	".yml":      {},
+	".yaml":     {},
+	".rtf":      {},
+	".sql":      {},
+	".ini":      {},
+	".jpg":      {},
+	".jpeg":     {},
+	".png":      {},
+	".gif":      {},
+	".bmp":      {},
+	".webp":     {},
+	".tif":      {},
+	".tiff":     {},
+	".eml":      {},
+	".msg":      {},
+}
+
 var allowedKnowledgeDifyFileExt = map[string]struct{}{
 	".txt":      {},
 	".md":       {},
@@ -86,9 +122,32 @@ type knowledgeSearchTestHit struct {
 	Content string  `json:"content"`
 }
 
+func isKnowledgeFeatureEnabled(db *gorm.DB) (bool, error) {
+	var count int64
+	if err := db.Model(&models.Config{}).
+		Where("type = ? AND enabled = ? AND is_default = ?", "knowledge_search", true, true).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func ensureKnowledgeFeatureEnabled(c *gin.Context, db *gorm.DB) bool {
+	enabled, err := isKnowledgeFeatureEnabled(db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "检查知识库开关状态失败"})
+		return false
+	}
+	if !enabled {
+		c.JSON(http.StatusForbidden, gin.H{"error": "知识库功能已关闭（未启用默认知识库提供商）"})
+		return false
+	}
+	return true
+}
+
 func (ac *AdminController) GetKnowledgeSearchConfigs(c *gin.Context) {
 	var configs []models.Config
-	if err := ac.DB.Where("type = ?", "knowledge_search").Order("is_default DESC, id DESC").Find(&configs).Error; err != nil {
+	if err := ac.DB.Where("type = ?", "knowledge_search").Order("id ASC").Find(&configs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取知识库检索配置失败"})
 		return
 	}
@@ -113,6 +172,287 @@ func (ac *AdminController) DeleteKnowledgeSearchConfig(c *gin.Context) {
 	ac.deleteConfigWithType(c, "knowledge_search")
 }
 
+type knowledgeProviderModelOption struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Provider string `json:"provider,omitempty"`
+}
+
+func (ac *AdminController) ListWeknoraModels(c *gin.Context) {
+	var req struct {
+		BaseURL string `json:"base_url" binding:"required"`
+		APIKey  string `json:"api_key" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	baseURL := strings.TrimSpace(req.BaseURL)
+	apiKey := strings.TrimSpace(req.APIKey)
+	if baseURL == "" || apiKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "base_url 和 api_key 不能为空"})
+		return
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	endpoints := buildWeknoraModelListCandidateEndpoints(baseURL)
+	var (
+		statusCode int
+		bodyBytes  []byte
+		err        error
+		lastErr    error
+		lastStatus int
+		lastURL    string
+		tryLogs    []string
+	)
+	for _, endpoint := range endpoints {
+		lastURL = endpoint
+		statusCode, bodyBytes, err = doWeknoraJSONRequest(client, http.MethodGet, endpoint, apiKey, nil, nil)
+		if err == nil {
+			lastErr = nil
+			lastStatus = statusCode
+			break
+		}
+		lastErr = err
+		lastStatus = statusCode
+		tryLogs = append(tryLogs, fmt.Sprintf("%s => status=%d err=%v", endpoint, statusCode, err))
+		if statusCode != http.StatusNotFound {
+			break
+		}
+	}
+	if lastErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":       fmt.Sprintf("拉取WeKnora模型列表失败: %v; 尝试路径: %s", lastErr, strings.Join(tryLogs, " | ")),
+			"status_code": lastStatus,
+			"endpoint":    lastURL,
+		})
+		return
+	}
+
+	var parsed map[string]interface{}
+	if len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "解析WeKnora模型列表失败: " + err.Error()})
+			return
+		}
+	}
+
+	allModels := extractWeknoraModelOptions(parsed)
+	embeddingModels := make([]knowledgeProviderModelOption, 0, len(allModels))
+	llmModels := make([]knowledgeProviderModelOption, 0, len(allModels))
+	rerankModels := make([]knowledgeProviderModelOption, 0, len(allModels))
+	for _, item := range allModels {
+		if isWeknoraEmbeddingModel(item) {
+			embeddingModels = append(embeddingModels, item)
+			continue
+		}
+		if isWeknoraRerankModel(item) {
+			rerankModels = append(rerankModels, item)
+			continue
+		}
+		if isWeknoraLLMModel(item) {
+			llmModels = append(llmModels, item)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"embedding_models": embeddingModels,
+			"llm_models":       llmModels,
+			"rerank_models":    rerankModels,
+			"all_models":       allModels,
+		},
+	})
+}
+
+func extractWeknoraModelOptions(parsed map[string]interface{}) []knowledgeProviderModelOption {
+	if len(parsed) == 0 {
+		return []knowledgeProviderModelOption{}
+	}
+	modelMaps := make([]map[string]interface{}, 0, 32)
+	collectWeknoraModelMaps(parsed, 0, &modelMaps)
+	if len(modelMaps) == 0 {
+		return []knowledgeProviderModelOption{}
+	}
+
+	seen := make(map[string]struct{}, len(modelMaps))
+	options := make([]knowledgeProviderModelOption, 0, len(modelMaps))
+	for _, item := range modelMaps {
+		id := firstNonEmptyMapString(item, "model_id", "id", "uid")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		name := strings.TrimSpace(firstNonEmptyMapString(item, "display_name", "name", "model_name", "model_id", "id"))
+		if name == "" {
+			name = id
+		}
+		modelType := strings.TrimSpace(firstNonEmptyMapString(item, "model_type", "type", "category", "task_type", "capability"))
+		provider := strings.TrimSpace(firstNonEmptyMapString(item, "provider", "vendor"))
+
+		options = append(options, knowledgeProviderModelOption{
+			ID:       id,
+			Name:     name,
+			Type:     modelType,
+			Provider: provider,
+		})
+	}
+
+	sort.SliceStable(options, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(options[i].Name))
+		right := strings.ToLower(strings.TrimSpace(options[j].Name))
+		if left == right {
+			return options[i].ID < options[j].ID
+		}
+		return left < right
+	})
+	return options
+}
+
+func collectWeknoraModelMaps(raw interface{}, depth int, out *[]map[string]interface{}) {
+	if raw == nil || depth > 6 {
+		return
+	}
+
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, item := range v {
+			collectWeknoraModelMaps(item, depth+1, out)
+		}
+	case map[string]interface{}:
+		if isLikelyWeknoraModelRecord(v) {
+			*out = append(*out, v)
+		}
+		for _, key := range []string{"data", "list", "items", "models", "rows", "records", "results", "model"} {
+			if next, ok := v[key]; ok {
+				collectWeknoraModelMaps(next, depth+1, out)
+			}
+		}
+	}
+}
+
+func isLikelyWeknoraModelRecord(v map[string]interface{}) bool {
+	if v == nil {
+		return false
+	}
+	if strings.TrimSpace(firstNonEmptyMapString(v, "model_id")) != "" {
+		return true
+	}
+	if strings.TrimSpace(firstNonEmptyMapString(v, "id")) == "" {
+		return false
+	}
+	if strings.TrimSpace(firstNonEmptyMapString(v, "name", "model_name", "display_name")) != "" {
+		return true
+	}
+	if strings.TrimSpace(firstNonEmptyMapString(v, "model_type", "type", "category", "task_type")) != "" {
+		return true
+	}
+	return false
+}
+
+func firstNonEmptyMapString(m map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		raw, ok := m[key]
+		if !ok || raw == nil {
+			continue
+		}
+		value := strings.TrimSpace(fmt.Sprintf("%v", raw))
+		if value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isWeknoraEmbeddingModel(model knowledgeProviderModelOption) bool {
+	corpus := strings.ToLower(strings.Join([]string{
+		model.ID,
+		model.Name,
+		model.Type,
+	}, " "))
+	return strings.Contains(corpus, "embedding") || strings.Contains(corpus, "embed")
+}
+
+func isWeknoraLLMModel(model knowledgeProviderModelOption) bool {
+	if isWeknoraEmbeddingModel(model) {
+		return false
+	}
+	if isWeknoraRerankModel(model) {
+		return false
+	}
+
+	corpus := strings.ToLower(strings.Join([]string{
+		model.ID,
+		model.Name,
+		model.Type,
+	}, " "))
+	if strings.Contains(corpus, "tts") || strings.Contains(corpus, "asr") || strings.Contains(corpus, "speech") {
+		return false
+	}
+	if strings.Contains(corpus, "llm") || strings.Contains(corpus, "chat") || strings.Contains(corpus, "reason") {
+		return true
+	}
+	if strings.Contains(corpus, "knowledgeqa") || strings.Contains(corpus, "completion") || strings.Contains(corpus, "generation") {
+		return true
+	}
+	if strings.Contains(corpus, "gpt") || strings.Contains(corpus, "qwen") || strings.Contains(corpus, "deepseek") || strings.Contains(corpus, "glm") || strings.Contains(corpus, "claude") || strings.Contains(corpus, "gemini") {
+		return true
+	}
+	// 类型为空时做宽松兜底，保留可选择性
+	return strings.TrimSpace(model.Type) == ""
+}
+
+func isWeknoraRerankModel(model knowledgeProviderModelOption) bool {
+	corpus := strings.ToLower(strings.Join([]string{
+		model.ID,
+		model.Name,
+		model.Type,
+	}, " "))
+	return strings.Contains(corpus, "rerank") || strings.Contains(corpus, "re-rank")
+}
+
+func buildWeknoraModelListCandidateEndpoints(baseURL string) []string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" {
+		return []string{}
+	}
+
+	candidates := []string{
+		buildWeknoraURL(trimmed, "/models"),
+		buildWeknoraURL(trimmed, "/model"),
+		trimmed + "/models",
+		trimmed + "/model",
+	}
+	if !strings.HasSuffix(strings.ToLower(trimmed), "/v1") {
+		candidates = append(candidates, trimmed+"/v1/models", trimmed+"/v1/model")
+	}
+	if !strings.HasSuffix(strings.ToLower(trimmed), "/api/v1") {
+		candidates = append(candidates, trimmed+"/api/v1/models", trimmed+"/api/v1/model")
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	ret := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		ret = append(ret, item)
+	}
+	return ret
+}
+
 func (uc *UserController) GetKnowledgeBases(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	var items []models.KnowledgeBase
@@ -124,6 +464,9 @@ func (uc *UserController) GetKnowledgeBases(c *gin.Context) {
 }
 
 func (uc *UserController) CreateKnowledgeBase(c *gin.Context) {
+	if !ensureKnowledgeFeatureEnabled(c, uc.DB) {
+		return
+	}
 	userID, _ := c.Get("user_id")
 	var req struct {
 		Name                   string   `json:"name" binding:"required,min=1,max=100"`
@@ -188,6 +531,9 @@ func (uc *UserController) GetKnowledgeBase(c *gin.Context) {
 }
 
 func (uc *UserController) UpdateKnowledgeBase(c *gin.Context) {
+	if !ensureKnowledgeFeatureEnabled(c, uc.DB) {
+		return
+	}
 	userID, _ := c.Get("user_id")
 	id := c.Param("id")
 	var item models.KnowledgeBase
@@ -409,6 +755,11 @@ func (uc *UserController) TestKnowledgeBaseSearch(c *gin.Context) {
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status = ?", kb.ID, knowledgeSyncStatusSynced).Count(&docsSynced).Error
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status IN ?", kb.ID, pendingStatuses).Count(&docsPending).Error
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status IN ?", kb.ID, failedStatuses).Count(&docsFailed).Error
+	syncedExternalDocIDs := make([]string, 0, 4)
+	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).
+		Where("knowledge_base_id = ? AND sync_status = ? AND external_doc_id <> ''", kb.ID, knowledgeSyncStatusSynced).
+		Order("id DESC").
+		Pluck("external_doc_id", &syncedExternalDocIDs).Error
 
 	log.Printf(
 		"[KnowledgeTest] Start user_id=%d kb_id=%d kb_name=%q sync_provider=%s sync_status=%s dataset_id=%s retrieval_threshold=%s request_threshold=%s docs(total=%d synced=%d pending=%d failed=%d) query=%q top_k=%d",
@@ -464,6 +815,17 @@ func (uc *UserController) TestKnowledgeBaseSearch(c *gin.Context) {
 			return
 		}
 		hits, err = queryKnowledgeTestByRagflow(client, cfg, req.Threshold, kb.RetrievalThreshold, providerData, datasetID, strings.TrimSpace(kb.Name), query, topK)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	case "weknora":
+		cfg, err := parseWeknoraKnowledgeSyncConfig(providerData)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		hits, err = queryKnowledgeTestByWeknora(client, cfg, req.Threshold, kb.RetrievalThreshold, providerData, datasetID, syncedExternalDocIDs, strings.TrimSpace(kb.Name), query, topK)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -594,7 +956,7 @@ func (uc *UserController) CreateKnowledgeBaseDocumentByUpload(c *gin.Context) {
 		return
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider != "dify" && provider != "ragflow" {
+	if provider != "dify" && provider != "ragflow" && provider != "weknora" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("当前知识库提供商为 %s，暂不支持文件上传创建文档", provider)})
 		return
 	}
@@ -1190,6 +1552,115 @@ func queryKnowledgeTestByRagflow(
 	return hits, nil
 }
 
+func queryKnowledgeTestByWeknora(
+	client *http.Client,
+	cfg *weknoraKnowledgeSyncConfig,
+	requestThreshold *float64,
+	kbThreshold *float64,
+	providerData map[string]interface{},
+	datasetID string,
+	knowledgeIDs []string,
+	datasetName, query string,
+	topK int,
+) ([]knowledgeSearchTestHit, error) {
+	scoreThreshold, thresholdSource := resolveKnowledgeThreshold(
+		requestThreshold,
+		kbThreshold,
+		parseKnowledgeSearchFloat(providerData["score_threshold"], 0.2),
+	)
+	knowledgeIDs = normalizeKnowledgeIDs(knowledgeIDs)
+	payload := map[string]interface{}{
+		"query": strings.TrimSpace(query),
+	}
+	if len(knowledgeIDs) > 0 {
+		payload["knowledge_ids"] = knowledgeIDs
+	} else {
+		payload["knowledge_base_id"] = datasetID
+	}
+	log.Printf(
+		"[KnowledgeTest][Weknora] RetrieveRequest dataset_id=%s knowledge_ids=%d query=%q top_k=%d score_threshold=%.4f threshold_source=%s",
+		datasetID,
+		len(knowledgeIDs),
+		strings.TrimSpace(query),
+		topK,
+		scoreThreshold,
+		thresholdSource,
+	)
+
+	var resp struct {
+		Data []struct {
+			Content           string                 `json:"content"`
+			KnowledgeTitle    string                 `json:"knowledge_title"`
+			Score             float64                `json:"score"`
+			Similarity        float64                `json:"similarity"`
+			Metadata          map[string]interface{} `json:"metadata"`
+			KnowledgeMetadata map[string]interface{} `json:"knowledge_metadata"`
+		} `json:"data"`
+	}
+	statusCode, bodyBytes, err := doWeknoraJSONRequest(client, http.MethodPost, buildWeknoraURL(cfg.BaseURL, "/knowledge-search"), cfg.APIKey, payload, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("Weknora检索失败(dataset_id=%s): %w", datasetID, err)
+	}
+
+	title := strings.TrimSpace(datasetName)
+	if title == "" {
+		title = datasetID
+	}
+	hits := make([]knowledgeSearchTestHit, 0, len(resp.Data))
+	for _, item := range resp.Data {
+		content := strings.TrimSpace(item.Content)
+		if content == "" && item.KnowledgeMetadata != nil {
+			if chunkText, ok := item.KnowledgeMetadata["chunk_text"]; ok {
+				content = strings.TrimSpace(fmt.Sprintf("%v", chunkText))
+			}
+		}
+		if content == "" || content == "<nil>" {
+			continue
+		}
+
+		score := item.Score
+		if score <= 0 {
+			score = item.Similarity
+		}
+		if score <= 0 && item.Metadata != nil {
+			score = parseKnowledgeSearchFloat(item.Metadata["score"], 0)
+		}
+		if scoreThreshold > 0 && score > 0 && score < scoreThreshold {
+			continue
+		}
+
+		chunkTitle := strings.TrimSpace(item.KnowledgeTitle)
+		if chunkTitle == "" {
+			chunkTitle = title
+		}
+		hits = append(hits, knowledgeSearchTestHit{
+			Title:   chunkTitle,
+			Score:   score,
+			Content: content,
+		})
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	if len(hits) > topK {
+		hits = hits[:topK]
+	}
+	log.Printf(
+		"[KnowledgeTest][Weknora] RetrieveParsed dataset_id=%s status=%d records=%d hits=%d",
+		datasetID,
+		statusCode,
+		len(resp.Data),
+		len(hits),
+	)
+	if len(hits) == 0 {
+		log.Printf(
+			"[KnowledgeTest][Weknora] EmptyBody dataset_id=%s status=%d body=%s",
+			datasetID,
+			statusCode,
+			truncateForLog(string(bodyBytes), 1500),
+		)
+	}
+	return hits, nil
+}
+
 func parseKnowledgeSearchFloat(input interface{}, defaultValue float64) float64 {
 	switch v := input.(type) {
 	case float64:
@@ -1210,6 +1681,29 @@ func parseKnowledgeSearchFloat(input interface{}, defaultValue float64) float64 
 		}
 	}
 	return defaultValue
+}
+
+func normalizeKnowledgeIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	ret := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ret = append(ret, id)
+	}
+	if len(ret) == 0 {
+		return nil
+	}
+	return ret
 }
 
 func parseKnowledgeSearchBool(input interface{}, defaultValue bool) bool {
@@ -1276,6 +1770,8 @@ func getAllowedKnowledgeUploadExtByProvider(provider string) (map[string]struct{
 		return allowedKnowledgeDifyFileExt, "txt, md, markdown, pdf, html, htm, xlsx, xls, docx, csv, eml, msg, pptx, ppt, xml, epub"
 	case "ragflow":
 		return allowedKnowledgeRagflowFileExt, "txt, text, md, markdown, pdf, doc, docx, ppt, pptx, xls, xlsx, wps, json, csv, log, xml, html, htm, yml, yaml, rtf, sql, ini, jpg, jpeg, png, gif, bmp, webp, tif, tiff, eml, msg"
+	case "weknora":
+		return allowedKnowledgeWeknoraFileExt, "txt, text, md, markdown, pdf, doc, docx, ppt, pptx, xls, xlsx, wps, json, csv, log, xml, html, htm, yml, yaml, rtf, sql, ini, jpg, jpeg, png, gif, bmp, webp, tif, tiff, eml, msg"
 	default:
 		return allowedKnowledgeRagflowFileExt, "txt, md, pdf, docx 等"
 	}
@@ -1380,6 +1876,9 @@ func (ac *AdminController) GetUserKnowledgeBasesAdmin(c *gin.Context) {
 }
 
 func (ac *AdminController) CreateUserKnowledgeBaseAdmin(c *gin.Context) {
+	if !ensureKnowledgeFeatureEnabled(c, ac.DB) {
+		return
+	}
 	userID, _ := strconv.Atoi(c.Param("id"))
 	if userID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的用户ID"})
@@ -1436,6 +1935,9 @@ func (ac *AdminController) CreateUserKnowledgeBaseAdmin(c *gin.Context) {
 }
 
 func (ac *AdminController) UpdateUserKnowledgeBaseAdmin(c *gin.Context) {
+	if !ensureKnowledgeFeatureEnabled(c, ac.DB) {
+		return
+	}
 	userID, _ := strconv.Atoi(c.Param("id"))
 	kbID, _ := strconv.Atoi(c.Param("kb_id"))
 	if userID <= 0 || kbID <= 0 {

@@ -46,6 +46,7 @@ type KnowledgeBaseRef struct {
 	Description        string   `json:"description"`
 	Provider           string   `json:"provider"`
 	ExternalKBID       string   `json:"external_kb_id"`
+	ExternalDocID      string   `json:"external_doc_id"`
 	RetrievalThreshold *float64 `json:"retrieval_threshold"`
 	Status             string   `json:"status"`
 }

@@ -262,6 +262,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				admin.POST("/knowledge-search-configs", adminController.CreateKnowledgeSearchConfig)
 				admin.PUT("/knowledge-search-configs/:id", adminController.UpdateKnowledgeSearchConfig)
 				admin.DELETE("/knowledge-search-configs/:id", adminController.DeleteKnowledgeSearchConfig)
+				admin.POST("/knowledge-search-configs/weknora/models", adminController.ListWeknoraModels)
 
 				// 全局角色管理（保留兼容旧API）
 				admin.GET("/global-roles", adminController.GetGlobalRoles)

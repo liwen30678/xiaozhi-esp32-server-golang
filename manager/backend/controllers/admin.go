@@ -73,6 +73,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		Description        string   `json:"description"`
 		Provider           string   `json:"provider"`
 		ExternalKBID       string   `json:"external_kb_id"`
+		ExternalDocID      string   `json:"external_doc_id"`
 		RetrievalThreshold *float64 `json:"retrieval_threshold"`
 		Status             string   `json:"status"`
 	}
@@ -403,12 +404,23 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 					if provider == "" {
 						provider = resolveDefaultKnowledgeProviderName(ac.DB)
 					}
+					externalDocID := strings.TrimSpace(kb.ExternalDocID)
+					if externalDocID == "" {
+						var doc models.KnowledgeBaseDocument
+						if err := ac.DB.
+							Where("knowledge_base_id = ? AND sync_status = ? AND external_doc_id <> ''", kb.ID, knowledgeSyncStatusSynced).
+							Order("id DESC").
+							First(&doc).Error; err == nil {
+							externalDocID = strings.TrimSpace(doc.ExternalDocID)
+						}
+					}
 					response.KnowledgeBases = append(response.KnowledgeBases, KnowledgeBaseInfo{
 						ID:                 kb.ID,
 						Name:               kb.Name,
 						Description:        kb.Description,
 						Provider:           provider,
 						ExternalKBID:       strings.TrimSpace(kb.ExternalKBID),
+						ExternalDocID:      externalDocID,
 						RetrievalThreshold: kb.RetrievalThreshold,
 						Status:             kb.Status,
 					})

@@ -9,7 +9,7 @@
       <el-table-column prop="id" label="ID" width="80" />
       <el-table-column prop="name" label="名称" width="180" />
       <el-table-column prop="description" label="描述" />
-      <el-table-column prop="sync_provider" label="Provider" width="110" />
+      <el-table-column prop="sync_provider" label="提供商" width="110" />
       <el-table-column prop="external_kb_id" label="Dataset ID" width="220" />
       <el-table-column label="检索阈值" width="100">
         <template #default="scope">
@@ -53,7 +53,7 @@
           <el-input v-model="form.description" />
         </el-form-item>
         <el-form-item label="同步说明">
-          <div style="color: #909399;">保存后会自动异步同步到管理员配置的知识库提供商（如 Dify / RAGFlow）。文档请在“文档管理”中新增。</div>
+          <div style="color: #909399;">保存后会自动异步同步到管理员配置的知识库提供商（如 Dify / RAGFlow / WeKnora）。文档请在“文档管理”中新增。</div>
         </el-form-item>
         <el-form-item label="检索阈值">
           <el-input
@@ -170,7 +170,7 @@
         </div>
       </div>
       <div style="color:#909399; font-size:12px; margin-bottom: 8px;">
-        召回测试会直接调用当前知识库对应 provider 的检索接口（Dify / RAGFlow），用于验证关键词召回效果。
+        召回测试会直接调用当前知识库对应 provider 的检索接口（Dify / RAGFlow / WeKnora），用于验证关键词召回效果。
       </div>
       <div v-if="searchTestElapsedMs !== null" style="color:#606266; font-size:12px; margin-bottom: 8px;">
         响应耗时：{{ searchTestElapsedMs }} ms
@@ -252,8 +252,10 @@ const topKOptions = Array.from({ length: 20 }, (_, i) => i + 1)
 const FILE_UPLOAD_CONTENT_PREFIX = '__KB_FILE_UPLOAD_V1__:'
 const DIFY_UPLOAD_ACCEPT = '.txt,.md,.markdown,.pdf,.html,.htm,.xlsx,.xls,.docx,.csv,.eml,.msg,.pptx,.ppt,.xml,.epub'
 const RAGFLOW_UPLOAD_ACCEPT = '.txt,.text,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.wps,.json,.csv,.log,.xml,.html,.htm,.yml,.yaml,.rtf,.sql,.ini,.jpg,.jpeg,.png,.gif,.bmp,.webp,.tif,.tiff,.eml,.msg'
+const WEKNORA_UPLOAD_ACCEPT = '.txt,.text,.md,.markdown,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.wps,.json,.csv,.log,.xml,.html,.htm,.yml,.yaml,.rtf,.sql,.ini,.jpg,.jpeg,.png,.gif,.bmp,.webp,.tif,.tiff,.eml,.msg'
 const DEFAULT_DIFY_THRESHOLD = 0.2
 const DEFAULT_RAGFLOW_THRESHOLD = 0.2
+const DEFAULT_WEKNORA_THRESHOLD = 0.2
 
 const knowledgeGlobalConfig = reactive({
   default_provider: 'dify',
@@ -264,15 +266,19 @@ const currentKBProvider = computed(() => (currentKb.value?.sync_provider || 'dif
 const uploadAcceptByProvider = computed(() => {
   if (currentKBProvider.value === 'dify') return DIFY_UPLOAD_ACCEPT
   if (currentKBProvider.value === 'ragflow') return RAGFLOW_UPLOAD_ACCEPT
+  if (currentKBProvider.value === 'weknora') return WEKNORA_UPLOAD_ACCEPT
   return ''
 })
-const isUploadProviderSupported = computed(() => currentKBProvider.value === 'dify' || currentKBProvider.value === 'ragflow')
+const isUploadProviderSupported = computed(() => currentKBProvider.value === 'dify' || currentKBProvider.value === 'ragflow' || currentKBProvider.value === 'weknora')
 const uploadTipText = computed(() => {
   if (currentKBProvider.value === 'dify') {
     return '按 Dify 支持格式限制上传（txt/md/pdf/html/xlsx/docx/csv/eml/msg/pptx/xml/epub），上传后自动创建文档并异步同步。'
   }
   if (currentKBProvider.value === 'ragflow') {
     return '按 RAGFlow 支持格式限制上传（如 txt/md/pdf/docx/xlsx/pptx/jpg/png/eml 等），上传后自动创建文档并异步同步。'
+  }
+  if (currentKBProvider.value === 'weknora') {
+    return '按 WeKnora 支持格式限制上传（如 txt/md/pdf/docx/xlsx/pptx/jpg/png/eml 等），上传后自动创建文档并异步同步。'
   }
   return `当前提供商 ${currentKBProvider.value} 暂不支持上传建文档。`
 })
@@ -289,7 +295,7 @@ const loadData = async () => {
 
 const normalizeProvider = (provider) => {
   const p = String(provider || '').trim().toLowerCase()
-  if (p === 'dify' || p === 'ragflow') return p
+  if (p === 'dify' || p === 'ragflow' || p === 'weknora') return p
   return 'dify'
 }
 
@@ -305,6 +311,11 @@ const getGlobalThresholdByProvider = (provider) => {
     const v = Number(cfg.similarity_threshold)
     if (!Number.isNaN(v) && v >= 0 && v <= 1) return v
     return DEFAULT_RAGFLOW_THRESHOLD
+  }
+  if (p === 'weknora') {
+    const v = Number(cfg.score_threshold)
+    if (!Number.isNaN(v) && v >= 0 && v <= 1) return v
+    return DEFAULT_WEKNORA_THRESHOLD
   }
   return DEFAULT_DIFY_THRESHOLD
 }

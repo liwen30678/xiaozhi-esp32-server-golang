@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,12 @@ const (
 	difyFileUploadHTTPTimeout       = 90 * time.Second
 	difyFileUploadMaxAttempts       = 3
 	difyFileUploadRetryStep         = 2 * time.Second
+	weknoraHTTPTimeout              = 20 * time.Second
+	weknoraFileUploadHTTPTimeout    = 90 * time.Second
+	defaultWeknoraChunkSize         = 1000
+	defaultWeknoraChunkOverlap      = 200
+	defaultWeknoraParsePollInterval = 1000 * time.Millisecond
+	defaultWeknoraParseTimeout      = 120000 * time.Millisecond
 )
 
 type knowledgeProviderSyncResult struct {
@@ -58,16 +65,35 @@ type ragflowKnowledgeSyncConfig struct {
 	DatasetChunkMethod string
 }
 
+type weknoraKnowledgeSyncConfig struct {
+	BaseURL           string
+	APIKey            string
+	ChunkSize         int
+	ChunkOverlap      int
+	Separators        []string
+	EnableMultimodal  bool
+	EmbeddingModelID  string
+	SummaryModelID    string
+	RerankModelID     string
+	VLMModelID        string
+	ParsePollInterval time.Duration
+	ParseTimeout      time.Duration
+}
+
 const defaultKnowledgeSyncProvider = "dify"
 
 func loadDefaultKnowledgeProviderConfig(db *gorm.DB) (*models.Config, map[string]interface{}, error) {
-	var cfg models.Config
-	err := db.Where("type = ? AND enabled = ?", "knowledge_search", true).Order("is_default DESC, id DESC").First(&cfg).Error
+	var configs []models.Config
+	err := db.Where("type = ? AND enabled = ?", "knowledge_search", true).Order("id ASC").Find(&configs).Error
 	if err != nil {
 		return nil, nil, err
 	}
-
-	return parseKnowledgeProviderConfigPayload(&cfg)
+	for i := range configs {
+		if configs[i].IsDefault {
+			return parseKnowledgeProviderConfigPayload(&configs[i])
+		}
+	}
+	return nil, nil, gorm.ErrRecordNotFound
 }
 
 func loadKnowledgeProviderConfigByProvider(db *gorm.DB, provider string) (*models.Config, map[string]interface{}, error) {
@@ -169,6 +195,12 @@ func syncKnowledgeBaseDeleteBestEffort(db *gorm.DB, kb *models.KnowledgeBase) er
 			return err
 		}
 		return deleteKnowledgeBaseFromRagflow(ragflowCfg, kb)
+	case "weknora":
+		weknoraCfg, err := parseWeknoraKnowledgeSyncConfig(providerData)
+		if err != nil {
+			return err
+		}
+		return deleteKnowledgeBaseFromWeknora(weknoraCfg, kb)
 	default:
 		return fmt.Errorf("知识库删除同步暂不支持provider: %s", provider)
 	}
@@ -193,6 +225,12 @@ func syncKnowledgeBaseWithProvider(db *gorm.DB, kb *models.KnowledgeBase) (*know
 			return nil, err
 		}
 		return syncKnowledgeBaseToRagflow(ragflowCfg, kb)
+	case "weknora":
+		weknoraCfg, err := parseWeknoraKnowledgeSyncConfig(providerData)
+		if err != nil {
+			return nil, err
+		}
+		return syncKnowledgeBaseToWeknora(weknoraCfg, kb)
 	default:
 		return nil, fmt.Errorf("知识库同步暂不支持provider: %s", provider)
 	}
@@ -304,6 +342,76 @@ func parseRagflowKnowledgeSyncConfig(providerData map[string]interface{}) (*ragf
 		cfg.DatasetChunkMethod = strings.TrimSpace(v)
 	}
 	return cfg, nil
+}
+
+func parseWeknoraKnowledgeSyncConfig(providerData map[string]interface{}) (*weknoraKnowledgeSyncConfig, error) {
+	baseURL, _ := providerData["base_url"].(string)
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil, fmt.Errorf("weknora base_url 不能为空")
+	}
+
+	apiKey, _ := providerData["api_key"].(string)
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("weknora api_key 不能为空")
+	}
+
+	embeddingModelID, _ := providerData["embedding_model_id"].(string)
+	embeddingModelID = strings.TrimSpace(embeddingModelID)
+	if embeddingModelID == "" {
+		return nil, fmt.Errorf("weknora embedding_model_id 不能为空")
+	}
+
+	chunkSize := defaultWeknoraChunkSize
+	if v, ok := parseInt(providerData["chunk_size"]); ok && v > 0 {
+		chunkSize = v
+	}
+	chunkOverlap := defaultWeknoraChunkOverlap
+	if v, ok := parseInt(providerData["chunk_overlap"]); ok && v >= 0 {
+		chunkOverlap = v
+	}
+	if chunkOverlap >= chunkSize {
+		chunkOverlap = chunkSize / 2
+	}
+
+	separators := []string{"\n\n", "\n", "。", "！", "？", ";", "；"}
+	if parsed := parseStringSlice(providerData["separators"]); len(parsed) > 0 {
+		separators = parsed
+	}
+
+	enableMultimodal := true
+	if raw, exists := providerData["enable_multimodal"]; exists {
+		enableMultimodal = parseProviderBool(raw, true)
+	}
+
+	parsePollInterval := defaultWeknoraParsePollInterval
+	if v, ok := parseInt(providerData["parse_poll_interval_ms"]); ok && v > 0 {
+		parsePollInterval = time.Duration(v) * time.Millisecond
+	}
+	parseTimeout := defaultWeknoraParseTimeout
+	if v, ok := parseInt(providerData["parse_timeout_ms"]); ok && v > 0 {
+		parseTimeout = time.Duration(v) * time.Millisecond
+	}
+
+	summaryModelID, _ := providerData["summary_model_id"].(string)
+	rerankModelID, _ := providerData["rerank_model_id"].(string)
+	vlmModelID, _ := providerData["vlm_model_id"].(string)
+
+	return &weknoraKnowledgeSyncConfig{
+		BaseURL:           baseURL,
+		APIKey:            apiKey,
+		ChunkSize:         chunkSize,
+		ChunkOverlap:      chunkOverlap,
+		Separators:        separators,
+		EnableMultimodal:  enableMultimodal,
+		EmbeddingModelID:  embeddingModelID,
+		SummaryModelID:    strings.TrimSpace(summaryModelID),
+		RerankModelID:     strings.TrimSpace(rerankModelID),
+		VLMModelID:        strings.TrimSpace(vlmModelID),
+		ParsePollInterval: parsePollInterval,
+		ParseTimeout:      parseTimeout,
+	}, nil
 }
 
 func syncKnowledgeBaseToDify(cfg *difyKnowledgeSyncConfig, kb *models.KnowledgeBase) (*knowledgeProviderSyncResult, error) {
@@ -468,6 +576,93 @@ func deleteKnowledgeBaseFromRagflow(cfg *ragflowKnowledgeSyncConfig, kb *models.
 	return nil
 }
 
+func syncKnowledgeBaseToWeknora(cfg *weknoraKnowledgeSyncConfig, kb *models.KnowledgeBase) (*knowledgeProviderSyncResult, error) {
+	if kb == nil {
+		return nil, fmt.Errorf("知识库数据为空")
+	}
+	content := strings.TrimSpace(kb.Content)
+	result := &knowledgeProviderSyncResult{
+		DatasetID:    strings.TrimSpace(kb.ExternalKBID),
+		DocumentID:   strings.TrimSpace(kb.ExternalDocID),
+		AutoDataset:  kb.AutoDataset,
+		SyncProvider: "weknora",
+	}
+	client := &http.Client{Timeout: weknoraHTTPTimeout}
+
+	if result.DatasetID == "" {
+		datasetID, err := createWeknoraKnowledgeBase(client, cfg, kb)
+		if err != nil {
+			return result, err
+		}
+		result.DatasetID = datasetID
+		result.AutoDataset = true
+	} else {
+		if err := updateWeknoraKnowledgeBase(client, cfg, result.DatasetID, kb); err != nil {
+			return result, err
+		}
+	}
+
+	// 允许空知识库同步：仅确保知识库存在，不创建文档。
+	if content == "" {
+		now := time.Now()
+		result.LastSyncedAt = &now
+		return result, nil
+	}
+
+	if result.DocumentID == "" {
+		documentID, err := createWeknoraKnowledgeByText(client, cfg, result.DatasetID, buildAutoDocumentName(kb), kb.Content)
+		if err != nil {
+			return result, err
+		}
+		result.DocumentID = documentID
+	} else {
+		documentID, err := replaceWeknoraKnowledgeByText(client, cfg, result.DatasetID, result.DocumentID, buildAutoDocumentName(kb), kb.Content)
+		if err != nil {
+			return result, err
+		}
+		result.DocumentID = documentID
+	}
+
+	if err := waitWeknoraKnowledgeParsed(client, cfg, result.DocumentID); err != nil {
+		return result, err
+	}
+	now := time.Now()
+	result.LastSyncedAt = &now
+	return result, nil
+}
+
+func deleteKnowledgeBaseFromWeknora(cfg *weknoraKnowledgeSyncConfig, kb *models.KnowledgeBase) error {
+	if kb == nil {
+		return fmt.Errorf("知识库数据为空")
+	}
+	datasetID := strings.TrimSpace(kb.ExternalKBID)
+	documentID := strings.TrimSpace(kb.ExternalDocID)
+	if datasetID == "" {
+		return nil
+	}
+
+	client := &http.Client{Timeout: weknoraHTTPTimeout}
+	if documentID != "" {
+		if err := deleteWeknoraKnowledge(client, cfg, documentID); err != nil {
+			return err
+		}
+	}
+
+	if !kb.AutoDataset {
+		return nil
+	}
+	empty, err := isWeknoraKnowledgeBaseEmpty(client, cfg, datasetID)
+	if err != nil {
+		return err
+	}
+	if empty {
+		if err := deleteWeknoraKnowledgeBase(client, cfg, datasetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func syncKnowledgeDocumentBestEffort(db *gorm.DB, kbID, docID uint) error {
 	if kbID == 0 || docID == 0 {
 		return fmt.Errorf("无效的知识库或文档ID")
@@ -626,6 +821,64 @@ func syncKnowledgeDocumentBestEffort(db *gorm.DB, kbID, docID uint) error {
 		}
 		return syncSuccess(documentID)
 
+	case "weknora":
+		if !isUploadFile && content == "" {
+			err := fmt.Errorf("文档内容为空，无法同步")
+			return failUpload(strings.TrimSpace(doc.ExternalDocID), err)
+		}
+
+		weknoraCfg, err := parseWeknoraKnowledgeSyncConfig(providerData)
+		if err != nil {
+			return failUpload(strings.TrimSpace(doc.ExternalDocID), err)
+		}
+
+		clientTimeout := weknoraHTTPTimeout
+		if isUploadFile {
+			clientTimeout = weknoraFileUploadHTTPTimeout
+		}
+		client := &http.Client{Timeout: clientTimeout}
+		datasetID, err := ensureWeknoraDatasetForKnowledgeBase(db, &kb, client, weknoraCfg)
+		if err != nil {
+			return failUpload(strings.TrimSpace(doc.ExternalDocID), err)
+		}
+
+		oldDocumentID := strings.TrimSpace(doc.ExternalDocID)
+		documentID := oldDocumentID
+		if isUploadFile {
+			documentID, err = createWeknoraKnowledgeByFile(client, weknoraCfg, datasetID, uploadFileName, uploadFileData)
+			if err != nil {
+				return failUpload(oldDocumentID, err)
+			}
+		} else {
+			documentID, err = createWeknoraKnowledgeByText(client, weknoraCfg, datasetID, doc.Name, doc.Content)
+			if err != nil {
+				return failUpload(oldDocumentID, err)
+			}
+		}
+		markProgress(documentID, knowledgeSyncStatusUploaded)
+		markProgress(documentID, knowledgeSyncStatusParsing)
+		if err := waitWeknoraKnowledgeParsed(client, weknoraCfg, documentID); err != nil {
+			return failParse(documentID, err)
+		}
+		if oldDocumentID != "" && oldDocumentID != documentID {
+			if err := deleteWeknoraKnowledge(client, weknoraCfg, oldDocumentID); err != nil {
+				log.Printf("[KnowledgeSync][Weknora] delete old document warning dataset_id=%s old_document_id=%s err=%v", datasetID, oldDocumentID, err)
+			}
+		}
+		if err := syncSuccess(documentID); err != nil {
+			return err
+		}
+		now := time.Now()
+		if err := db.Model(&models.KnowledgeBase{}).Where("id = ?", kb.ID).Updates(map[string]interface{}{
+			"external_doc_id": strings.TrimSpace(documentID),
+			"sync_status":     knowledgeSyncStatusSynced,
+			"sync_error":      "",
+			"last_synced_at":  &now,
+		}).Error; err != nil {
+			return fmt.Errorf("更新知识库external_doc_id失败: %w", err)
+		}
+		return nil
+
 	default:
 		err := fmt.Errorf("知识库文档同步暂不支持provider: %s", provider)
 		return failUpload(strings.TrimSpace(doc.ExternalDocID), err)
@@ -697,6 +950,38 @@ func syncKnowledgeDocumentDeleteBestEffort(db *gorm.DB, kb models.KnowledgeBase,
 		}
 		if empty {
 			if err := deleteRagflowDataset(client, ragflowCfg, datasetID); err != nil {
+				return err
+			}
+			now := time.Now()
+			_ = db.Model(&models.KnowledgeBase{}).Where("id = ?", kb.ID).Updates(map[string]interface{}{
+				"external_kb_id": "",
+				"auto_dataset":   false,
+				"sync_status":    knowledgeSyncStatusSynced,
+				"sync_error":     "",
+				"last_synced_at": &now,
+			}).Error
+		}
+		return nil
+	case "weknora":
+		weknoraCfg, err := parseWeknoraKnowledgeSyncConfig(providerData)
+		if err != nil {
+			return err
+		}
+		client := &http.Client{Timeout: weknoraHTTPTimeout}
+		if docID := strings.TrimSpace(doc.ExternalDocID); docID != "" {
+			if err := deleteWeknoraKnowledge(client, weknoraCfg, docID); err != nil {
+				return err
+			}
+		}
+		if !kb.AutoDataset {
+			return nil
+		}
+		empty, err := isWeknoraKnowledgeBaseEmpty(client, weknoraCfg, datasetID)
+		if err != nil {
+			return err
+		}
+		if empty {
+			if err := deleteWeknoraKnowledgeBase(client, weknoraCfg, datasetID); err != nil {
 				return err
 			}
 			now := time.Now()
@@ -782,6 +1067,44 @@ func ensureRagflowDatasetForKnowledgeBase(db *gorm.DB, kb *models.KnowledgeBase,
 	return datasetID, nil
 }
 
+func ensureWeknoraDatasetForKnowledgeBase(db *gorm.DB, kb *models.KnowledgeBase, client *http.Client, cfg *weknoraKnowledgeSyncConfig) (string, error) {
+	if kb == nil {
+		return "", fmt.Errorf("知识库为空")
+	}
+	datasetID := strings.TrimSpace(kb.ExternalKBID)
+	if datasetID != "" {
+		if err := updateWeknoraKnowledgeBase(client, cfg, datasetID, kb); err != nil {
+			return "", err
+		}
+		return datasetID, nil
+	}
+
+	datasetID, err := createWeknoraKnowledgeBase(client, cfg, kb)
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"external_kb_id": datasetID,
+		"auto_dataset":   true,
+		"sync_provider":  "weknora",
+		"sync_status":    knowledgeSyncStatusSynced,
+		"sync_error":     "",
+		"last_synced_at": &now,
+	}
+	if err := db.Model(&models.KnowledgeBase{}).Where("id = ?", kb.ID).Updates(updates).Error; err != nil {
+		return "", fmt.Errorf("更新知识库dataset_id失败: %w", err)
+	}
+	kb.ExternalKBID = datasetID
+	kb.AutoDataset = true
+	kb.SyncProvider = "weknora"
+	kb.SyncStatus = knowledgeSyncStatusSynced
+	kb.SyncError = ""
+	kb.LastSyncedAt = &now
+	return datasetID, nil
+}
+
 func persistKnowledgeDocumentSyncState(db *gorm.DB, doc *models.KnowledgeBaseDocument, externalDocID, syncStatus string, syncErr error) error {
 	if doc == nil || doc.ID == 0 {
 		return fmt.Errorf("文档实体无效")
@@ -825,6 +1148,18 @@ func buildDifyURL(baseURL, path string) string {
 }
 
 func buildRagflowURL(baseURL, path string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	lower := strings.ToLower(trimmed)
+	if strings.HasSuffix(lower, "/api/v1") {
+		return trimmed + path
+	}
+	if strings.HasSuffix(lower, "/api") {
+		return trimmed + "/v1" + path
+	}
+	return trimmed + "/api/v1" + path
+}
+
+func buildWeknoraURL(baseURL, path string) string {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	lower := strings.ToLower(trimmed)
 	if strings.HasSuffix(lower, "/api/v1") {
@@ -1327,6 +1662,341 @@ func deleteRagflowDataset(client *http.Client, cfg *ragflowKnowledgeSyncConfig, 
 	return nil
 }
 
+func createWeknoraKnowledgeBase(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kb *models.KnowledgeBase) (string, error) {
+	payload := buildWeknoraKnowledgeBasePayload(cfg, kb)
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	_, body, err := doWeknoraJSONRequest(client, http.MethodPost, buildWeknoraURL(cfg.BaseURL, "/knowledge-bases"), cfg.APIKey, payload, &resp)
+	if err != nil {
+		return "", fmt.Errorf("创建Weknora知识库失败: %w", err)
+	}
+	kbID := strings.TrimSpace(resp.Data.ID)
+	if kbID == "" {
+		if id := extractIDFromGenericBody(body); id != "" {
+			kbID = id
+		}
+	}
+	if kbID == "" {
+		return "", fmt.Errorf("创建Weknora知识库失败: 返回缺少id, body=%s", string(body))
+	}
+	return kbID, nil
+}
+
+func updateWeknoraKnowledgeBase(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID string, kb *models.KnowledgeBase) error {
+	kbID = strings.TrimSpace(kbID)
+	if kbID == "" {
+		return fmt.Errorf("weknora知识库id为空")
+	}
+	payload := buildWeknoraKnowledgeBaseUpdatePayload(cfg, kb)
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge-bases/%s", url.PathEscape(kbID)))
+	status, body, err := doWeknoraJSONRequest(client, http.MethodPut, endpoint, cfg.APIKey, payload, nil)
+	if err == nil {
+		return nil
+	}
+	// 兼容旧版接口：若新格式(update payload 带 config)失败，按旧扁平格式重试一次。
+	if shouldRetryWeknoraLegacyUpdate(status, body, err) {
+		legacyPayload := buildWeknoraKnowledgeBasePayload(cfg, kb)
+		legacyStatus, legacyBody, legacyErr := doWeknoraJSONRequest(client, http.MethodPut, endpoint, cfg.APIKey, legacyPayload, nil)
+		if legacyErr == nil {
+			log.Printf(
+				"[KnowledgeSync][Weknora] Update fallback succeeded knowledge_base_id=%s primary_status=%d primary_body=%s",
+				kbID,
+				status,
+				truncateForLog(string(body), 2000),
+			)
+			return nil
+		}
+		return fmt.Errorf(
+			"更新Weknora知识库失败(knowledge_base_id=%s): primary_err=%v; fallback_status=%d fallback_err=%v fallback_body=%s",
+			kbID,
+			err,
+			legacyStatus,
+			legacyErr,
+			truncateForLog(string(legacyBody), 2000),
+		)
+	}
+	return fmt.Errorf("更新Weknora知识库失败(knowledge_base_id=%s): %w", kbID, err)
+}
+
+func deleteWeknoraKnowledgeBase(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID string) error {
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge-bases/%s", url.PathEscape(strings.TrimSpace(kbID))))
+	status, _, err := doWeknoraJSONRequest(client, http.MethodDelete, endpoint, cfg.APIKey, nil, nil)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("删除Weknora知识库失败(knowledge_base_id=%s): %w", kbID, err)
+	}
+	return nil
+}
+
+func createWeknoraKnowledgeByText(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID, name, content string) (string, error) {
+	fileName := sanitizeKnowledgeUploadFileName(strings.TrimSpace(name))
+	if fileName == "" {
+		fileName = "document.md"
+	}
+	if filepath.Ext(fileName) == "" {
+		fileName = fileName + ".md"
+	}
+	return createWeknoraKnowledgeByFile(client, cfg, kbID, fileName, []byte(content))
+}
+
+func replaceWeknoraKnowledgeByText(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID, oldKnowledgeID, name, content string) (string, error) {
+	newKnowledgeID, err := createWeknoraKnowledgeByText(client, cfg, kbID, name, content)
+	if err != nil {
+		return "", err
+	}
+	oldKnowledgeID = strings.TrimSpace(oldKnowledgeID)
+	if oldKnowledgeID != "" && oldKnowledgeID != newKnowledgeID {
+		if err := deleteWeknoraKnowledge(client, cfg, oldKnowledgeID); err != nil {
+			log.Printf("[KnowledgeSync][Weknora] delete old text document warning knowledge_base_id=%s old_knowledge_id=%s err=%v", kbID, oldKnowledgeID, err)
+		}
+	}
+	return newKnowledgeID, nil
+}
+
+func createWeknoraKnowledgeByFile(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID, fileName string, fileData []byte) (string, error) {
+	kbID = strings.TrimSpace(kbID)
+	if kbID == "" {
+		return "", fmt.Errorf("weknora知识库id为空")
+	}
+	fileName = sanitizeKnowledgeUploadFileName(fileName)
+	if fileName == "" {
+		fileName = "document.bin"
+	}
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge-bases/%s/knowledge/file", url.PathEscape(kbID)))
+	fields := map[string]string{
+		"enable_multimodel": strconv.FormatBool(cfg.EnableMultimodal),
+	}
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	_, body, err := doWeknoraMultipartFileRequest(client, http.MethodPost, endpoint, cfg.APIKey, fields, "file", fileName, fileData, &resp)
+	if err != nil {
+		return "", fmt.Errorf("创建Weknora文档失败(knowledge_base_id=%s): %w", kbID, err)
+	}
+	knowledgeID := strings.TrimSpace(resp.Data.ID)
+	if knowledgeID == "" {
+		if id := extractIDFromGenericBody(body); id != "" {
+			knowledgeID = id
+		}
+	}
+	if knowledgeID == "" {
+		return "", fmt.Errorf("创建Weknora文档失败: 返回缺少id, body=%s", string(body))
+	}
+	return knowledgeID, nil
+}
+
+func deleteWeknoraKnowledge(client *http.Client, cfg *weknoraKnowledgeSyncConfig, knowledgeID string) error {
+	knowledgeID = strings.TrimSpace(knowledgeID)
+	if knowledgeID == "" {
+		return nil
+	}
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge/%s", url.PathEscape(knowledgeID)))
+	status, _, err := doWeknoraJSONRequest(client, http.MethodDelete, endpoint, cfg.APIKey, nil, nil)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("删除Weknora文档失败(knowledge_id=%s): %w", knowledgeID, err)
+	}
+	return nil
+}
+
+func getWeknoraKnowledgeParseStatus(client *http.Client, cfg *weknoraKnowledgeSyncConfig, knowledgeID string) (string, string, error) {
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge/%s", url.PathEscape(strings.TrimSpace(knowledgeID))))
+	var resp struct {
+		Data struct {
+			ParseStatus  string `json:"parse_status"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"data"`
+	}
+	statusCode, body, err := doWeknoraJSONRequest(client, http.MethodGet, endpoint, cfg.APIKey, nil, &resp)
+	if err != nil {
+		return "", "", fmt.Errorf("获取Weknora文档状态失败(knowledge_id=%s): %w", knowledgeID, err)
+	}
+	status := strings.ToLower(strings.TrimSpace(resp.Data.ParseStatus))
+	errMsg := strings.TrimSpace(resp.Data.ErrorMessage)
+	if status == "" && len(body) > 0 {
+		var generic map[string]interface{}
+		if jsonErr := json.Unmarshal(body, &generic); jsonErr == nil {
+			if dataMap, ok := generic["data"].(map[string]interface{}); ok {
+				status = strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", dataMap["parse_status"])))
+				errMsg = strings.TrimSpace(fmt.Sprintf("%v", dataMap["error_message"]))
+				if errMsg == "<nil>" {
+					errMsg = ""
+				}
+			}
+		}
+	}
+	if statusCode == http.StatusNotFound {
+		return "", "", fmt.Errorf("文档不存在")
+	}
+	return status, errMsg, nil
+}
+
+func waitWeknoraKnowledgeParsed(client *http.Client, cfg *weknoraKnowledgeSyncConfig, knowledgeID string) error {
+	knowledgeID = strings.TrimSpace(knowledgeID)
+	if knowledgeID == "" {
+		return fmt.Errorf("weknora文档id为空")
+	}
+	timeout := cfg.ParseTimeout
+	if timeout <= 0 {
+		timeout = defaultWeknoraParseTimeout
+	}
+	interval := cfg.ParsePollInterval
+	if interval <= 0 {
+		interval = defaultWeknoraParsePollInterval
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		status, errMsg, err := getWeknoraKnowledgeParseStatus(client, cfg, knowledgeID)
+		if err != nil {
+			return err
+		}
+		switch status {
+		case "completed":
+			return nil
+		case "failed":
+			if errMsg == "" {
+				errMsg = "unknown error"
+			}
+			return fmt.Errorf("Weknora文档解析失败(knowledge_id=%s): %s", knowledgeID, errMsg)
+		case "pending", "processing", "":
+			if time.Now().After(deadline) {
+				return fmt.Errorf("等待Weknora文档解析超时(knowledge_id=%s timeout_ms=%d)", knowledgeID, timeout.Milliseconds())
+			}
+			time.Sleep(interval)
+		default:
+			if time.Now().After(deadline) {
+				return fmt.Errorf("等待Weknora文档解析超时(knowledge_id=%s status=%s timeout_ms=%d)", knowledgeID, status, timeout.Milliseconds())
+			}
+			time.Sleep(interval)
+		}
+	}
+}
+
+func isWeknoraKnowledgeBaseEmpty(client *http.Client, cfg *weknoraKnowledgeSyncConfig, kbID string) (bool, error) {
+	endpoint := buildWeknoraURL(cfg.BaseURL, fmt.Sprintf("/knowledge-bases/%s/knowledge?page=1&page_size=1", url.PathEscape(strings.TrimSpace(kbID))))
+	var resp struct {
+		Data struct {
+			List []struct {
+				ID string `json:"id"`
+			} `json:"list"`
+			Total int `json:"total"`
+		} `json:"data"`
+	}
+	_, body, err := doWeknoraJSONRequest(client, http.MethodGet, endpoint, cfg.APIKey, nil, &resp)
+	if err != nil {
+		return false, fmt.Errorf("获取Weknora文档列表失败(knowledge_base_id=%s): %w", kbID, err)
+	}
+	if resp.Data.Total > 0 || len(resp.Data.List) > 0 {
+		return false, nil
+	}
+	if len(body) > 0 {
+		var generic map[string]interface{}
+		if jsonErr := json.Unmarshal(body, &generic); jsonErr == nil {
+			if dataMap, ok := generic["data"].(map[string]interface{}); ok {
+				if list, ok := dataMap["list"].([]interface{}); ok && len(list) > 0 {
+					return false, nil
+				}
+				if total, ok := parseInt(dataMap["total"]); ok && total > 0 {
+					return false, nil
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
+func buildWeknoraKnowledgeBaseConfigPayload(cfg *weknoraKnowledgeSyncConfig) map[string]interface{} {
+	config := map[string]interface{}{
+		"embedding_model_id": cfg.EmbeddingModelID,
+		"chunking_config": map[string]interface{}{
+			"chunk_size":        cfg.ChunkSize,
+			"chunk_overlap":     cfg.ChunkOverlap,
+			"separators":        cfg.Separators,
+			"enable_multimodal": cfg.EnableMultimodal,
+		},
+		// WeKnora PUT 文档示例中 config 下包含该字段；无模型时传空字符串。
+		"image_processing_config": map[string]interface{}{
+			"model_id": strings.TrimSpace(cfg.VLMModelID),
+		},
+	}
+	if cfg.SummaryModelID != "" {
+		config["summary_model_id"] = cfg.SummaryModelID
+	}
+	if cfg.RerankModelID != "" {
+		config["rerank_model_id"] = cfg.RerankModelID
+	}
+	if cfg.VLMModelID != "" {
+		config["vlm_config"] = map[string]interface{}{
+			"enabled":  true,
+			"model_id": cfg.VLMModelID,
+		}
+	}
+	return config
+}
+
+func buildWeknoraKnowledgeBasePayload(cfg *weknoraKnowledgeSyncConfig, kb *models.KnowledgeBase) map[string]interface{} {
+	payload := map[string]interface{}{
+		"name":        buildAutoDatasetName(kb),
+		"description": strings.TrimSpace(kb.Description),
+	}
+	for k, v := range buildWeknoraKnowledgeBaseConfigPayload(cfg) {
+		payload[k] = v
+	}
+	return payload
+}
+
+func buildWeknoraKnowledgeBaseUpdatePayload(cfg *weknoraKnowledgeSyncConfig, kb *models.KnowledgeBase) map[string]interface{} {
+	return map[string]interface{}{
+		"name":        buildAutoDatasetName(kb),
+		"description": strings.TrimSpace(kb.Description),
+		"config":      buildWeknoraKnowledgeBaseConfigPayload(cfg),
+	}
+}
+
+func shouldRetryWeknoraLegacyUpdate(status int, body []byte, err error) bool {
+	if err == nil {
+		return false
+	}
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	msg := strings.ToLower(err.Error() + " " + string(body))
+	return strings.Contains(msg, "config") ||
+		strings.Contains(msg, "unknown field") ||
+		strings.Contains(msg, "invalid request")
+}
+
+func extractIDFromGenericBody(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var generic map[string]interface{}
+	if err := json.Unmarshal(body, &generic); err != nil {
+		return ""
+	}
+	if id, ok := generic["id"].(string); ok && strings.TrimSpace(id) != "" {
+		return strings.TrimSpace(id)
+	}
+	if data, ok := generic["data"].(map[string]interface{}); ok {
+		if id, ok := data["id"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+		if knowledgeID, ok := data["knowledge_id"].(string); ok && strings.TrimSpace(knowledgeID) != "" {
+			return strings.TrimSpace(knowledgeID)
+		}
+	}
+	return ""
+}
+
 func isRagflowNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -1336,6 +2006,184 @@ func isRagflowNotFoundError(err error) bool {
 		strings.Contains(msg, "not exist") ||
 		strings.Contains(msg, "does not exist") ||
 		strings.Contains(msg, "does not have")
+}
+
+func doWeknoraJSONRequest(client *http.Client, method, endpoint, apiKey string, payload interface{}, out interface{}) (int, []byte, error) {
+	var bodyReader io.Reader
+	var payloadBytes []byte
+	if payload != nil {
+		payloadBytesLocal, err := json.Marshal(payload)
+		if err != nil {
+			return 0, nil, fmt.Errorf("编码请求体失败: %w", err)
+		}
+		payloadBytes = payloadBytesLocal
+		bodyReader = bytes.NewReader(payloadBytes)
+	}
+	log.Printf("[KnowledgeSync][Weknora] Request method=%s url=%s payload=%s", method, endpoint, serializePayloadForLog(payloadBytes))
+
+	startAt := time.Now()
+	req, err := http.NewRequest(method, endpoint, bodyReader)
+	if err != nil {
+		return 0, nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[KnowledgeSync][Weknora] Response method=%s url=%s elapsed_ms=%d error=%v", method, endpoint, time.Since(startAt).Milliseconds(), err)
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf(
+		"[KnowledgeSync][Weknora] Response method=%s url=%s status=%d elapsed_ms=%d body=%s",
+		method,
+		endpoint,
+		resp.StatusCode,
+		time.Since(startAt).Milliseconds(),
+		truncateForLog(string(bodyBytes), 4000),
+	)
+	if resp.StatusCode >= 400 {
+		return resp.StatusCode, bodyBytes, fmt.Errorf("status=%d body=%s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if len(bodyBytes) > 0 {
+		var envelope struct {
+			Success *bool       `json:"success"`
+			Code    interface{} `json:"code"`
+			Message string      `json:"message"`
+			Msg     string      `json:"msg"`
+		}
+		if err := json.Unmarshal(bodyBytes, &envelope); err == nil {
+			if envelope.Success != nil && !*envelope.Success {
+				msg := strings.TrimSpace(envelope.Message)
+				if msg == "" {
+					msg = strings.TrimSpace(envelope.Msg)
+				}
+				return resp.StatusCode, bodyBytes, fmt.Errorf("success=false message=%s body=%s", msg, string(bodyBytes))
+			}
+			if envelope.Code != nil {
+				if code, ok := parseInt(envelope.Code); ok && code != 0 {
+					msg := strings.TrimSpace(envelope.Message)
+					if msg == "" {
+						msg = strings.TrimSpace(envelope.Msg)
+					}
+					return resp.StatusCode, bodyBytes, fmt.Errorf("code=%d message=%s body=%s", code, msg, string(bodyBytes))
+				}
+			}
+		}
+	}
+
+	if out != nil && len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, out); err != nil {
+			log.Printf("解析Weknora响应失败: %v, body: %s", err, string(bodyBytes))
+			return resp.StatusCode, bodyBytes, fmt.Errorf("解析响应失败: %w", err)
+		}
+	}
+	return resp.StatusCode, bodyBytes, nil
+}
+
+func doWeknoraMultipartFileRequest(
+	client *http.Client,
+	method, endpoint, apiKey string,
+	fields map[string]string,
+	fileField, fileName string,
+	fileContent []byte,
+	out interface{},
+) (int, []byte, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return 0, nil, fmt.Errorf("写入表单字段失败: %w", err)
+		}
+	}
+	fileWriter, err := writer.CreateFormFile(fileField, fileName)
+	if err != nil {
+		return 0, nil, fmt.Errorf("创建文件字段失败: %w", err)
+	}
+	if _, err := fileWriter.Write(fileContent); err != nil {
+		return 0, nil, fmt.Errorf("写入文件内容失败: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return 0, nil, fmt.Errorf("关闭表单写入器失败: %w", err)
+	}
+
+	fieldsBytes, _ := json.Marshal(fields)
+	log.Printf(
+		"[KnowledgeSync][Weknora] Request method=%s url=%s multipart_file=%s size=%d fields=%s",
+		method,
+		endpoint,
+		fileName,
+		len(fileContent),
+		serializePayloadForLog(fieldsBytes),
+	)
+	startAt := time.Now()
+	req, err := http.NewRequest(method, endpoint, &body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[KnowledgeSync][Weknora] Response method=%s url=%s elapsed_ms=%d error=%v", method, endpoint, time.Since(startAt).Milliseconds(), err)
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf(
+		"[KnowledgeSync][Weknora] Response method=%s url=%s status=%d elapsed_ms=%d body=%s",
+		method,
+		endpoint,
+		resp.StatusCode,
+		time.Since(startAt).Milliseconds(),
+		truncateForLog(string(bodyBytes), 4000),
+	)
+	if resp.StatusCode >= 400 {
+		return resp.StatusCode, bodyBytes, fmt.Errorf("status=%d body=%s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if len(bodyBytes) > 0 {
+		var envelope struct {
+			Success *bool       `json:"success"`
+			Code    interface{} `json:"code"`
+			Message string      `json:"message"`
+			Msg     string      `json:"msg"`
+		}
+		if err := json.Unmarshal(bodyBytes, &envelope); err == nil {
+			if envelope.Success != nil && !*envelope.Success {
+				msg := strings.TrimSpace(envelope.Message)
+				if msg == "" {
+					msg = strings.TrimSpace(envelope.Msg)
+				}
+				return resp.StatusCode, bodyBytes, fmt.Errorf("success=false message=%s body=%s", msg, string(bodyBytes))
+			}
+			if envelope.Code != nil {
+				if code, ok := parseInt(envelope.Code); ok && code != 0 {
+					msg := strings.TrimSpace(envelope.Message)
+					if msg == "" {
+						msg = strings.TrimSpace(envelope.Msg)
+					}
+					return resp.StatusCode, bodyBytes, fmt.Errorf("code=%d message=%s body=%s", code, msg, string(bodyBytes))
+				}
+			}
+		}
+	}
+
+	if out != nil && len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, out); err != nil {
+			log.Printf("解析Weknora响应失败: %v, body: %s", err, string(bodyBytes))
+			return resp.StatusCode, bodyBytes, fmt.Errorf("解析响应失败: %w", err)
+		}
+	}
+	return resp.StatusCode, bodyBytes, nil
 }
 
 func doRagflowJSONRequest(client *http.Client, method, endpoint, apiKey string, payload interface{}, out interface{}) (int, []byte, error) {
@@ -1641,6 +2489,92 @@ func shouldRetryDifyRequest(err error) bool {
 		return true
 	}
 	return false
+}
+
+func parseProviderBool(input interface{}, defaultValue bool) bool {
+	switch v := input.(type) {
+	case bool:
+		return v
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case float64:
+		return v != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return defaultValue
+}
+
+func parseStringSlice(input interface{}) []string {
+	if input == nil {
+		return nil
+	}
+	switch v := input.(type) {
+	case []string:
+		ret := make([]string, 0, len(v))
+		for _, item := range v {
+			item = normalizeProviderSeparator(item)
+			if item != "" {
+				ret = append(ret, item)
+			}
+		}
+		return ret
+	case []interface{}:
+		ret := make([]string, 0, len(v))
+		for _, item := range v {
+			s := normalizeProviderSeparator(fmt.Sprintf("%v", item))
+			if s != "" && s != "<nil>" {
+				ret = append(ret, s)
+			}
+		}
+		return ret
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+			var list []string
+			if err := json.Unmarshal([]byte(s), &list); err == nil {
+				return parseStringSlice(list)
+			}
+		}
+		parts := strings.Split(s, ",")
+		ret := make([]string, 0, len(parts))
+		for _, part := range parts {
+			normalized := normalizeProviderSeparator(part)
+			if normalized != "" {
+				ret = append(ret, normalized)
+			}
+		}
+		if len(ret) > 0 {
+			return ret
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func normalizeProviderSeparator(input string) string {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		`\\r\\n`, "\r\n",
+		`\\n`, "\n",
+		`\\r`, "\r",
+		`\\t`, "\t",
+	)
+	return replacer.Replace(s)
 }
 
 func parseInt(input interface{}) (int, bool) {
