@@ -66,33 +66,55 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 		var frameDurationMs int
 		var vadNeedGetCount int // VAD需要的帧数，会在第一帧后计算
 
-		// 在循环外获取VAD资源（高频使用场景，避免频繁获取/归还）
+		// VAD 资源改为懒加载 + 空闲释放，避免长期独占资源池实例。
 		var vadWrapper *pool.ResourceWrapper[inter.VAD]
 		var vadProvider inter.VAD
+		var vadLastUseAt time.Time
+		const vadIdleReleaseTimeout = 2 * time.Second
+		vadIdleTicker := time.NewTicker(time.Second)
+		defer vadIdleTicker.Stop()
 		needVad := !(state.Asr.AutoEnd || state.ListenMode == "manual")
-		if needVad {
-			var err error
-			provider := state.DeviceConfig.Vad.Provider
-			config := state.DeviceConfig.Vad.Config
-
-			// 检查 provider 是否为空，如果为空则记录警告
-			if provider == "" {
-				log.Warnf("VAD provider 为空，尝试从 config 中获取")
-			} else {
-				log.Debugf("获取VAD资源: provider=%s", provider)
-			}
-
-			vadWrapper, err = pool.Acquire[inter.VAD](
-				"vad",
-				provider,
-				config,
-			)
-			if err != nil {
-				log.Errorf("获取VAD资源失败: provider=%s, config=%+v, error=%v", provider, config, err)
+		vadProviderName := state.DeviceConfig.Vad.Provider
+		vadProviderConfig := state.DeviceConfig.Vad.Config
+		releaseVad := func(reason string) {
+			if vadWrapper == nil {
 				return
 			}
-			defer pool.Release(vadWrapper) // 函数返回时归还资源
-			vadProvider = vadWrapper.GetProvider()
+			pool.Release(vadWrapper)
+			vadWrapper = nil
+			vadProvider = nil
+			vadLastUseAt = time.Time{}
+			log.Debugf("释放VAD资源: device=%s, reason=%s", state.DeviceID, reason)
+		}
+		defer releaseVad("process_exit")
+		ensureVad := func() bool {
+			if !needVad {
+				return false
+			}
+			if vadProvider != nil {
+				return true
+			}
+
+			// 检查 provider 是否为空，如果为空则记录警告
+			if vadProviderName == "" {
+				log.Warnf("VAD provider 为空，尝试从 config 中获取")
+			} else {
+				log.Debugf("获取VAD资源: provider=%s", vadProviderName)
+			}
+
+			wrapper, err := pool.Acquire[inter.VAD](
+				"vad",
+				vadProviderName,
+				vadProviderConfig,
+			)
+			if err != nil {
+				log.Errorf("获取VAD资源失败: provider=%s, config=%+v, error=%v", vadProviderName, vadProviderConfig, err)
+				return false
+			}
+			vadWrapper = wrapper
+			vadProvider = wrapper.GetProvider()
+			vadLastUseAt = time.Now()
+			return true
 		}
 
 		for {
@@ -100,6 +122,11 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 			pcmFrame := make([]float32, maxFrameSize)
 
 			select {
+			case <-vadIdleTicker.C:
+				if vadWrapper != nil && !vadLastUseAt.IsZero() && time.Since(vadLastUseAt) >= vadIdleReleaseTimeout {
+					releaseVad("idle_timeout")
+				}
+				continue
 			case opusFrame, ok := <-state.OpusAudioBuffer:
 				//log.Debugf("processAsrAudio 收到音频数据, len: %d", len(opusFrame))
 				if !ok {
@@ -163,7 +190,10 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					audioFormat.FrameDuration = frameDurationMs
 				}
 
-				if !skipVad && vadProvider != nil {
+				if !skipVad && needVad {
+					if !ensureVad() {
+						continue
+					}
 					//decode opus to pcm
 					state.AsrAudioBuffer.AddAsrAudioData(pcmData)
 
@@ -180,12 +210,14 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						//如果已经检测到语音, 则不进行vad检测, 直接将pcmData传给asr
 						// 使用循环外获取的VAD资源进行检测
 						// 重置VAD状态
+						vadLastUseAt = time.Now()
 						if err := vadProvider.Reset(); err != nil {
 							log.Errorf("重置vad失败: %v", err)
 							continue
 						}
 
 						// 进行VAD检测
+						vadLastUseAt = time.Now()
 						haveVoice, err = vadProvider.IsVADExt(vadPcmData, audioFormat.SampleRate, frameSize)
 						if err != nil {
 							log.Errorf("processAsrAudio VAD检测失败: %v", err)

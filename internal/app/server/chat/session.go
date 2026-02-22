@@ -55,6 +55,16 @@ type ChatSession struct {
 	pendingSpeakerResult *speaker.IdentifyResult
 	speakerResultReady   chan struct{} // 仅用于通知就绪，不传数据
 
+	// hello 幂等控制：MQTT-UDP 短时离线重连会重复发送 hello，避免重复初始化造成资源泄漏。
+	helloMu        sync.Mutex
+	helloInited    bool
+	vadLoopStarted bool
+	mcpHelloInited bool
+
+	// 未激活设备高频触发时，短时间内复用最近一次“未激活”判定，避免频繁打接口。
+	activationCheckMu     sync.Mutex
+	lastActivationFalseAt time.Time
+
 	// Close 保护，防止多次关闭
 	closeOnce sync.Once
 	closed    bool
@@ -490,7 +500,9 @@ func (s *ChatSession) HandleHelloMessage(msg *ClientMessage) error {
 }
 
 func (s *ChatSession) HandleMqttHelloMessage(msg *ClientMessage) error {
-	s.HandleCommonHelloMessage(msg)
+	if err := s.HandleCommonHelloMessage(msg); err != nil {
+		return err
+	}
 
 	clientState := s.clientState
 
@@ -527,25 +539,48 @@ func (s *ChatSession) HandleMqttHelloMessage(msg *ClientMessage) error {
 }
 
 func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
-	// 创建新会话
+	if msg.AudioParams == nil {
+		return fmt.Errorf("hello消息缺少audio_params")
+	}
+
+	clientState := s.clientState
+
+	s.helloMu.Lock()
+	defer s.helloMu.Unlock()
+
+	// hello 到来时允许更新部分运行时参数（重复 hello 场景也生效）
+	clientState.InputAudioFormat = *msg.AudioParams
+
+	isDuplicateHello := s.helloInited
+	if isDuplicateHello {
+		if isMcp, ok := msg.Features["mcp"]; ok && isMcp && !s.mcpHelloInited {
+			s.mcpHelloInited = true
+			go initMcp(s.clientState, s.serverTransport)
+		}
+		log.Infof("设备 %s 收到重复hello，跳过重复初始化", clientState.DeviceID)
+		return nil
+	}
+
+	// 首次 hello 初始化
 	session, err := auth.A().CreateSession(msg.DeviceID)
 	if err != nil {
 		return fmt.Errorf("创建会话失败: %v", err)
 	}
 
 	// 更新客户端状态
-	s.clientState.SessionID = session.ID
+	clientState.SessionID = session.ID
 
-	if isMcp, ok := msg.Features["mcp"]; ok && isMcp {
+	if !s.vadLoopStarted {
+		s.asrManager.ProcessVadAudio(clientState.Ctx, s.Close)
+		s.vadLoopStarted = true
+	}
+
+	if isMcp, ok := msg.Features["mcp"]; ok && isMcp && !s.mcpHelloInited {
+		s.mcpHelloInited = true
 		go initMcp(s.clientState, s.serverTransport)
 	}
 
-	clientState := s.clientState
-
-	clientState.InputAudioFormat = *msg.AudioParams
-
-	s.asrManager.ProcessVadAudio(clientState.Ctx, s.Close)
-
+	s.helloInited = true
 	return nil
 }
 
@@ -633,19 +668,19 @@ func (s *ChatSession) HandleNotActivated() {
 	}
 
 	code, challenge, message, timeoutMs := configProvider.GetActivationInfo(s.clientState.Ctx, s.clientState.DeviceID, "client_id")
-	if code == 0 {
+	if code == "" {
 		log.Errorf("获取激活信息失败: %v", err)
 		return
 	}
 
-	log.Infof("激活码: %d, 挑战码: %s, 消息: %s, 超时时间: %d", code, challenge, message, timeoutMs)
+	log.Infof("激活码: %s, 挑战码: %s, 消息: %s, 超时时间: %d", code, challenge, message, timeoutMs)
 
 	s.ttsManager.EnqueueTtsStart(s.clientState.Ctx)
 	defer s.ttsManager.EnqueueTtsStop(s.clientState.Ctx)
 
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
 	_ = s.ttsManager.handleTextResponse(s.clientState.AfterAsrSessionCtx.Get(sessionCtx), llm_common.LLMResponseStruct{
-		Text: fmt.Sprintf("请在后台添加设备，激活码: %d", code),
+		Text: fmt.Sprintf("请在后台添加设备，激活码: %s", code),
 	}, false)
 
 }
@@ -747,6 +782,15 @@ func (s *ChatSession) HandleGoodByeMessage(msg *ClientMessage) error {
 func (s *ChatSession) CheckDeviceActivated() (bool, error) {
 	if viper.GetBool("auth.enable") {
 		if !s.clientState.IsActivated {
+			const falseCheckThrottle = time.Second
+			s.activationCheckMu.Lock()
+			lastFalseAt := s.lastActivationFalseAt
+			s.activationCheckMu.Unlock()
+			if !lastFalseAt.IsZero() && time.Since(lastFalseAt) < falseCheckThrottle {
+				log.Debugf("设备 %s 激活状态仍为未激活，跳过重复实时校验", s.clientState.DeviceID)
+				return false, nil
+			}
+
 			configProvider, err := user_config.GetProvider(viper.GetString("config_provider.type"))
 			if err != nil {
 				log.Errorf("获取配置提供者失败: %v", err)
@@ -760,7 +804,13 @@ func (s *ChatSession) CheckDeviceActivated() (bool, error) {
 			}
 			if isActivated {
 				s.clientState.IsActivated = true
+				s.activationCheckMu.Lock()
+				s.lastActivationFalseAt = time.Time{}
+				s.activationCheckMu.Unlock()
 			} else {
+				s.activationCheckMu.Lock()
+				s.lastActivationFalseAt = time.Now()
+				s.activationCheckMu.Unlock()
 				s.HandleNotActivated()
 				return false, nil
 			}

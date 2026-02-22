@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
+	einoschema "github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -942,6 +943,22 @@ func toolInfoToSchemaMap(paramsOneOf interface{}) map[string]interface{} {
 		return nil
 	}
 
+	// ParamsOneOf 内部字段未导出，直接 json.Marshal 可能得到 {}。
+	// 优先走官方 ToOpenAPIV3()，确保能取到真实参数 schema。
+	if p, ok := paramsOneOf.(*einoschema.ParamsOneOf); ok && p != nil {
+		if openAPISchema, err := p.ToOpenAPIV3(); err == nil && openAPISchema != nil {
+			raw, err := json.Marshal(openAPISchema)
+			if err == nil {
+				decoded := map[string]interface{}{}
+				if err = json.Unmarshal(raw, &decoded); err == nil {
+					if len(decoded) > 0 {
+						return decoded
+					}
+				}
+			}
+		}
+	}
+
 	raw, err := json.Marshal(paramsOneOf)
 	if err != nil {
 		return nil
@@ -957,6 +974,9 @@ func toolInfoToSchemaMap(paramsOneOf interface{}) map[string]interface{} {
 	}
 	if openAPIV3, ok := decoded["open_api_v3"].(map[string]interface{}); ok {
 		return openAPIV3
+	}
+	if len(decoded) == 0 {
+		return nil
 	}
 	return decoded
 }

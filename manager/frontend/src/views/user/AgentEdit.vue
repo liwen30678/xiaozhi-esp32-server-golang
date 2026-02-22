@@ -878,6 +878,74 @@ const handleMcpToolChange = (toolName) => {
   updateMcpExampleByTool(toolName)
 }
 
+const formatMcpCallResult = (payload) => {
+  const MAX_PARSE_DEPTH = 8
+
+  const tryParseJSONString = (value) => {
+    if (typeof value !== 'string') return { parsed: false, value }
+    let text = value.trim()
+    if (!text) return { parsed: false, value }
+
+    const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+    if (fenced) {
+      text = fenced[1].trim()
+    }
+
+    const looksLikeJSON =
+      (text.startsWith('{') && text.endsWith('}')) ||
+      (text.startsWith('[') && text.endsWith(']'))
+    if (!looksLikeJSON) return { parsed: false, value }
+
+    try {
+      return { parsed: true, value: JSON.parse(text) }
+    } catch (_) {
+      return { parsed: false, value }
+    }
+  }
+
+  const deepParseJSONStrings = (value, depth = 0) => {
+    if (depth >= MAX_PARSE_DEPTH || value == null) return value
+
+    if (typeof value === 'string') {
+      const parsed = tryParseJSONString(value)
+      if (!parsed.parsed) return value
+      return deepParseJSONStrings(parsed.value, depth + 1)
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => deepParseJSONStrings(item, depth + 1))
+    }
+
+    if (typeof value === 'object') {
+      const out = {}
+      Object.keys(value).forEach((key) => {
+        out[key] = deepParseJSONStrings(value[key], depth + 1)
+      })
+
+      if (Array.isArray(out.content) && out.content.length === 1) {
+        const first = out.content[0]
+        if (first && typeof first === 'object' && !Array.isArray(first) && first.type === 'text' && Object.prototype.hasOwnProperty.call(first, 'text')) {
+          const textValue = first.text
+          if (textValue && typeof textValue === 'object') {
+            return textValue
+          }
+        }
+      }
+
+      return out
+    }
+
+    return value
+  }
+
+  const data = payload ?? {}
+  const raw = (data && typeof data === 'object' && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, 'result'))
+    ? data.result
+    : data
+
+  return JSON.stringify(deepParseJSONStrings(raw), null, 2)
+}
+
 const callAgentMcpTool = async () => {
   if (!mcpCallForm.value.tool_name) {
     ElMessage.warning('请选择工具')
@@ -898,7 +966,7 @@ const callAgentMcpTool = async () => {
       tool_name: mcpCallForm.value.tool_name,
       arguments: argumentsObj
     })
-    mcpCallResult.value = JSON.stringify(response.data.data || {}, null, 2)
+    mcpCallResult.value = formatMcpCallResult(response.data.data || {})
     ElMessage.success('MCP工具调用成功')
   } catch (error) {
     mcpCallResult.value = JSON.stringify(error.response?.data || { error: error.message }, null, 2)

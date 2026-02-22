@@ -2,7 +2,6 @@ package websocket
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -64,15 +63,13 @@ func (s *WebSocketServer) handleOta(w http.ResponseWriter, r *http.Request) {
 		}
 		if !isActivited {
 			code, challenge, msg, timeoutMs := configProvider.GetActivationInfo(r.Context(), deviceId, clientId)
-			// code现在返回的是int类型，但实际上后端API返回字符串
-			// 为了保持兼容性，这里仍然格式化为字符串
 			activationInfo = &ActivationInfo{
-				Code:      fmt.Sprintf("%d", code),
+				Code:      code,
 				Message:   msg,
 				Challenge: challenge,
 				TimeoutMs: timeoutMs,
 			}
-			log.Infof("激活信息: &{Code:%d Message:%s Challenge:%s TimeoutMs:%d}", code, msg, challenge, timeoutMs)
+			log.Infof("激活信息: &{Code:%s Message:%s Challenge:%s TimeoutMs:%d}", code, msg, challenge, timeoutMs)
 		}
 	}
 
