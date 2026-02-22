@@ -7,7 +7,12 @@
           :key="provider.value"
           :label="provider.label"
           :value="provider.value"
-        />
+        >
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+            <span>{{ provider.label }}</span>
+            <el-tag v-if="provider.supports_voice_clone" size="small" type="success" effect="plain">支持复刻</el-tag>
+          </div>
+        </el-option>
       </el-select>
     </el-form-item>
     <el-form-item label="配置名称" prop="name">

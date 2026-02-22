@@ -460,7 +460,44 @@ func (uc *UserController) GetKnowledgeBases(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取知识库列表失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": items})
+
+	type knowledgeBaseDocCountRow struct {
+		KnowledgeBaseID uint  `gorm:"column:knowledge_base_id"`
+		DocCount        int64 `gorm:"column:doc_count"`
+	}
+	docCountMap := make(map[uint]int64, len(items))
+	if len(items) > 0 {
+		kbIDs := make([]uint, 0, len(items))
+		for _, item := range items {
+			kbIDs = append(kbIDs, item.ID)
+		}
+		var rows []knowledgeBaseDocCountRow
+		if err := uc.DB.Model(&models.KnowledgeBaseDocument{}).
+			Select("knowledge_base_id, COUNT(*) AS doc_count").
+			Where("knowledge_base_id IN ?", kbIDs).
+			Group("knowledge_base_id").
+			Scan(&rows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "统计知识库文档数失败"})
+			return
+		}
+		for _, row := range rows {
+			docCountMap[row.KnowledgeBaseID] = row.DocCount
+		}
+	}
+
+	type knowledgeBaseListItem struct {
+		models.KnowledgeBase
+		DocCount int64 `json:"doc_count"`
+	}
+	resp := make([]knowledgeBaseListItem, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, knowledgeBaseListItem{
+			KnowledgeBase: item,
+			DocCount:      docCountMap[item.ID],
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 func (uc *UserController) CreateKnowledgeBase(c *gin.Context) {
@@ -755,12 +792,6 @@ func (uc *UserController) TestKnowledgeBaseSearch(c *gin.Context) {
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status = ?", kb.ID, knowledgeSyncStatusSynced).Count(&docsSynced).Error
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status IN ?", kb.ID, pendingStatuses).Count(&docsPending).Error
 	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).Where("knowledge_base_id = ? AND sync_status IN ?", kb.ID, failedStatuses).Count(&docsFailed).Error
-	syncedExternalDocIDs := make([]string, 0, 4)
-	_ = uc.DB.Model(&models.KnowledgeBaseDocument{}).
-		Where("knowledge_base_id = ? AND sync_status = ? AND external_doc_id <> ''", kb.ID, knowledgeSyncStatusSynced).
-		Order("id DESC").
-		Pluck("external_doc_id", &syncedExternalDocIDs).Error
-
 	log.Printf(
 		"[KnowledgeTest] Start user_id=%d kb_id=%d kb_name=%q sync_provider=%s sync_status=%s dataset_id=%s retrieval_threshold=%s request_threshold=%s docs(total=%d synced=%d pending=%d failed=%d) query=%q top_k=%d",
 		userIDUint,
@@ -825,7 +856,7 @@ func (uc *UserController) TestKnowledgeBaseSearch(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		hits, err = queryKnowledgeTestByWeknora(client, cfg, req.Threshold, kb.RetrievalThreshold, providerData, datasetID, syncedExternalDocIDs, strings.TrimSpace(kb.Name), query, topK)
+		hits, err = queryKnowledgeTestByWeknora(client, cfg, req.Threshold, kb.RetrievalThreshold, providerData, datasetID, strings.TrimSpace(kb.Name), query, topK)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -1559,7 +1590,6 @@ func queryKnowledgeTestByWeknora(
 	kbThreshold *float64,
 	providerData map[string]interface{},
 	datasetID string,
-	knowledgeIDs []string,
 	datasetName, query string,
 	topK int,
 ) ([]knowledgeSearchTestHit, error) {
@@ -1568,19 +1598,13 @@ func queryKnowledgeTestByWeknora(
 		kbThreshold,
 		parseKnowledgeSearchFloat(providerData["score_threshold"], 0.2),
 	)
-	knowledgeIDs = normalizeKnowledgeIDs(knowledgeIDs)
 	payload := map[string]interface{}{
-		"query": strings.TrimSpace(query),
-	}
-	if len(knowledgeIDs) > 0 {
-		payload["knowledge_ids"] = knowledgeIDs
-	} else {
-		payload["knowledge_base_id"] = datasetID
+		"query":              strings.TrimSpace(query),
+		"knowledge_base_ids": []string{strings.TrimSpace(datasetID)},
 	}
 	log.Printf(
-		"[KnowledgeTest][Weknora] RetrieveRequest dataset_id=%s knowledge_ids=%d query=%q top_k=%d score_threshold=%.4f threshold_source=%s",
+		"[KnowledgeTest][Weknora] RetrieveRequest dataset_id=%s knowledge_base_ids=1 query=%q top_k=%d score_threshold=%.4f threshold_source=%s threshold_filter=disabled",
 		datasetID,
-		len(knowledgeIDs),
 		strings.TrimSpace(query),
 		topK,
 		scoreThreshold,
@@ -1624,9 +1648,6 @@ func queryKnowledgeTestByWeknora(
 		}
 		if score <= 0 && item.Metadata != nil {
 			score = parseKnowledgeSearchFloat(item.Metadata["score"], 0)
-		}
-		if scoreThreshold > 0 && score > 0 && score < scoreThreshold {
-			continue
 		}
 
 		chunkTitle := strings.TrimSpace(item.KnowledgeTitle)

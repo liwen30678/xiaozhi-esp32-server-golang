@@ -28,35 +28,39 @@
       <el-table-column label="创建时间" width="160" show-overflow-tooltip>
         <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="320">
+      <el-table-column label="操作" width="360">
         <template #default="{ row }">
-          <el-button
-            link
-            type="primary"
-            :loading="previewUploadSubmittingID === row.id"
-            @click="previewUploadedAudio(row)"
-          >
-            原音频
-          </el-button>
-          <el-button
-            v-if="canPreviewClonedVoice(row)"
-            link
-            type="success"
-            :loading="previewClonedSubmittingID === row.id"
-            @click="previewClonedVoice(row)"
-          >
-            试听复刻
-          </el-button>
-          <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-          <el-button
-            v-if="canRetryClone(row)"
-            link
-            type="warning"
-            :loading="retrySubmittingID === row.id"
-            @click="retryClone(row)"
-          >
-            重新复刻
-          </el-button>
+          <div class="action-buttons">
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :loading="previewUploadSubmittingID === row.id"
+              @click="previewUploadedAudio(row)"
+            >
+              原音频
+            </el-button>
+            <el-button
+              v-if="canPreviewClonedVoice(row)"
+              size="small"
+              type="success"
+              :loading="previewClonedSubmittingID === row.id"
+              @click="previewClonedVoice(row)"
+            >
+              试听复刻
+            </el-button>
+            <el-button size="small" type="primary" plain @click="openEditDialog(row)">编辑</el-button>
+            <el-button
+              v-if="canRetryClone(row)"
+              size="small"
+              type="warning"
+              plain
+              :loading="retrySubmittingID === row.id"
+              @click="retryClone(row)"
+            >
+              重新复刻
+            </el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -939,6 +943,18 @@ onBeforeUnmount(() => {
 }
 
 .voice-clones-page :deep(.el-table .cell) {
+  white-space: nowrap;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.action-buttons :deep(.el-button) {
+  margin: 0;
   white-space: nowrap;
 }
 

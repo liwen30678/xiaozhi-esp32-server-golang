@@ -5,41 +5,72 @@
       <el-button type="primary" @click="openDialog()">新增知识库</el-button>
     </div>
 
-    <el-table :data="items" v-loading="loading" style="width: 100%">
-      <el-table-column prop="id" label="ID" width="80" />
-      <el-table-column prop="name" label="名称" width="180" />
-      <el-table-column prop="description" label="描述" />
-      <el-table-column prop="sync_provider" label="提供商" width="110" />
-      <el-table-column prop="external_kb_id" label="Dataset ID" width="220" />
-      <el-table-column label="检索阈值" width="100">
+    <el-table :data="items" v-loading="loading" stripe table-layout="fixed" style="width: 100%">
+      <el-table-column prop="id" label="ID" width="56" />
+      <el-table-column prop="name" label="名称" width="124" show-overflow-tooltip />
+      <el-table-column label="描述" min-width="180" show-overflow-tooltip>
         <template #default="scope">
-          <span>{{ formatKnowledgeThreshold(scope.row.retrieval_threshold) }}</span>
+          <span class="kb-desc-text" :class="{ 'is-empty': !(scope.row.description || '').trim() }">
+            {{ (scope.row.description || '').trim() || '-' }}
+          </span>
         </template>
       </el-table-column>
-      <el-table-column prop="status" label="状态" width="100">
+      <el-table-column label="提供商" width="88" show-overflow-tooltip>
         <template #default="scope">
-          <el-tag :type="scope.row.status === 'active' ? 'success' : 'info'">{{ scope.row.status }}</el-tag>
+          <el-tag size="small" effect="plain">{{ formatProviderText(scope.row.sync_provider) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="同步状态" width="130">
+      <el-table-column label="文档数" width="72" align="center">
         <template #default="scope">
-          <el-tag :type="getSyncStatusTagType(scope.row.sync_status)">{{ getSyncStatusText(scope.row.sync_status) }}</el-tag>
+          <el-tag size="small" type="info">{{ formatDocCount(scope.row.doc_count) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="last_synced_at" label="最近同步时间" width="180" />
-      <el-table-column label="同步错误" width="260">
+      <el-table-column label="同步状态" width="132">
         <template #default="scope">
-          <span v-if="scope.row.sync_error">{{ (scope.row.sync_error || '').slice(0, 48) }}{{ (scope.row.sync_error || '').length > 48 ? '...' : '' }}</span>
-          <span v-else>-</span>
+          <div class="kb-sync-status-cell">
+            <el-tag :type="getSyncStatusTagType(scope.row.sync_status)" size="small">{{ getSyncStatusText(scope.row.sync_status) }}</el-tag>
+            <el-tooltip v-if="shouldShowSyncErrorTip(scope.row)" placement="top">
+              <template #content>
+                <div class="kb-sync-error-tooltip">{{ scope.row.sync_error }}</div>
+              </template>
+              <el-icon class="kb-sync-error-icon"><WarningFilled /></el-icon>
+            </el-tooltip>
+          </div>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="430">
+      <el-table-column label="最近同步" width="168" show-overflow-tooltip>
         <template #default="scope">
-          <el-button size="small" @click="openDialog(scope.row)">编辑</el-button>
-          <el-button size="small" type="primary" plain @click="openDocuments(scope.row)">文档管理</el-button>
-          <el-button size="small" type="success" plain @click="openSearchTestDialog(scope.row)">召回测试</el-button>
-          <el-button size="small" type="primary" plain @click="syncItem(scope.row.id)">重试同步</el-button>
-          <el-button size="small" type="danger" @click="removeItem(scope.row.id)">删除</el-button>
+          <span>{{ formatDateTimeCell(scope.row.last_synced_at) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="状态" width="92" align="center">
+        <template #default="scope">
+          <el-switch
+            :model-value="String(scope.row.status || '').trim() === 'active'"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+            :loading="isStatusSwitchLoading(scope.row.id)"
+            @change="(checked) => toggleKnowledgeBaseStatus(scope.row, checked)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="176">
+        <template #default="scope">
+          <div class="action-buttons">
+            <el-button size="small" type="primary" plain @click="openDocuments(scope.row)">文档</el-button>
+            <el-button size="small" type="success" plain @click="openSearchTestDialog(scope.row)">测试</el-button>
+            <el-dropdown trigger="click" @command="(cmd) => handleKnowledgeBaseAction(cmd, scope.row)">
+              <el-button size="small">更多</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                  <el-dropdown-item command="sync">重试同步</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -115,9 +146,11 @@
         <el-table-column prop="last_synced_at" label="最近同步时间" width="170" />
         <el-table-column label="操作" width="250">
           <template #default="scope">
-            <el-button size="small" :disabled="isUploadedFileDocument(scope.row)" @click="openDocumentDialog(scope.row)">编辑</el-button>
-            <el-button size="small" type="primary" plain @click="syncDocument(scope.row.id)">重试同步</el-button>
-            <el-button size="small" type="danger" @click="removeDocument(scope.row.id)">删除</el-button>
+            <div class="action-buttons">
+              <el-button size="small" :disabled="isUploadedFileDocument(scope.row)" @click="openDocumentDialog(scope.row)">编辑</el-button>
+              <el-button size="small" type="primary" plain @click="syncDocument(scope.row.id)">重试同步</el-button>
+              <el-button size="small" type="danger" @click="removeDocument(scope.row.id)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -201,10 +234,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { WarningFilled } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 
 const loading = ref(false)
 const items = ref([])
+const statusSwitchLoadingMap = ref({})
 const dialogVisible = ref(false)
 const editing = ref(false)
 const currentId = ref(null)
@@ -404,6 +439,62 @@ const removeItem = async (id) => {
     }
     await loadData()
   } catch {}
+}
+
+const isStatusSwitchLoading = (id) => !!statusSwitchLoadingMap.value?.[id]
+
+const toggleKnowledgeBaseStatus = async (row, checked) => {
+  if (!row?.id) return
+  const id = row.id
+  const prevStatus = String(row.status || 'inactive').trim() === 'active' ? 'active' : 'inactive'
+  const nextStatus = checked ? 'active' : 'inactive'
+  if (prevStatus === nextStatus) return
+  if (isStatusSwitchLoading(id)) return
+
+  statusSwitchLoadingMap.value = {
+    ...statusSwitchLoadingMap.value,
+    [id]: true
+  }
+  row.status = nextStatus
+
+  try {
+    const res = await api.put(`/user/knowledge-bases/${id}`, {
+      name: row.name || '',
+      description: row.description || '',
+      content: row.content || '',
+      status: nextStatus
+    })
+    if (res?.data?.warning) {
+      ElMessage.warning(res.data.warning)
+    } else {
+      ElMessage.success(`已${nextStatus === 'active' ? '启用' : '停用'}`)
+    }
+    await loadData()
+  } catch (e) {
+    row.status = prevStatus
+    const msg = e?.response?.data?.error || '状态更新失败'
+    ElMessage.error(msg)
+  } finally {
+    statusSwitchLoadingMap.value = {
+      ...statusSwitchLoadingMap.value,
+      [id]: false
+    }
+  }
+}
+
+const handleKnowledgeBaseAction = async (command, row) => {
+  if (!row?.id) return
+  if (command === 'edit') {
+    openDialog(row)
+    return
+  }
+  if (command === 'sync') {
+    await syncItem(row.id)
+    return
+  }
+  if (command === 'delete') {
+    await removeItem(row.id)
+  }
 }
 
 const syncItem = async (id) => {
@@ -647,10 +738,42 @@ const getSyncStatusTagType = (status) => {
   return 'warning'
 }
 
+const getKnowledgeStatusText = (status) => {
+  return String(status || '').trim() === 'active' ? '启用' : '停用'
+}
+
+const formatProviderText = (provider) => {
+  const p = String(provider || '').trim().toLowerCase()
+  if (p === 'ragflow') return 'RAGFlow'
+  if (p === 'weknora') return 'WeKnora'
+  if (p === 'dify') return 'Dify'
+  return provider || '-'
+}
+
+const shouldShowSyncErrorTip = (row) => {
+  const status = String(row?.sync_status || '').trim()
+  const syncError = String(row?.sync_error || '').trim()
+  if (!syncError) return false
+  return status === 'failed' || status === 'upload_failed' || status === 'parse_failed'
+}
+
 const formatHitScore = (score) => {
   const n = Number(score)
   if (Number.isNaN(n)) return '-'
   return n.toFixed(4)
+}
+
+const formatDocCount = (value) => {
+  const n = Number(value)
+  if (Number.isNaN(n) || n < 0) return 0
+  return n
+}
+
+const formatDateTimeCell = (value) => {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return String(value)
+  return d.toLocaleString()
 }
 
 const formatKnowledgeThreshold = (value) => {
@@ -665,3 +788,66 @@ onMounted(async () => {
   await loadData()
 })
 </script>
+
+<style scoped>
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 10px 0 14px;
+}
+
+.page-header h2 {
+  margin: 0;
+}
+
+.page-header :deep(.el-button) {
+  margin: 4px 0;
+}
+
+.kb-sync-status-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kb-sync-error-tooltip {
+  max-width: 320px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.kb-sync-error-icon {
+  color: var(--el-color-danger);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.kb-desc-text {
+  color: var(--el-text-color-regular);
+}
+
+.kb-desc-text.is-empty {
+  color: var(--el-text-color-placeholder);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.action-buttons :deep(.el-button) {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.action-buttons :deep(.el-dropdown) {
+  display: inline-flex;
+}
+</style>

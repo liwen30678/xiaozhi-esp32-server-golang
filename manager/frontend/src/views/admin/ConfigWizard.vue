@@ -365,7 +365,7 @@ const ttsForm = reactive({
     access_token: '',
     cluster: 'volcano_tts',
     voice: 'zh_female_wanwanxiaohe_moon_bigtts',
-    ws_host: '',
+    ws_host: 'openspeech.bytedance.com',
     use_stream: true
   },
   edge: {
@@ -427,6 +427,7 @@ const ttsFormRules = {
   provider: [{ required: true, message: '请选择提供商', trigger: 'change' }],
   'doubao_ws.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
   'doubao_ws.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
+  'doubao_ws.ws_host': [{ required: true, message: '请输入WebSocket主机', trigger: 'blur' }],
   'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
 }
@@ -819,8 +820,12 @@ async function loadTtsIfExists() {
     ttsForm.provider = config.provider || 'minimax'
     const data = JSON.parse(config.json_data || '{}')
     const p = config.provider
-    if (p === 'doubao_ws') Object.assign(ttsForm.doubao_ws, data)
-    else if (p === 'edge') Object.assign(ttsForm.edge, data)
+    if (p === 'doubao_ws') {
+      Object.assign(ttsForm.doubao_ws, data)
+      if (!String(ttsForm.doubao_ws.ws_host || '').trim()) {
+        ttsForm.doubao_ws.ws_host = 'openspeech.bytedance.com'
+      }
+    } else if (p === 'edge') Object.assign(ttsForm.edge, data)
     else if (p === 'edge_offline') Object.assign(ttsForm.edge_offline, data)
     else if (p === 'aliyun_qwen') Object.assign(ttsForm.qwen_tts, data)
     else if (p === 'openai') Object.assign(ttsForm.openai, data)

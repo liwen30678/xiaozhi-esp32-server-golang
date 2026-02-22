@@ -134,25 +134,16 @@ func (s *weknoraSearcher) searchOneKnowledgeBase(
 		return []config_types.KnowledgeSearchHit{}, nil
 	}
 
-	scoreThreshold := globalScoreThreshold
+	// WeKnora score scales may be far below the generic 0~1 thresholds used by
+	// other providers, so do not apply local score filtering here.
+	_ = globalScoreThreshold
 	if kb.RetrievalThreshold != nil {
-		scoreThreshold = *kb.RetrievalThreshold
-		if scoreThreshold < 0 {
-			scoreThreshold = 0
-		}
-		if scoreThreshold > 1 {
-			scoreThreshold = 1
-		}
+		_ = *kb.RetrievalThreshold
 	}
 
 	payload := map[string]interface{}{
-		"query": query,
-	}
-	if externalDocID := strings.TrimSpace(kb.ExternalDocID); externalDocID != "" {
-		payload["knowledge_ids"] = []string{externalDocID}
-	} else {
-		payload["knowledge_base_id"] = datasetID
-		payload["knowledge_base_ids"] = []string{datasetID}
+		"query":              query,
+		"knowledge_base_ids": []string{datasetID},
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -227,10 +218,6 @@ func (s *weknoraSearcher) searchOneKnowledgeBase(
 		if score <= 0 && item.Metadata != nil {
 			score = parseFloat(item.Metadata["score"])
 		}
-		if scoreThreshold > 0 && score > 0 && score < scoreThreshold {
-			continue
-		}
-
 		chunkTitle := strings.TrimSpace(item.KnowledgeTitle)
 		if chunkTitle == "" {
 			chunkTitle = title
