@@ -11,7 +11,7 @@ type UserConfigProvider interface {
 	//auth
 	//根据deviceId和clientId获取激活信息
 	IsDeviceActivated(ctx context.Context, deviceId string, clientId string) (bool, error)
-	GetActivationInfo(ctx context.Context, deviceId string, clientId string) (int, string, string, int)
+	GetActivationInfo(ctx context.Context, deviceId string, clientId string) (string, string, string, int)
 	VerifyChallenge(ctx context.Context, deviceId string, clientId string, activationPayload types.ActivationPayload) (bool, error)
 
 	//llm memory

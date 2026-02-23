@@ -10,7 +10,7 @@ import (
 )
 
 type activationInfo struct {
-	code      int
+	code      string
 	challenge string
 	msg       string
 }
@@ -27,16 +27,16 @@ func (r *UserConfig) IsDeviceActivated(ctx context.Context, deviceId string, cli
 }
 
 // 获取激活需要的信息,  code, challenge, msg, timeoutMs
-func (r *UserConfig) GetActivationInfo(ctx context.Context, deviceId string, clientId string) (int, string, string, int) {
+func (r *UserConfig) GetActivationInfo(ctx context.Context, deviceId string, clientId string) (string, string, string, int) {
 	if info, ok := preActivationInfo[deviceId]; ok {
 		return info.code, info.challenge, info.msg, 300
 	}
 	challenge := uuid.New().String()
-	code := rand.Intn(900000) + 100000 // 100000~999999
+	code := fmt.Sprintf("%06d", rand.Intn(1000000)) // 000000~999999，保留前导0
 	preActivationInfo[deviceId] = activationInfo{
 		code:      code,
 		challenge: challenge,
-		msg:       fmt.Sprintf("xiaozhi\n%d", code),
+		msg:       fmt.Sprintf("xiaozhi\n%s", code),
 	}
 	return code, challenge, preActivationInfo[deviceId].msg, 300
 }

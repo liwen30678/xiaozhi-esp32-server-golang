@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strconv"
 
 	"xiaozhi-esp32-server-golang/internal/components/http"
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
@@ -62,42 +61,34 @@ func (am *ConfigManager) IsDeviceActivated(ctx context.Context, deviceId string,
 }
 
 // GetActivationInfo 获取设备激活信息
-func (am *ConfigManager) GetActivationInfo(ctx context.Context, deviceId string, clientId string) (int, string, string, int) {
+func (am *ConfigManager) GetActivationInfo(ctx context.Context, deviceId string, clientId string) (string, string, string, int) {
 	// 直接调用后端管理系统的HTTP接口
 	activated, codeStr, challenge, message, err := am.callGetActivationInfoAPI(ctx, deviceId, clientId)
 	if err != nil {
 		log.Log().Errorf("获取设备 %s 激活信息失败: %v", deviceId, err)
-		return 0, "", "", 0
+		return "", "", "", 0
 	}
 
 	// 如果设备已激活，直接返回
 	if activated {
 		log.Log().Debugf("设备 %s 已激活", deviceId)
-		return 0, "", message, 0
+		return "", "", message, 0
 	}
 
 	// 检查Challenge是否为空
 	if challenge == "" {
 		log.Log().Errorf("设备 %s 的Challenge字段为空", deviceId)
-		return 0, "", "Challenge字段为空，请联系管理员", 0
+		return "", "", "Challenge字段为空，请联系管理员", 0
 	}
 
 	// 设备未激活，返回激活信息
 	timeoutMs := 300 // 默认5分钟超时
 	log.Log().Debugf("获取设备 %s 激活信息: code=%s, challenge=%s", deviceId, codeStr, challenge)
-
-	// 将字符串类型的code转换为int
-	code := 0
-	if codeStr != "" {
-		if parsedCode, err := strconv.Atoi(codeStr); err == nil {
-			code = parsedCode
-		} else {
-			log.Log().Warnf("设备 %s 激活码格式错误: %s, 错误: %v", deviceId, codeStr, err)
-		}
-		log.Log().Debugf("设备 %s 激活码: %s (转换为: %d)", deviceId, codeStr, code)
+	if codeStr == "" {
+		log.Log().Warnf("设备 %s 激活码为空", deviceId)
 	}
 
-	return code, challenge, message, timeoutMs
+	return codeStr, challenge, message, timeoutMs
 }
 
 // VerifyChallenge 验证挑战码和HMAC
