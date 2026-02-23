@@ -66,7 +66,6 @@ func initMcp(clientState *ClientState, serverTransport *ServerTransport) {
 	iotOverMcpClient := mcp.NewIotOverMcpClient(clientState.DeviceID, mcpTransport)
 	if iotOverMcpClient == nil {
 		log.Errorf("创建IotOverMcp客户端失败")
-		serverTransport.transport.Close()
 		return
 	}
 	mcpClientSession.SetIotOverMcp(iotOverMcpClient)

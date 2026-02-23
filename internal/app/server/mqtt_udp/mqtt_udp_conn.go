@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	MaxIdleDuration = 300 //300s 没有上下行数据 就断开
+	// MaxIdleDuration:
+	// <=0 表示禁用服务端空闲主动断开
+	// >0  表示超过该秒数无上下行数据判定为不活跃
+	MaxIdleDuration = 0
 )
 
 // MqttUdpConn 实现 types.IConn 接口，适配 MQTT-UDP 连接
@@ -180,6 +183,12 @@ func (c *MqttUdpConn) GetData(key string) (interface{}, error) {
 }
 
 func (c *MqttUdpConn) IsActive() bool {
+	if MaxIdleDuration <= 0 {
+		return true
+	}
+	if c.lastActiveTs <= 0 {
+		return true
+	}
 	return time.Now().Unix()-c.lastActiveTs < MaxIdleDuration
 }
 

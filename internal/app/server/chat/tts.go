@@ -31,6 +31,7 @@ type AudioQueueElem struct {
 	Text       string // SentenceStart/SentenceEnd 时使用
 	Err        error  // SentenceEnd 时可选，表示本段错误
 	IsStart    bool   // SentenceStart 时：是否为首包（用于统计）
+	ToIdle     bool   // TtsStop 时：播报结束后是否切换到空闲
 	Generation uint64 // 代际标识，打断后旧代际元素将被丢弃
 	OnStart    func()
 	OnEnd      func(error)
@@ -190,7 +191,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				}
 				//固定150ms等待，确保客户端播放完成
 				time.Sleep(150 * time.Millisecond)
-				if err := t.serverTransport.SendTtsStop(); err != nil {
+				if err := t.serverTransport.SendTtsStopWithToIdle(elem.ToIdle); err != nil {
 					log.Errorf("发送 TtsStop 失败: %v", err)
 				}
 			}
@@ -255,7 +256,12 @@ func (t *TTSManager) EnqueueTtsStart(ctx context.Context) {
 
 // EnqueueTtsStop 向会话级音频队列投递 TtsStop，由 runSenderLoop 统一发送；队列满时阻塞直到入队或 ctx.Done
 func (t *TTSManager) EnqueueTtsStop(ctx context.Context) {
-	t.enqueueSessionElem(ctx, t.currentAudioGeneration(), AudioQueueElem{Kind: AudioQueueKindTtsStop})
+	t.EnqueueTtsStopWithToIdle(ctx, false)
+}
+
+// EnqueueTtsStopWithToIdle 向会话级音频队列投递带 to_idle 选项的 TtsStop。
+func (t *TTSManager) EnqueueTtsStopWithToIdle(ctx context.Context, toIdle bool) {
+	t.enqueueSessionElem(ctx, t.currentAudioGeneration(), AudioQueueElem{Kind: AudioQueueKindTtsStop, ToIdle: toIdle})
 }
 
 func (t *TTSManager) processTTSQueue(ctx context.Context) {

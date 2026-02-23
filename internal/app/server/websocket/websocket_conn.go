@@ -7,9 +7,12 @@ import (
 	"sync"
 	"time"
 	"xiaozhi-esp32-server-golang/internal/app/server/types"
+	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
+	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	log "xiaozhi-esp32-server-golang/logger"
 
 	"github.com/gorilla/websocket"
+	"github.com/spf13/viper"
 )
 
 // WebSocketConn 实现 types.IConn 接口，适配 WebSocket 连接
@@ -46,6 +49,7 @@ func NewWebSocketConn(conn *websocket.Conn, deviceID string, isMqttUdpBridge boo
 	// 设置pong处理器
 	conn.SetPongHandler(func(appData string) error {
 		log.Debugf("收到pong消息，设备ID: %s", deviceID)
+		instance.reportDeviceOnlineOnPong(deviceID)
 		return nil
 	})
 
@@ -247,4 +251,21 @@ func (w *WebSocketConn) GetData(key string) (interface{}, error) {
 
 func (w *WebSocketConn) CloseAudioChannel() error {
 	return nil
+}
+
+func (w *WebSocketConn) reportDeviceOnlineOnPong(deviceID string) {
+	go func(deviceID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		providerType := viper.GetString("config_provider.type")
+		provider, err := user_config.GetProvider(providerType)
+		if err != nil {
+			log.Errorf("pong在线上报失败，GetProvider err: %+v", err)
+			return
+		}
+		provider.NotifyDeviceEvent(ctx, config_types.EventDeviceOnline, map[string]interface{}{
+			"device_id": deviceID,
+		})
+	}(deviceID)
 }

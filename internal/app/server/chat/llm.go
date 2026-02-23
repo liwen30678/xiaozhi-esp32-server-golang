@@ -43,6 +43,7 @@ type contextKey int
 const (
 	ttsStopDelayDuration time.Duration = 200 * time.Millisecond
 	fullTextKey          contextKey    = iota
+	ttsStopToIdleKey
 )
 
 const (
@@ -81,6 +82,14 @@ type LLMManager struct {
 	// key: role (user/assistant), value: MessageID
 	lastMessageID   map[string]string
 	lastMessageIDMu sync.RWMutex // 保护 lastMessageID 的并发访问
+}
+
+func extractTtsStopToIdleFromCtx(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	toIdle, ok := ctx.Value(ttsStopToIdleKey).(bool)
+	return ok && toIdle
 }
 
 func NewLLMManager(clientState *ClientState, serverTransport *ServerTransport, ttsManager *TTSManager) *LLMManager {
@@ -126,7 +135,7 @@ func (l *LLMManager) ClearLLMResponseQueue() {
 	l.llmResponseQueue.Clear()
 }
 
-func (l *LLMManager) AddTextToTTSQueue(text string) error {
+func (l *LLMManager) AddTextToTTSQueue(text string, toIdle bool) error {
 	log.Debugf("AddTextToTTSQueue text: %s", text)
 	msg := &schema.Message{
 		Role:    schema.User,
@@ -142,6 +151,9 @@ func (l *LLMManager) AddTextToTTSQueue(text string) error {
 
 	sessionCtx := l.clientState.SessionCtx.Get(l.clientState.Ctx)
 	ctx := l.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	if toIdle {
+		ctx = context.WithValue(ctx, ttsStopToIdleKey, true)
+	}
 	l.HandleLLMResponseChannelAsync(ctx, msg, llmResponseChan)
 
 	return nil
@@ -188,7 +200,7 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 		onEndFunc = func(err error, args ...any) {
 			// 非 realtime 模式下，由 runSenderLoop 统一发送 TtsStop
 			if !l.clientState.IsRealTime() {
-				l.ttsManager.EnqueueTtsStop(ctx)
+				l.ttsManager.EnqueueTtsStopWithToIdle(ctx, extractTtsStopToIdleFromCtx(ctx))
 			}
 
 			// 从 closure 中获取 fullText
@@ -282,7 +294,7 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 
 	if needSendTtsCmd {
 		if !l.clientState.IsRealTime() {
-			l.ttsManager.EnqueueTtsStop(ctx)
+			l.ttsManager.EnqueueTtsStopWithToIdle(ctx, extractTtsStopToIdleFromCtx(ctx))
 		}
 
 		// 收集TTS音频并发送聊天历史事件

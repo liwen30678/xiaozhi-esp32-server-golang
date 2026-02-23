@@ -13,6 +13,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/app/server/types"
 	"xiaozhi-esp32-server-golang/internal/data/client"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	msg_types "xiaozhi-esp32-server-golang/internal/data/msg"
 	. "xiaozhi-esp32-server-golang/logger"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -341,6 +342,13 @@ func (s *MqttUdpAdapter) processMessage() {
 				deviceSession.OnClose(s.handleDisconnect)
 
 				s.onNewConnection(deviceSession)
+			} else if clientMsg.Type == msg_types.MessageTypeHello {
+				// 短线重连且复用旧会话时，先解绑旧 UDP 地址映射。
+				// 后续收到新端口首包时会按 connID 自动重绑到最新地址。
+				udpServer := s.getUdpServer()
+				if udpServer != nil {
+					udpServer.detachUdpSessionAddr(deviceSession.UdpSession)
+				}
 			}
 
 			err := deviceSession.PushMsgToRecvCmd(msg.Payload())

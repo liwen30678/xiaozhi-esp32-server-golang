@@ -412,6 +412,7 @@ func (a *App) registerHandler() {
 func (a *App) HandleInjectMsg(ctx context.Context, eventType string, eventData map[string]interface{}) (string, error) {
 	type InjectMsg struct {
 		SkipLlm  bool   `json:"skip_llm"`
+		ToIdle   bool   `json:"to_idle"`
 		DeviceId string `json:"device_id"`
 		Message  string `json:"message"`
 	}
@@ -440,11 +441,11 @@ func (a *App) HandleInjectMsg(ctx context.Context, eventType string, eventData m
 		return "", fmt.Errorf("device %s not found or offline", msg.DeviceId)
 	}
 
-	log.Debugf("HandleInjectMsg: injecting message to device %s, skip_llm: %v, message: %s",
-		msg.DeviceId, msg.SkipLlm, msg.Message)
+	log.Debugf("HandleInjectMsg: injecting message to device %s, skip_llm: %v, to_idle: %v, message: %s",
+		msg.DeviceId, msg.SkipLlm, msg.ToIdle, msg.Message)
 
 	// 使用ChatManager的公开方法注入消息
-	err = chatManager.InjectMessage(msg.Message, msg.SkipLlm)
+	err = chatManager.InjectMessage(msg.Message, msg.SkipLlm, msg.ToIdle)
 	if err != nil {
 		log.Errorf("HandleInjectMsg: failed to inject message to device %s: %v", msg.DeviceId, err)
 		return "", fmt.Errorf("failed to inject message: %v", err)

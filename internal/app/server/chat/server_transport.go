@@ -50,10 +50,15 @@ func (s *ServerTransport) SendTtsStart() error {
 }
 
 func (s *ServerTransport) SendTtsStop() error {
+	return s.SendTtsStopWithToIdle(false)
+}
+
+func (s *ServerTransport) SendTtsStopWithToIdle(toIdle bool) error {
 	msg := ServerMessage{
 		Type:      ServerMessageTypeTts,
 		State:     MessageStateStop,
 		SessionID: s.clientState.SessionID,
+		ToIdle:    toIdle,
 	}
 	bytes, err := json.Marshal(msg)
 	if err != nil {
@@ -83,6 +88,14 @@ func (s *ServerTransport) SendMqttGoodbye() error {
 		return err
 	}
 	return nil
+}
+
+// SendGoodbyeIfNeeded 仅在显式下线/关机等场景调用
+func (s *ServerTransport) SendGoodbyeIfNeeded() error {
+	if s.transport.GetTransportType() != types_conn.TransportTypeMqttUdp {
+		return nil
+	}
+	return s.SendMqttGoodbye()
 }
 
 func (s *ServerTransport) SendHello(transportType string, audioFormat *types_audio.AudioFormat, udpConfig *UdpConfig) error {
@@ -252,10 +265,6 @@ func (s *ServerTransport) Close() error {
 	}
 
 	s.closed = true
-
-	if s.transport.GetTransportType() == types_conn.TransportTypeMqttUdp {
-		s.SendMqttGoodbye()
-	}
 
 	close(s.McpRecvMsgChan)
 	return s.transport.Close()

@@ -383,14 +383,19 @@ func (c *ChatSession) CmdMessageLoop(ctx context.Context) {
 		}
 
 		if recvFailCount > 3 {
-			log.Errorf("recv cmd timeout: %v", recvFailCount)
-			return
+			log.Warnf("recv cmd 连续失败次数过多: %v，保持连接并重置计数", recvFailCount)
+			recvFailCount = 0
+			continue
 		}
 
 		message, err := c.serverTransport.RecvCmd(ctx, 120)
 		if err != nil {
+			if strings.Contains(err.Error(), "timeout") {
+				// 指令通道超时是常见情况，不应触发连接关闭策略。
+				continue
+			}
 			log.Errorf("recv cmd error: %v", err)
-			recvFailCount = recvFailCount + 1
+			recvFailCount++
 			continue
 		}
 		if message == nil {
@@ -448,6 +453,9 @@ func (c *ChatSession) HandleTextMessage(message []byte) error {
 		return fmt.Errorf("解析消息失败: %v", err)
 	}
 
+	// 收到有效信令后刷新在线状态（异步，避免阻塞信令主流程）。
+	c.refreshDeviceOnlineOnSignal(clientMsg.DeviceID)
+
 	// 处理不同类型的消息
 	switch clientMsg.Type {
 	case MessageTypeHello:
@@ -466,6 +474,31 @@ func (c *ChatSession) HandleTextMessage(message []byte) error {
 		// 未知消息类型，直接回显
 		return fmt.Errorf("未知消息类型: %s", clientMsg.Type)
 	}
+}
+
+func (s *ChatSession) refreshDeviceOnlineOnSignal(msgDeviceID string) {
+	deviceID := strings.TrimSpace(msgDeviceID)
+	if deviceID == "" {
+		deviceID = strings.TrimSpace(s.clientState.DeviceID)
+	}
+	if deviceID == "" {
+		return
+	}
+
+	go func(deviceID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		providerType := viper.GetString("config_provider.type")
+		provider, err := user_config.GetProvider(providerType)
+		if err != nil {
+			log.Errorf("刷新设备在线状态失败，GetProvider err: %+v", err)
+			return
+		}
+		provider.NotifyDeviceEvent(ctx, types.EventDeviceOnline, map[string]interface{}{
+			"device_id": deviceID,
+		})
+	}(deviceID)
 }
 
 // HandleAudioMessage 处理音频消息
@@ -544,7 +577,7 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 
 	clientState.InputAudioFormat = *msg.AudioParams
 
-	s.asrManager.ProcessVadAudio(clientState.Ctx, s.Close)
+	s.asrManager.ProcessVadAudio(clientState.Ctx)
 
 	return nil
 }
@@ -682,8 +715,11 @@ func (s *ChatSession) GetRandomGreeting() string {
 }
 
 func (s *ChatSession) AddTextToTTSQueue(text string) error {
-	s.llmManager.AddTextToTTSQueue(text)
-	return nil
+	return s.AddTextToTTSQueueWithToIdle(text, false)
+}
+
+func (s *ChatSession) AddTextToTTSQueueWithToIdle(text string, toIdle bool) error {
+	return s.llmManager.AddTextToTTSQueue(text, toIdle)
 }
 
 // InterruptAndClearTTSQueue 触发 TTS 打断并清空发送队列（供 realtime 模式 VAD 打断等场景调用）
@@ -862,13 +898,21 @@ func (s *ChatSession) OnListenStart() error {
 
 // startChat 开始对话
 func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.IdentifyResult) error {
+	return s.AddAsrResultToQueueWithToIdle(text, speakerResult, false)
+}
+
+func (s *ChatSession) AddAsrResultToQueueWithToIdle(text string, speakerResult *speaker.IdentifyResult, toIdle bool) error {
 	log.Debugf("AddAsrResultToQueue text: %s", text)
 	if speakerResult != nil && speakerResult.Identified {
 		log.Debugf("AddAsrResultToQueue speaker: %s (confidence: %.2f)", speakerResult.SpeakerName, speakerResult.Confidence)
 	}
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+	itemCtx := s.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	if toIdle {
+		itemCtx = context.WithValue(itemCtx, ttsStopToIdleKey, true)
+	}
 	item := AsrResponseChannelItem{
-		ctx:           s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
+		ctx:           itemCtx,
 		text:          text,
 		speakerResult: speakerResult,
 	}
@@ -904,7 +948,7 @@ func (s *ChatSession) ClearChatTextQueue() {
 	s.chatTextQueue.Clear()
 }
 
-// DoExitChat 执行退出聊天逻辑（发送再见语并关闭会话）
+// DoExitChat 执行退出聊天逻辑（发送再见语并结束当前会话轮次）
 func (s *ChatSession) DoExitChat() {
 	// 友好的再见语
 	goodbyeText := "好的，再见！期待下次与您聊天～"
@@ -933,8 +977,8 @@ func (s *ChatSession) DoExitChat() {
 	}
 
 	s.ttsManager.EnqueueTtsStop(ctx)
-	// 关闭会话
-	s.Close()
+	// 结束当前轮会话，保持连接
+	s.clientState.Destroy()
 }
 
 func (s *ChatSession) Close() {

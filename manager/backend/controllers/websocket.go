@@ -763,11 +763,12 @@ func (ctrl *WebSocketController) RequestPingFromClient(ctx context.Context, uuid
 }
 
 // InjectMessageToDevice 向设备注入消息（广播方式）
-func (ctrl *WebSocketController) InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool) error {
+func (ctrl *WebSocketController) InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool, toIdle bool) error {
 	body := map[string]interface{}{
 		"device_id": deviceID,
 		"message":   message,
 		"skip_llm":  skipLlm,
+		"to_idle":   toIdle,
 	}
 
 	// 创建请求

@@ -23,7 +23,7 @@ type UserController struct {
 		RequestMcpToolDetailsFromClient(ctx context.Context, agentID string) ([]MCPTool, error)
 		RequestDeviceMcpToolDetailsFromClient(ctx context.Context, deviceID string) ([]MCPTool, error)
 		CallMcpToolFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error)
-		InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool) error
+		InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool, toIdle bool) error
 	}
 }
 
@@ -85,6 +85,7 @@ func (uc *UserController) InjectMessage(c *gin.Context) {
 		DeviceID string `json:"device_id" binding:"required"`
 		Message  string `json:"message" binding:"required"`
 		SkipLlm  bool   `json:"skip_llm"`
+		ToIdle   bool   `json:"to_idle"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -103,7 +104,7 @@ func (uc *UserController) InjectMessage(c *gin.Context) {
 
 	// 通过WebSocket发送消息注入请求到主服务器
 	ctx := context.Background()
-	err := uc.WebSocketController.InjectMessageToDevice(ctx, device.DeviceName, req.Message, req.SkipLlm)
+	err := uc.WebSocketController.InjectMessageToDevice(ctx, device.DeviceName, req.Message, req.SkipLlm, req.ToIdle)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "消息注入失败: " + err.Error()})
 		return
@@ -116,6 +117,7 @@ func (uc *UserController) InjectMessage(c *gin.Context) {
 			"device_id": req.DeviceID,
 			"message":   req.Message,
 			"skip_llm":  req.SkipLlm,
+			"to_idle":   req.ToIdle,
 		},
 	})
 }

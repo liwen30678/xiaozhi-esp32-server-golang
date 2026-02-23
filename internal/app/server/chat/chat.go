@@ -181,6 +181,12 @@ func (c *ChatManager) Close() error {
 		if c.clientState != nil {
 			log.Infof("主动关闭断开连接, 设备 %s", c.clientState.DeviceID)
 		}
+		// 显式关闭路径下才发送 goodbye，避免普通会话流主动断开。
+		if c.session != nil && c.session.serverTransport != nil {
+			if err := c.session.serverTransport.SendGoodbyeIfNeeded(); err != nil {
+				log.Warnf("发送goodbye失败（忽略并继续关闭）: %v", err)
+			}
+		}
 		// 先关闭会话级别的资源
 		if c.session != nil {
 			c.session.Close()
@@ -215,12 +221,12 @@ func (c *ChatManager) GetSession() *ChatSession {
 }
 
 // InjectMessage 注入消息到设备
-func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
+func (c *ChatManager) InjectMessage(message string, skipLlm bool, toIdle bool) error {
 	if skipLlm {
 		// 直接发送文本消息到设备，跳过LLM处理
-		return c.session.AddTextToTTSQueue(message)
+		return c.session.AddTextToTTSQueueWithToIdle(message, toIdle)
 	} else {
 		// 通过LLM处理消息
-		return c.session.AddAsrResultToQueue(message, nil)
+		return c.session.AddAsrResultToQueueWithToIdle(message, nil, toIdle)
 	}
 }

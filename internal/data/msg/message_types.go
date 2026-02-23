@@ -61,6 +61,7 @@ type ServerMessage struct {
 	SessionID   string                   `json:"session_id,omitempty"`
 	Version     int                      `json:"version"`
 	State       string                   `json:"state,omitempty"`
+	ToIdle      bool                     `json:"to_idle,omitempty"`
 	Transport   string                   `json:"transport,omitempty"`
 	AudioFormat *types_audio.AudioFormat `json:"audio_params,omitempty"`
 	Emotion     string                   `json:"emotion,omitempty"`

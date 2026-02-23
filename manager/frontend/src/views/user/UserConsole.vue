@@ -353,6 +353,14 @@
             </el-radio>
           </el-radio-group>
         </el-form-item>
+
+        <el-form-item label="播报结束后" prop="to_idle">
+          <el-switch
+            v-model="injectForm.to_idle"
+            active-text="转空闲状态"
+            inactive-text="保持当前状态"
+          />
+        </el-form-item>
       </el-form>
       
       <template #footer>
@@ -564,7 +572,8 @@ const deviceRules = {
 const injectForm = reactive({
   device_id: '',
   message: '',
-  skip_llm: false
+  skip_llm: false,
+  to_idle: false
 })
 
 const injectRules = {
@@ -642,7 +651,8 @@ const handleInjectMessage = async () => {
     const response = await api.post('/user/devices/inject-message', {
       device_id: injectForm.device_id,
       message: injectForm.message,
-      skip_llm: injectForm.skip_llm
+      skip_llm: injectForm.skip_llm,
+      to_idle: injectForm.to_idle
     })
     
     if (response.data.success) {
@@ -663,7 +673,7 @@ const handleCloseInjectMessage = () => {
   if (injectFormRef.value) {
     injectFormRef.value.resetFields()
   }
-  Object.assign(injectForm, { device_id: '', message: '', skip_llm: false })
+  Object.assign(injectForm, { device_id: '', message: '', skip_llm: false, to_idle: false })
 }
 
 // 切换显示所有设备
