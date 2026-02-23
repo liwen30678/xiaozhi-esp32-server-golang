@@ -604,7 +604,7 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 	clientState.SessionID = session.ID
 
 	if !s.vadLoopStarted {
-		s.asrManager.ProcessVadAudio(clientState.Ctx, s.Close)
+		s.asrManager.ProcessVadAudio(clientState.Ctx)
 		s.vadLoopStarted = true
 	}
 
@@ -612,12 +612,6 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 		s.mcpHelloInited = true
 		go initMcp(s.clientState, s.serverTransport)
 	}
-
-	clientState := s.clientState
-
-	clientState.InputAudioFormat = *msg.AudioParams
-
-	s.asrManager.ProcessVadAudio(clientState.Ctx)
 
 	s.helloInited = true
 
