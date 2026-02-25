@@ -10,6 +10,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/tts/doubao"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/edge"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/edge_offline"
+	"xiaozhi-esp32-server-golang/internal/domain/tts/indextts_vllm"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/minimax"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/openai"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/qwen"
@@ -71,6 +72,8 @@ func GetTTSProvider(providerName string, config map[string]interface{}) (TTSProv
 		baseProvider = minimax.NewMinimaxTTSProvider(config)
 	case constants.TtsTypeAliyunQwen:
 		baseProvider = qwen.NewQwenTTSProvider(config)
+	case constants.TtsTypeIndexTTSVLLM:
+		baseProvider = indextts_vllm.NewIndexTTSVLLMProvider(config)
 	default:
 		return nil, fmt.Errorf("不支持的TTS提供者: %s", effectiveName)
 	}

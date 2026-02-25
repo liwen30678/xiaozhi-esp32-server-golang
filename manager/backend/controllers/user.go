@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -587,6 +588,59 @@ func (uc *UserController) GetRoleTemplates(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": roles})
 }
 
+func (uc *UserController) fetchIndexTTSVoices(c *gin.Context, configID string) ([]VoiceOption, error) {
+	baseURL := "http://127.0.0.1:7860"
+	apiKey := ""
+	if strings.TrimSpace(configID) != "" {
+		var cfg models.Config
+		if err := uc.DB.Where("type = ? AND config_id = ?", "tts", configID).First(&cfg).Error; err == nil {
+			var cfgMap map[string]any
+			if strings.TrimSpace(cfg.JsonData) != "" && json.Unmarshal([]byte(cfg.JsonData), &cfgMap) == nil {
+				if v, ok := cfgMap["api_url"].(string); ok && strings.TrimSpace(v) != "" {
+					baseURL = strings.TrimSpace(v)
+				}
+				if v, ok := cfgMap["api_key"].(string); ok {
+					apiKey = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, baseURL+indexTTSVoicesEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("IndexTTS 获取音色失败: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	voiceMap := map[string]any{}
+	if err = json.Unmarshal(body, &voiceMap); err != nil {
+		return nil, err
+	}
+	result := make([]VoiceOption, 0, len(voiceMap))
+	for voice := range voiceMap {
+		v := strings.TrimSpace(voice)
+		if v == "" {
+			continue
+		}
+		result = append(result, VoiceOption{Value: v, Label: v})
+	}
+	return result, nil
+}
+
 // 获取音色选项
 func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 	provider := c.Query("provider")
@@ -597,8 +651,15 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 	configID := c.Query("config_id")
 
 	var systemVoices []VoiceOption
-	// 特殊处理：阿里云千问，根据配置中的模型过滤音色
-	if provider == "aliyun_qwen" {
+	// 特殊处理：IndexTTS 从远端服务读取可用音色
+	if provider == "indextts_vllm" {
+		voices, err := uc.fetchIndexTTSVoices(c, configID)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "获取IndexTTS音色失败: " + err.Error()})
+			return
+		}
+		systemVoices = voices
+	} else if provider == "aliyun_qwen" {
 		// 如果没有提供 config_id，则返回不区分模型的基础音色列表（用于管理员配置页等场景）
 		if configID == "" {
 			systemVoices = GetVoiceOptionsByProvider("aliyun_qwen")

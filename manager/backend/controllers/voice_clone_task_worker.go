@@ -104,6 +104,8 @@ func (vcc *VoiceCloneController) processVoiceCloneTask(taskPrimaryID uint) {
 		result, err = vcc.cloneWithCosyVoice(ctx, audio.FilePath, audio.FileName, audio.Transcript)
 	case "aliyun_qwen":
 		result, err = vcc.cloneWithAliyunQwen(ctx, ttsCfg, clone.TTSConfigID, audio.FilePath, audio.FileName, audio.Transcript, audio.TranscriptLang)
+	case "indextts_vllm":
+		result, err = vcc.cloneWithIndexTTSVLLM(ctx, ttsCfg, audio.FilePath, audio.FileName)
 	default:
 		vcc.finishVoiceCloneTaskFailed(task, &clone, fmt.Errorf("当前任务不支持提供商: %s", provider))
 		return

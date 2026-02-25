@@ -200,6 +200,13 @@ const form = reactive({
     stream: true,
     frame_duration: 60
   },
+  indextts_vllm: {
+    api_url: 'http://127.0.0.1:7860',
+    api_key: '',
+    model: 'indextts-vllm',
+    voice: '',
+    frame_duration: 60
+  },
   zhipu: {
     api_key: '',
     api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
@@ -258,7 +265,8 @@ const rules = {
   // Minimax TTS 验证规则
   'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   // 千问 TTS 验证规则
-  'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
+  'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'indextts_vllm.api_url': [{ required: true, message: '请输入API URL', trigger: 'blur' }]
 }
 
 const loadConfigs = async () => {
@@ -347,6 +355,13 @@ const editConfig = (config) => {
         form.openai.speed = configData.speed || 1.0
         form.openai.stream = configData.stream !== undefined ? configData.stream : true
         form.openai.frame_duration = configData.frame_duration || 60
+        break
+      case 'indextts_vllm':
+        form.indextts_vllm.api_url = configData.api_url || 'http://127.0.0.1:7860'
+        form.indextts_vllm.api_key = configData.api_key || ''
+        form.indextts_vllm.model = configData.model || 'indextts-vllm'
+        form.indextts_vllm.voice = configData.voice || ''
+        form.indextts_vllm.frame_duration = configData.frame_duration || 60
         break
       case 'zhipu':
         // 智谱配置从 json_data 中读取
@@ -639,6 +654,13 @@ const resetForm = () => {
       stream: true,
       frame_duration: 60
     },
+    indextts_vllm: {
+      api_url: 'http://127.0.0.1:7860',
+      api_key: '',
+      model: 'indextts-vllm',
+      voice: '',
+      frame_duration: 60
+    },
     zhipu: {
       api_key: '',
       api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
@@ -693,7 +715,7 @@ const loadVoiceOptions = async (provider) => {
   voiceLoading.value = true
   try {
     const response = await api.get(`/user/voice-options`, {
-      params: { provider }
+      params: { provider, config_id: form.config_id || undefined }
     })
     voiceOptions.value = response.data.data || []
   } catch (error) {

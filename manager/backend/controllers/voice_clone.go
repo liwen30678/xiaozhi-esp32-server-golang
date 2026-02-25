@@ -61,6 +61,13 @@ var cloneProviderCapabilities = map[string]CloneProviderCapability{
 		MaxTextLen:         0,
 		SupportedLangs:     map[string]bool{},
 	},
+	"indextts_vllm": {
+		Enabled:            true,
+		RequiresTranscript: false,
+		MinTextLen:         0,
+		MaxTextLen:         0,
+		SupportedLangs:     map[string]bool{},
+	},
 }
 
 type VoiceCloneController struct {
@@ -96,6 +103,9 @@ const (
 	cosyvoiceCloneEndpoint = "https://tts.linkerai.cn/clone"
 	cosyvoiceTTSEndpoint   = "https://tts.linkerai.cn/tts"
 	cosyvoiceFixedKey      = "https://linkerai.top/"
+	indexTTSCloneEndpoint  = "/audio/clone"
+	indexTTSTTSEndpoint    = "/audio/speech"
+	indexTTSVoicesEndpoint = "/audio/voices"
 	minimaxTTSWSEndpoint   = "wss://api.minimaxi.com/ws/v1/t2a_v2"
 	voiceClonePreviewText  = "我是一个有趣的人，一个脱离低级趣味的人"
 
@@ -158,8 +168,8 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 	}
 	rawProvider := strings.TrimSpace(ttsCfg.Provider)
 	provider := normalizeCloneProvider(rawProvider)
-	if provider != "minimax" && provider != "cosyvoice" && provider != "aliyun_qwen" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持 Minimax/CosyVoice/千问 提供商的声音复刻"})
+	if provider != "minimax" && provider != "cosyvoice" && provider != "aliyun_qwen" && provider != "indextts_vllm" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持 Minimax/CosyVoice/千问/IndexTTS 提供商的声音复刻"})
 		return
 	}
 
@@ -525,6 +535,116 @@ func (vcc *VoiceCloneController) RetryVoiceClone(c *gin.Context) {
 	}})
 }
 
+func (vcc *VoiceCloneController) AppendVoiceCloneAudio(c *gin.Context) {
+	userIDAny, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "认证信息缺失"})
+		return
+	}
+	userID := userIDAny.(uint)
+
+	cloneID := strings.TrimSpace(c.Param("id"))
+	if cloneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "复刻音色ID不能为空"})
+		return
+	}
+
+	var clone models.VoiceClone
+	if err := vcc.DB.Where("id = ? AND user_id = ? AND status != ?", cloneID, userID, "deleted").First(&clone).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "复刻音色不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询复刻音色失败"})
+		return
+	}
+	if normalizeCloneProvider(clone.Provider) != "indextts_vllm" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅 indextts_vllm 支持追加参考音频"})
+		return
+	}
+	if normalizeCloneStatusValue(clone.Status) != voiceCloneStatusActive {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "仅已成功的复刻音色允许追加参考音频"})
+		return
+	}
+
+	sourceType := strings.TrimSpace(c.DefaultPostForm("source_type", "upload"))
+	if sourceType != "upload" && sourceType != "record" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source_type仅支持upload或record"})
+		return
+	}
+	transcript := strings.TrimSpace(c.PostForm("transcript"))
+	transcriptLang := strings.TrimSpace(c.DefaultPostForm("transcript_lang", "zh-CN"))
+
+	file, header, err := vcc.pickAudioFile(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	audioUUID := uuid.New().String()
+	filePath, size, err := vcc.AudioStorage.SaveVoiceCloneAudioFile(userID, audioUUID, header.Filename, file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存追加音频失败: " + err.Error()})
+		return
+	}
+	if err = validateCloneAudioForProvider("indextts_vllm", filePath); err != nil {
+		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var ttsCfg models.Config
+	if err := vcc.DB.Where("type = ? AND config_id = ?", "tts", clone.TTSConfigID).First(&ttsCfg).Error; err != nil {
+		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "关联TTS配置不存在"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	result, err := vcc.cloneWithIndexTTSVLLMByVoice(ctx, ttsCfg, filePath, header.Filename, clone.ProviderVoiceID)
+	if err != nil {
+		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "追加参考音频失败: " + err.Error()})
+		return
+	}
+
+	audio := models.VoiceCloneAudio{
+		VoiceCloneID:   &clone.ID,
+		UserID:         userID,
+		SourceType:     sourceType,
+		FilePath:       filePath,
+		FileName:       header.Filename,
+		FileSize:       size,
+		ContentType:    header.Header.Get("Content-Type"),
+		Transcript:     transcript,
+		TranscriptLang: transcriptLang,
+	}
+	if err := vcc.DB.Create(&audio).Error; err != nil {
+		_ = vcc.AudioStorage.DeleteAudioFile(filePath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存追加音频记录失败"})
+		return
+	}
+
+	metaJSON := mergeJSONMeta(clone.MetaJSON, map[string]any{
+		"last_append_audio_at":  time.Now(),
+		"last_append_result":    result.RawResponse,
+		"last_append_http_code": result.ResponseCode,
+	})
+	if err := vcc.DB.Model(&models.VoiceClone{}).Where("id = ? AND user_id = ?", clone.ID, userID).Update("meta_json", metaJSON).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新复刻元数据失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
+		"id":                clone.ID,
+		"provider_voice_id": clone.ProviderVoiceID,
+		"audio_id":          audio.ID,
+		"message":           "追加参考音频成功",
+	}})
+}
+
 func (vcc *VoiceCloneController) PreviewClonedVoice(c *gin.Context) {
 	userIDAny, exists := c.Get("user_id")
 	if !exists {
@@ -588,6 +708,8 @@ func (vcc *VoiceCloneController) PreviewClonedVoice(c *gin.Context) {
 		audioBytes, contentType, err = vcc.previewCosyVoiceClonedVoice(ctx, cfgMap, voiceID, voiceClonePreviewText)
 	case "aliyun_qwen":
 		audioBytes, contentType, err = vcc.previewAliyunQwenClonedVoice(ctx, cfgMap, voiceID, voiceClonePreviewText)
+	case "indextts_vllm":
+		audioBytes, contentType, err = vcc.previewIndexTTSClonedVoice(ctx, cfgMap, voiceID, voiceClonePreviewText)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "当前提供商不支持复刻试听"})
 		return
@@ -784,6 +906,134 @@ type minimaxTTSWSResponse struct {
 		StatusCode int    `json:"status_code"`
 		StatusMsg  string `json:"status_msg"`
 	} `json:"base_resp"`
+}
+
+func normalizeIndexTTSBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "http://127.0.0.1:7860"
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+func (vcc *VoiceCloneController) previewIndexTTSClonedVoice(ctx context.Context, cfgMap map[string]any, voiceID, text string) ([]byte, string, error) {
+	baseURL := normalizeIndexTTSBaseURL(getStringAny(cfgMap, "api_url"))
+	bodyMap := map[string]any{
+		"input": text,
+		"voice": voiceID,
+	}
+	if model := strings.TrimSpace(getStringAny(cfgMap, "model")); model != "" {
+		bodyMap["model"] = model
+	}
+	bodyBytes, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, "", fmt.Errorf("构建IndexTTS试听请求失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+indexTTSTTSEndpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, "", fmt.Errorf("创建IndexTTS试听请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "audio/wav,application/octet-stream,*/*")
+	if apiKey := strings.TrimSpace(getStringAny(cfgMap, "api_key")); apiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	}
+
+	resp, err := vcc.HTTPClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("调用IndexTTS试听失败: %w", err)
+	}
+	defer resp.Body.Close()
+	audioBytes, err := io.ReadAll(io.LimitReader(resp.Body, 30*1024*1024))
+	if err != nil {
+		return nil, "", fmt.Errorf("读取IndexTTS试听响应失败: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("IndexTTS试听HTTP %d: %s", resp.StatusCode, truncateForLog(strings.TrimSpace(string(audioBytes)), 512))
+	}
+	if len(audioBytes) == 0 {
+		return nil, "", errors.New("IndexTTS试听返回音频为空")
+	}
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if contentType == "" {
+		contentType = "audio/wav"
+	}
+	return audioBytes, contentType, nil
+}
+
+func (vcc *VoiceCloneController) cloneWithIndexTTSVLLMByVoice(ctx context.Context, ttsCfg models.Config, filePath, fileName, voiceName string) (*minimaxVoiceCloneResult, error) {
+	cfgMap := make(map[string]any)
+	if ttsCfg.JsonData != "" {
+		if err := json.Unmarshal([]byte(ttsCfg.JsonData), &cfgMap); err != nil {
+			return nil, fmt.Errorf("解析TTS配置失败: %w", err)
+		}
+	}
+	baseURL := normalizeIndexTTSBaseURL(getStringAny(cfgMap, "api_url"))
+	voiceName = strings.TrimSpace(voiceName)
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取音频文件失败: %w", err)
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("voice", voiceName)
+	part, err := writer.CreateFormFile("audio", fileName)
+	if err != nil {
+		return nil, fmt.Errorf("创建IndexTTS上传表单失败: %w", err)
+	}
+	if _, err = io.Copy(part, f); err != nil {
+		return nil, fmt.Errorf("写入IndexTTS上传文件失败: %w", err)
+	}
+	if err = writer.Close(); err != nil {
+		return nil, fmt.Errorf("构建IndexTTS上传请求失败: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+indexTTSCloneEndpoint, &body)
+	if err != nil {
+		return nil, fmt.Errorf("创建IndexTTS克隆请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+	if apiKey := strings.TrimSpace(getStringAny(cfgMap, "api_key")); apiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	}
+
+	resp, err := vcc.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用IndexTTS克隆接口失败: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("读取IndexTTS克隆响应失败: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("IndexTTS克隆HTTP %d: %s", resp.StatusCode, truncateForLog(strings.TrimSpace(string(respBody)), 512))
+	}
+	parsed, err := unmarshalJSONMap(respBody)
+	if err != nil {
+		return nil, fmt.Errorf("解析IndexTTS克隆响应失败: %w", err)
+	}
+	voiceID := strings.TrimSpace(getStringAny(parsed, "voice"))
+	if voiceID == "" {
+		voiceID = voiceName
+	}
+	if voiceID == "" {
+		return nil, fmt.Errorf("IndexTTS克隆响应缺少 voice: %s", strings.TrimSpace(string(respBody)))
+	}
+	return &minimaxVoiceCloneResult{
+		VoiceID:      voiceID,
+		RawResponse:  parsed,
+		ResponseCode: resp.StatusCode,
+	}, nil
+}
+
+func (vcc *VoiceCloneController) cloneWithIndexTTSVLLM(ctx context.Context, ttsCfg models.Config, filePath, fileName string) (*minimaxVoiceCloneResult, error) {
+	voiceName := strings.TrimSpace(buildMinimaxCustomVoiceID(ttsCfg.ConfigID))
+	return vcc.cloneWithIndexTTSVLLMByVoice(ctx, ttsCfg, filePath, fileName, voiceName)
 }
 
 func (vcc *VoiceCloneController) previewMinimaxClonedVoice(ctx context.Context, cfgMap map[string]any, voiceID, text string) ([]byte, string, error) {
@@ -1569,6 +1819,18 @@ func validateCloneAudioForProvider(provider, filePath string) error {
 			}
 		} else {
 			log.Printf("[voice_clone][aliyun_qwen] local audio check: file=%q ext=%q size=%d mime=%q", filePath, ext, stat.Size(), mimeType)
+		}
+		return nil
+	case "indextts_vllm":
+		if ext != ".wav" && ext != ".mp3" && ext != ".flac" && ext != ".m4a" && ext != ".ogg" {
+			return fmt.Errorf("IndexTTS 声音复刻仅支持 WAV/MP3/FLAC/M4A/OGG，检测到扩展名: %s", ext)
+		}
+		stat, err := os.Stat(filePath)
+		if err != nil {
+			return fmt.Errorf("读取音频文件信息失败: %w", err)
+		}
+		if stat.Size() <= 0 {
+			return errors.New("音频文件不能为空")
 		}
 		return nil
 	default:

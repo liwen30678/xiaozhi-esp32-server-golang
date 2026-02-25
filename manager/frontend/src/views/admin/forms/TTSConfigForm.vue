@@ -274,6 +274,37 @@
       </el-form-item>
     </template>
 
+
+
+    <template v-if="model.provider === 'indextts_vllm'">
+      <el-form-item label="API URL" prop="indextts_vllm.api_url">
+        <el-input v-model="model.indextts_vllm.api_url" placeholder="请输入IndexTTS服务地址（例如：http://127.0.0.1:7860）" />
+      </el-form-item>
+      <el-form-item label="API Key" prop="indextts_vllm.api_key">
+        <el-input v-model="model.indextts_vllm.api_key" placeholder="可选，按需填写" type="password" show-password />
+      </el-form-item>
+      <el-form-item label="模型" prop="indextts_vllm.model">
+        <el-input v-model="model.indextts_vllm.model" placeholder="indextts-vllm" />
+      </el-form-item>
+      <el-form-item label="音色" prop="indextts_vllm.voice">
+        <el-select
+          v-model="model.indextts_vllm.voice"
+          placeholder="请选择音色"
+          style="width: 100%"
+          filterable
+          :loading="voiceLoading"
+          :disabled="voiceLoading"
+          allow-create
+          default-first-option
+        >
+          <el-option v-for="option in voiceOptionsList" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="帧时长" prop="indextts_vllm.frame_duration">
+        <el-input-number v-model="model.indextts_vllm.frame_duration" :min="1" :max="1000" style="width: 100%" />
+      </el-form-item>
+    </template>
+
     <template v-if="model.provider === 'cosyvoice'">
       <el-form-item label="API URL" prop="cosyvoice.api_url">
         <el-input v-model="model.cosyvoice.api_url" placeholder="请输入API URL" />
@@ -371,6 +402,16 @@ function getJsonData() {
       config.speed = form.openai?.speed
       config.stream = form.openai?.stream
       config.frame_duration = form.openai?.frame_duration
+      break
+    case 'indextts_vllm':
+      config.provider = 'indextts_vllm'
+      config.api_url = form.indextts_vllm?.api_url
+      config.api_key = form.indextts_vllm?.api_key
+      config.model = form.indextts_vllm?.model || 'indextts-vllm'
+      config.voice = form.indextts_vllm?.voice
+      config.response_format = 'wav'
+      config.stream = false
+      config.frame_duration = form.indextts_vllm?.frame_duration || 60
       break
     case 'zhipu':
       config.provider = 'zhipu'

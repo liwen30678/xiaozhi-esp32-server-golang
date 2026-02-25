@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h2>声音复刻</h2>
-        <p class="subtitle">支持 Minimax/CosyVoice/千问，支持上传音频与浏览器录音</p>
+        <p class="subtitle">支持 Minimax/CosyVoice/千问/IndexTTS，支持上传音频与浏览器录音</p>
       </div>
       <el-button type="primary" @click="openCreateDialog">创建复刻音色</el-button>
     </div>
@@ -28,7 +28,7 @@
       <el-table-column label="创建时间" width="160" show-overflow-tooltip>
         <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="360">
+      <el-table-column label="操作" width="460">
         <template #default="{ row }">
           <div class="action-buttons">
             <el-button
@@ -60,10 +60,28 @@
             >
               重新复刻
             </el-button>
+            <el-button
+              v-if="canAppendRefAudio(row)"
+              size="small"
+              type="primary"
+              plain
+              :loading="appendAudioSubmittingID === row.id"
+              @click="openAppendAudioDialog(row)"
+            >
+              追加参考音频
+            </el-button>
           </div>
         </template>
       </el-table-column>
     </el-table>
+
+    <input
+      ref="appendAudioInputRef"
+      type="file"
+      :accept="uploadAcceptTypes"
+      style="display:none"
+      @change="handleAppendAudioFileChange"
+    />
 
     <el-dialog v-model="createDialogVisible" title="创建复刻音色" width="680px">
       <el-form label-width="140px">
@@ -213,7 +231,7 @@ const voiceClones = ref([])
 const currentAudios = ref([])
 const ttsConfigs = ref([])
 const MIN_AUDIO_DURATION_SECONDS = 10
-const cloneEnabledProviders = ['minimax', 'cosyvoice', 'aliyun_qwen']
+const cloneEnabledProviders = ['minimax', 'cosyvoice', 'aliyun_qwen', 'indextts_vllm']
 const pendingStatuses = ['queued', 'processing']
 let clonePollingTimer = null
 const clonePollingBusy = ref(false)
@@ -221,6 +239,9 @@ const editSubmitting = ref(false)
 const retrySubmittingID = ref(null)
 const previewUploadSubmittingID = ref(null)
 const previewClonedSubmittingID = ref(null)
+const appendAudioSubmittingID = ref(null)
+const appendAudioInputRef = ref(null)
+const appendAudioTargetClone = ref(null)
 const previewPlayerVisible = ref(false)
 const previewPlayerRef = ref(null)
 const previewPlayerURL = ref('')
@@ -355,6 +376,7 @@ const getCloneLastError = (row) => {
 }
 const canRetryClone = (row) => normalizeCloneStatus(row) === 'failed'
 const canPreviewClonedVoice = (row) => normalizeCloneStatus(row) === 'active'
+const canAppendRefAudio = (row) => normalizeCloneStatus(row) === 'active' && normalizeProvider(row?.provider) === 'indextts_vllm'
 const formatPlayerTime = (seconds) => {
   const value = Number(seconds || 0)
   if (!Number.isFinite(value) || value < 0) return '00:00'
@@ -855,6 +877,42 @@ const retryClone = async (clone) => {
     await loadVoiceClones(true)
   } finally {
     retrySubmittingID.value = null
+  }
+}
+
+const openAppendAudioDialog = (clone) => {
+  if (!clone?.id || !canAppendRefAudio(clone) || appendAudioSubmittingID.value) return
+  appendAudioTargetClone.value = clone
+  const input = appendAudioInputRef.value
+  if (!input) {
+    ElMessage.error('文件选择器未就绪')
+    return
+  }
+  input.value = ''
+  input.click()
+}
+
+const handleAppendAudioFileChange = async (event) => {
+  const file = event?.target?.files?.[0]
+  const clone = appendAudioTargetClone.value
+  if (!file || !clone?.id) {
+    appendAudioTargetClone.value = null
+    return
+  }
+  appendAudioSubmittingID.value = clone.id
+  try {
+    const fd = new FormData()
+    fd.append('source_type', 'upload')
+    fd.append('audio_file', file)
+    await api.post(`/user/voice-clones/${clone.id}/append-audio`, fd, { timeout: 120000 })
+    ElMessage.success('追加参考音频成功')
+    await loadVoiceClones(true)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.error || '追加参考音频失败')
+  } finally {
+    appendAudioSubmittingID.value = null
+    appendAudioTargetClone.value = null
+    if (event?.target) event.target.value = ''
   }
 }
 
