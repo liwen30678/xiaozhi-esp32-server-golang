@@ -277,6 +277,24 @@
 
 
     <template v-if="model.provider === 'indextts_vllm'">
+      <el-form-item label-width="0" class="indextts-help-item">
+        <div class="indextts-help">
+          <div class="indextts-help-head">
+            <div class="indextts-help-title">IndexTTS vLLM 接口指南</div>
+            <div class="indextts-help-subtitle">确保服务端支持 /audio/speech、/audio/voices，复刻需 /audio/clone</div>
+          </div>
+          <div class="indextts-help-links">
+            <el-link :href="indexTTSDocURL" target="_blank" type="primary" :underline="false">项目接入文档（GitHub）</el-link>
+            <span class="indextts-help-divider">|</span>
+            <el-link :href="indexTTSReferenceURL" target="_blank" type="info" :underline="false">参考 api_server.py</el-link>
+          </div>
+          <div class="indextts-help-tags">
+            <el-tag size="small" effect="plain" type="success">/audio/speech</el-tag>
+            <el-tag size="small" effect="plain" type="warning">/audio/voices</el-tag>
+            <el-tag size="small" effect="plain" type="info">/audio/clone</el-tag>
+          </div>
+        </div>
+      </el-form-item>
       <el-form-item label="API URL" prop="indextts_vllm.api_url">
         <el-input v-model="model.indextts_vllm.api_url" placeholder="请输入IndexTTS服务地址（例如：http://127.0.0.1:7860）" />
       </el-form-item>
@@ -348,6 +366,8 @@ const emit = defineEmits(['request-voice-options'])
 const formRef = ref()
 // 保证音色选项始终为数组且响应式，供下拉使用
 const voiceOptionsList = computed(() => Array.isArray(props.voiceOptions) ? props.voiceOptions : [])
+const indexTTSDocURL = 'https://github.com/hackers365/xiaozhi-esp32-server-golang/blob/main/doc/indextts_vllm_api.md'
+const indexTTSReferenceURL = 'https://github.com/hackers365/index-tts-vllm/blob/master/api_server.py'
 
 function handleIndexTTSVoiceVisibleChange(visible) {
   if (visible) {
@@ -461,3 +481,52 @@ function resetFields() {
 
 defineExpose({ validate, getJsonData, resetFields })
 </script>
+
+<style scoped>
+.indextts-help-item :deep(.el-form-item__content) {
+  margin-left: 0 !important;
+}
+
+.indextts-help {
+  width: 100%;
+  border: 1px solid #d9e7ff;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: linear-gradient(120deg, #f7fbff 0%, #f2f9ff 45%, #f8f8ff 100%);
+}
+
+.indextts-help-head {
+  margin-bottom: 8px;
+}
+
+.indextts-help-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f3d5b;
+}
+
+.indextts-help-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #4f6b8a;
+}
+
+.indextts-help-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.indextts-help-divider {
+  color: #a9b9cc;
+  font-size: 12px;
+}
+
+.indextts-help-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+</style>
