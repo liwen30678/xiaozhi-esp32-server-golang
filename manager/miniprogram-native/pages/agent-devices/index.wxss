@@ -1,5 +1,15 @@
 @import "../../app.wxss";
 
+.header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mini-btn {
+  margin: 0;
+}
+
 .device-card {
   margin-bottom: 18rpx;
 }
@@ -21,4 +31,8 @@
   padding: 16rpx 18rpx;
   margin-top: 12rpx;
   font-size: 25rpx;
+}
+
+.actions {
+  margin-top: 12rpx;
 }

@@ -1,0 +1,69 @@
+@import "../../app.wxss";
+
+.header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-card .picker-value {
+  margin-bottom: 0;
+}
+
+.msg-card {
+  margin-bottom: 18rpx;
+}
+
+.msg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10rpx;
+}
+
+.msg-role {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22rpx;
+  border-radius: 999rpx;
+  padding: 4rpx 12rpx;
+}
+
+.role-user {
+  color: #7c5534;
+  background: #f7e9db;
+  border: 1rpx solid #e7c7aa;
+}
+
+.role-assistant {
+  color: #2f6b4d;
+  background: #e7f3eb;
+  border: 1rpx solid #bfdcca;
+}
+
+.msg-time {
+  font-size: 22rpx;
+  color: #8e7b69;
+}
+
+.msg-content {
+  font-size: 27rpx;
+  color: #3e3024;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.msg-meta {
+  font-size: 23rpx;
+  color: #8d7867;
+  margin-top: 10rpx;
+}
+
+.msg-actions {
+  margin-top: 12rpx;
+}
+
+.load-more-btn {
+  margin-top: 2rpx;
+}

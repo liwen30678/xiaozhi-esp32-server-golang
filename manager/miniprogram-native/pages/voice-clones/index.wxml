@@ -1,0 +1,106 @@
+<view class="container">
+  <view class="card header-card">
+    <view>
+      <view class="title">声音复刻</view>
+      <view class="muted">支持 Minimax / CosyVoice / 千问 / IndexTTS</view>
+    </view>
+    <button size="mini" class="btn-primary mini-btn" bindtap="openCreate">创建复刻</button>
+  </view>
+
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无复刻任务</view>
+  </view>
+
+  <view class="card clone-card" wx:for="{{list}}" wx:key="id">
+    <view class="clone-header">
+      <view class="clone-name">{{item.name || '-'}}</view>
+      <view class="status-chip {{item.status_class}}">{{item.status_text}}</view>
+    </view>
+    <view class="clone-meta">提供商：{{item.provider || '-'}}</view>
+    <view class="clone-meta">TTS：{{item.tts_config_name || item.tts_config_id || '-'}}</view>
+    <view class="clone-meta">音色ID：{{item.provider_voice_id || '-'}}</view>
+    <view class="clone-meta">创建时间：{{item.created_text}}</view>
+    <view class="clone-meta error-text" wx:if="{{item.last_error != '-'}}">失败原因：{{item.last_error}}</view>
+    <view class="actions">
+      <button size="mini" data-id="{{item.id}}" loading="{{previewingUploadID == item.id}}" bindtap="previewUploadAudio">原音频</button>
+      <button
+        size="mini"
+        wx:if="{{item.can_preview}}"
+        data-id="{{item.id}}"
+        data-provider="{{item.provider}}"
+        loading="{{previewingCloneID == item.id}}"
+        bindtap="previewCloneAudio"
+      >
+        试听复刻
+      </button>
+      <button size="mini" data-id="{{item.id}}" data-name="{{item.name}}" bindtap="openRename">改名</button>
+      <button
+        size="mini"
+        wx:if="{{item.can_retry}}"
+        data-id="{{item.id}}"
+        loading="{{retryingID == item.id}}"
+        bindtap="retryClone"
+      >
+        重新复刻
+      </button>
+      <button
+        size="mini"
+        wx:if="{{item.can_append}}"
+        data-id="{{item.id}}"
+        data-provider="{{item.provider}}"
+        loading="{{appendingID == item.id}}"
+        bindtap="appendAudio"
+      >
+        追加音频
+      </button>
+    </view>
+  </view>
+
+  <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showCreate}}" class="sheet-mask" catchtap="closeCreate">
+    <view class="sheet clone-sheet" catchtap="noop">
+      <view class="sheet-title">创建复刻音色</view>
+      <input class="sheet-input" placeholder="复刻名称（可选）" value="{{form.name}}" bindinput="onCreateNameInput" maxlength="100" />
+      <picker mode="selector" range="{{cloneTTSNames}}" value="{{configIndex}}" bindchange="onConfigChange">
+        <view class="picker-value">{{configIndex >= 0 ? ('TTS：' + cloneTTSNames[configIndex]) : '请选择TTS配置'}}</view>
+      </picker>
+      <view class="help-text">{{audioHint}}</view>
+      <view class="help-text">文字要求：{{capability.min_text_len || 0}} - {{capability.max_text_len || 4000}} 字符</view>
+      <textarea
+        class="sheet-textarea"
+        placeholder="{{capability.requires_transcript ? '该提供商要求填写音频对应文字' : '音频对应文字（可选）'}}"
+        value="{{form.transcript}}"
+        bindinput="onTranscriptInput"
+        maxlength="4000"
+      />
+      <picker mode="selector" range="{{langNames}}" value="{{langIndex}}" bindchange="onLangChange">
+        <view class="picker-value">语言：{{langNames[langIndex]}}</view>
+      </picker>
+
+      <view class="file-row">
+        <view class="file-name">{{form.audio_file_name || '未选择音频文件'}}</view>
+        <view class="file-actions">
+          <button size="mini" bindtap="chooseAudioFile">选择文件</button>
+          <button size="mini" wx:if="{{form.audio_file_path}}" bindtap="clearAudioFile">清空</button>
+        </view>
+      </view>
+
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeCreate">取消</button>
+        <button size="mini" class="btn-primary" loading="{{saving}}" bindtap="submitCreate">提交</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showRename}}" class="sheet-mask" catchtap="closeRename">
+    <view class="sheet rename-sheet" catchtap="noop">
+      <view class="sheet-title">编辑复刻名称</view>
+      <input class="sheet-input" placeholder="请输入名称" value="{{renameForm.name}}" bindinput="onRenameInput" maxlength="100" />
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeRename">取消</button>
+        <button size="mini" class="btn-primary" loading="{{renaming}}" bindtap="submitRename">保存</button>
+      </view>
+    </view>
+  </view>
+</view>

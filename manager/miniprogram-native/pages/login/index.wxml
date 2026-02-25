@@ -1,20 +1,22 @@
-<view class="container">
-  <view class="card">
-    <view class="title">原生小程序控制台登录</view>
-    <view class="muted">请输入管理后台地址和账号密码</view>
+<view class="container login-container">
+  <view class="card header-card login-hero">
+    <view class="title">小智控制台</view>
+    <view class="muted">输入服务地址与账号后即可进入管理界面</view>
+    <view class="hero-tag">Native Mini Program</view>
   </view>
 
-  <view class="card">
-    <input placeholder="后端地址，如 https://example.com" value="{{baseURL}}" bindinput="onBaseURLInput" />
+  <view class="card form-card">
+    <view class="field-label">服务地址</view>
+    <input class="field-input" placeholder="如 https://example.com" value="{{baseURL}}" bindinput="onBaseURLInput" />
+
+    <view class="field-label">用户名</view>
+    <input class="field-input" placeholder="请输入用户名" value="{{username}}" bindinput="onUsernameInput" />
+
+    <view class="field-label">密码</view>
+    <input class="field-input" placeholder="请输入密码" password="true" value="{{password}}" bindinput="onPasswordInput" />
+
+    <button class="btn-primary login-btn" loading="{{loading}}" bindtap="onSubmit">登录</button>
   </view>
 
-  <view class="card">
-    <input placeholder="用户名" value="{{username}}" bindinput="onUsernameInput" />
-  </view>
-
-  <view class="card">
-    <input placeholder="密码" password="true" value="{{password}}" bindinput="onPasswordInput" />
-  </view>
-
-  <button class="btn-primary" loading="{{loading}}" bindtap="onSubmit">登录</button>
+  <view class="login-hint">联调时可关闭域名校验；预览和真机必须使用已备案 HTTPS 合法域名。</view>
 </view>

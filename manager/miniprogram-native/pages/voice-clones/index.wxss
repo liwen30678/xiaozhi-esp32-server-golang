@@ -1,0 +1,84 @@
+@import "../../app.wxss";
+
+.header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mini-btn {
+  margin: 0;
+}
+
+.clone-card {
+  margin-bottom: 18rpx;
+}
+
+.clone-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12rpx;
+  margin-bottom: 10rpx;
+}
+
+.clone-name {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #35271d;
+}
+
+.status-pending {
+  color: #8f5e2f;
+  background: #fdf1e1;
+  border: 1rpx solid #edcfaa;
+}
+
+.clone-meta {
+  font-size: 24rpx;
+  color: #7a6855;
+  margin-top: 6rpx;
+  word-break: break-all;
+}
+
+.error-text {
+  color: #9d3f35;
+}
+
+.help-text {
+  margin: 4rpx 0 10rpx;
+  font-size: 22rpx;
+  color: #8a7664;
+  line-height: 1.45;
+}
+
+.clone-sheet {
+  max-height: 92vh;
+  overflow-y: auto;
+}
+
+.rename-sheet {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.file-row {
+  margin-top: 4rpx;
+  margin-bottom: 8rpx;
+  padding: 14rpx;
+  border-radius: 14rpx;
+  border: 1rpx solid #e3d3bf;
+  background: #f8f1e7;
+}
+
+.file-name {
+  font-size: 24rpx;
+  color: #5d4938;
+  word-break: break-all;
+}
+
+.file-actions {
+  margin-top: 10rpx;
+  display: flex;
+  gap: 10rpx;
+}

@@ -1,9 +1,37 @@
 <view class="container">
+  <view class="card header-card">
+    <view class="title">我的账号</view>
+    <view class="muted">当前登录用户信息</view>
+    <view class="profile-quick">
+      <view class="profile-chip">{{user.username || '-'}}</view>
+      <view class="profile-chip role">{{user.role || '-'}}</view>
+    </view>
+  </view>
+
   <view class="card">
-    <view class="title">个人信息</view>
-    <view class="list-item">用户名：{{user.username || '-'}}</view>
-    <view class="list-item">角色：{{user.role || '-'}}</view>
-    <view>服务地址：{{baseURL || '-'}}</view>
+    <view class="title">连接信息</view>
+    <view class="profile-line">
+      <view class="label">用户名</view>
+      <view class="value">{{user.username || '-'}}</view>
+    </view>
+    <view class="profile-line">
+      <view class="label">角色</view>
+      <view class="value">{{user.role || '-'}}</view>
+    </view>
+    <view class="profile-line no-border">
+      <view class="label">服务地址</view>
+      <view class="value">{{baseURL || '-'}}</view>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="title">更多功能</view>
+    <view class="action-list">
+      <button size="mini" bindtap="gotoRoles">我的角色</button>
+      <button size="mini" bindtap="gotoKnowledgeBases">我的知识库</button>
+      <button size="mini" bindtap="gotoSpeakers">声纹管理</button>
+      <button size="mini" bindtap="gotoVoiceClones">声音复刻</button>
+    </view>
   </view>
 
   <button type="warn" bindtap="onLogout">退出登录</button>

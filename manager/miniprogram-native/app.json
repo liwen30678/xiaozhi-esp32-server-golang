@@ -4,7 +4,14 @@
     "pages/console/index",
     "pages/agents/index",
     "pages/devices/index",
-    "pages/profile/index"
+    "pages/profile/index",
+    "pages/agent-edit/index",
+    "pages/agent-devices/index",
+    "pages/agent-history/index",
+    "pages/roles/index",
+    "pages/knowledge-bases/index",
+    "pages/speakers/index",
+    "pages/voice-clones/index"
   ],
   "window": {
     "navigationBarTitleText": "小智控制台",

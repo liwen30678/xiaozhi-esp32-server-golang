@@ -1,1 +1,39 @@
 @import "../../app.wxss";
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12rpx;
+}
+
+.stats-item {
+  border-radius: 16rpx;
+  border: 1rpx solid #e4d2be;
+  background: linear-gradient(180deg, #fff8ee 0%, #fdf1e4 100%);
+  padding: 16rpx;
+  text-align: center;
+}
+
+.stats-value {
+  font-size: 36rpx;
+  font-weight: 700;
+  color: #8f4a2e;
+}
+
+.stats-label {
+  margin-top: 6rpx;
+  font-size: 23rpx;
+  color: #8d7864;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.action-btn {
+  flex: 1;
+  min-width: 180rpx;
+  font-size: 26rpx;
+}

@@ -1,15 +1,77 @@
 <view class="container">
-  <view class="card">
+  <view class="card header-card">
     <view class="title">欢迎，{{user.username || '用户'}}</view>
     <view class="muted">角色：{{user.role || '-'}}</view>
   </view>
 
-  <view class="card" wx:if="{{stats}}">
+  <view class="card">
     <view class="title">控制台统计</view>
-    <view class="list-item">设备总数：{{stats.device_count || 0}}</view>
-    <view class="list-item">智能体总数：{{stats.agent_count || 0}}</view>
-    <view>在线设备：{{stats.online_device_count || 0}}</view>
+    <view class="stats-grid">
+      <view class="stats-item">
+        <view class="stats-value">{{stats.deviceCount}}</view>
+        <view class="stats-label">设备总数</view>
+      </view>
+      <view class="stats-item">
+        <view class="stats-value">{{stats.agentCount}}</view>
+        <view class="stats-label">智能体总数</view>
+      </view>
+      <view class="stats-item">
+        <view class="stats-value">{{stats.onlineDeviceCount}}</view>
+        <view class="stats-label">在线设备</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="title">快捷操作</view>
+    <view class="btn-row">
+      <button class="btn-primary action-btn" bindtap="openAddDevice">添加设备</button>
+      <button class="action-btn" bindtap="openInject">消息注入</button>
+      <button class="action-btn" bindtap="goAgents">管理智能体</button>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="title">最近设备</view>
+    <view wx:if="{{!devices.length}}" class="muted">暂无设备</view>
+    <view wx:for="{{devices}}" wx:key="id" class="list-item">
+      <view>名称：{{item.device_name || '未命名设备'}}</view>
+      <view class="muted">设备码：{{item.device_code || '-'}}</view>
+      <view class="muted">关联智能体：{{item.agent_name || '-'}}</view>
+    </view>
   </view>
 
   <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showAddDevice}}" class="sheet-mask" catchtap="closeAddDevice">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">添加设备</view>
+      <input class="sheet-input" placeholder="设备名称" value="{{addDeviceForm.device_name}}" bindinput="onAddDeviceNameInput" />
+      <picker mode="selector" range="{{agents}}" range-key="name" value="{{addDeviceAgentIndex}}" bindchange="onAddDeviceAgentChange">
+        <view class="picker-value">{{selectedAddAgentName || '选择关联智能体'}}</view>
+      </picker>
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeAddDevice">取消</button>
+        <button size="mini" class="btn-primary" loading="{{addDeviceSaving}}" bindtap="submitAddDevice">保存</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showInject}}" class="sheet-mask" catchtap="closeInject">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">消息注入</view>
+      <picker mode="selector" range="{{devices}}" range-key="device_name" value="{{injectDeviceIndex}}" bindchange="onInjectDeviceChange">
+        <view class="picker-value">{{selectedInjectDeviceName || '选择设备'}}</view>
+      </picker>
+      <textarea class="sheet-textarea" placeholder="输入要注入的消息内容" value="{{injectForm.message}}" bindinput="onInjectMessageInput" maxlength="500" />
+      <view class="switch-row">
+        <view>直接播放（跳过LLM）</view>
+        <switch checked="{{injectForm.skip_llm}}" color="#c67644" bindchange="onInjectSkipChange" />
+      </view>
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeInject">取消</button>
+        <button size="mini" class="btn-primary" loading="{{injecting}}" bindtap="submitInject">发送</button>
+      </view>
+    </view>
+  </view>
 </view>

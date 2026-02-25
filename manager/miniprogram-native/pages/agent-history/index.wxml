@@ -1,0 +1,30 @@
+<view class="container">
+  <view class="card header-card">
+    <view>
+      <view class="title">聊天历史</view>
+      <view class="muted">共 {{total}} 条</view>
+    </view>
+    <picker mode="selector" range="{{roleOptions}}" value="{{roleIndex}}" bindchange="onRoleChange">
+      <view class="picker-value">筛选：{{roleOptions[roleIndex]}}</view>
+    </picker>
+  </view>
+
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无历史记录</view>
+  </view>
+
+  <view class="card msg-card" wx:for="{{list}}" wx:key="id">
+    <view class="msg-header">
+      <view class="msg-role role-{{item.role}}">{{item.role_text}}</view>
+      <view class="msg-time">{{item.created_text}}</view>
+    </view>
+    <view class="msg-content">{{item.content}}</view>
+    <view class="msg-meta">设备：{{item.device_id || '-'}}</view>
+    <view class="msg-actions">
+      <button size="mini" type="warn" data-id="{{item.id}}" bindtap="removeMessage">删除</button>
+    </view>
+  </view>
+
+  <view class="muted" wx:if="{{loading}}">加载中...</view>
+  <button wx:if="{{hasMore && !loading}}" class="load-more-btn" bindtap="loadMore" loading="{{loadingMore}}">加载更多</button>
+</view>

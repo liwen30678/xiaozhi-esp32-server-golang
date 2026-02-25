@@ -26,5 +26,21 @@ Page({
     wx.removeStorageSync('token')
     wx.removeStorageSync('user')
     wx.reLaunch({ url: '/pages/login/index' })
+  },
+
+  gotoRoles() {
+    wx.navigateTo({ url: '/pages/roles/index' })
+  },
+
+  gotoKnowledgeBases() {
+    wx.navigateTo({ url: '/pages/knowledge-bases/index' })
+  },
+
+  gotoSpeakers() {
+    wx.navigateTo({ url: '/pages/speakers/index' })
+  },
+
+  gotoVoiceClones() {
+    wx.navigateTo({ url: '/pages/voice-clones/index' })
   }
 })

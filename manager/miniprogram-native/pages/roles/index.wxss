@@ -1,0 +1,68 @@
+@import "../../app.wxss";
+
+.header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mini-btn {
+  margin: 0;
+}
+
+.role-card {
+  margin-bottom: 18rpx;
+}
+
+.role-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8rpx;
+  gap: 12rpx;
+}
+
+.role-name {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #35271d;
+}
+
+.role-tags {
+  display: flex;
+  gap: 8rpx;
+}
+
+.type-global {
+  color: #6c4a2e;
+  background: #f7e9da;
+  border: 1rpx solid #e7c7aa;
+}
+
+.type-user {
+  color: #5f4b38;
+  background: #efe5d8;
+  border: 1rpx solid #dbc9b4;
+}
+
+.role-desc {
+  font-size: 24rpx;
+  color: #7f6c58;
+  margin-bottom: 8rpx;
+}
+
+.role-prompt {
+  font-size: 24rpx;
+  color: #4f3b2d;
+  background: #f7efe5;
+  border: 1rpx solid #e5d5c2;
+  border-radius: 10rpx;
+  padding: 12rpx;
+  line-height: 1.5;
+}
+
+.role-meta {
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  color: #7f6c58;
+}

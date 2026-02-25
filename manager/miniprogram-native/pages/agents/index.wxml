@@ -1,14 +1,46 @@
 <view class="container">
-  <view class="card">
-    <view class="title">我的智能体</view>
-    <view class="muted">共 {{list.length}} 个</view>
+  <view class="card header-card">
+    <view>
+      <view class="title">我的智能体</view>
+      <view class="muted">共 {{list.length}} 个</view>
+    </view>
+    <button class="btn-primary mini-btn" size="mini" bindtap="openCreate">新增</button>
   </view>
 
-  <view class="card" wx:for="{{list}}" wx:key="id">
-    <view class="list-item">名称：{{item.name || '-'}}</view>
-    <view class="list-item">角色：{{item.role_name || '-'}}</view>
-    <view>ID：{{item.id}}</view>
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无智能体，点击右上角新增</view>
+  </view>
+
+  <view class="card agent-card" wx:for="{{list}}" wx:key="id">
+    <view class="agent-header">
+      <view class="agent-name">{{item.name || '-'}}</view>
+      <view class="agent-status">{{item.status || 'active'}}</view>
+    </view>
+    <view class="agent-meta">LLM：{{item.llm_name}}</view>
+    <view class="agent-meta">TTS：{{item.tts_name}}</view>
+    <view class="agent-meta">最近更新：{{item.updated_text}}</view>
+    <view class="actions">
+      <button size="mini" data-id="{{item.id}}" bindtap="gotoEdit">编辑</button>
+      <button size="mini" data-id="{{item.id}}" bindtap="gotoDevices">设备</button>
+      <button size="mini" data-id="{{item.id}}" bindtap="gotoHistory">历史</button>
+      <button size="mini" type="warn" data-id="{{item.id}}" bindtap="removeAgent">删除</button>
+    </view>
   </view>
 
   <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showCreate}}" class="sheet-mask" catchtap="closeCreate">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">新增智能体</view>
+      <input class="sheet-input" placeholder="请输入智能体名称" value="{{form.name}}" bindinput="onNameInput" maxlength="50" />
+      <textarea class="sheet-textarea" placeholder="请输入角色提示词" value="{{form.custom_prompt}}" bindinput="onPromptInput" maxlength="10000" />
+      <picker mode="selector" range="{{memoryModes}}" value="{{memoryIndex}}" bindchange="onMemoryChange">
+        <view class="picker-value">记忆模式：{{memoryModes[memoryIndex]}}</view>
+      </picker>
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeCreate">取消</button>
+        <button size="mini" class="btn-primary" loading="{{creating}}" bindtap="submitCreate">创建</button>
+      </view>
+    </view>
+  </view>
 </view>

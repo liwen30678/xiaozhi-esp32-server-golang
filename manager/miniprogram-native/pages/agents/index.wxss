@@ -1,1 +1,47 @@
 @import "../../app.wxss";
+
+.header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mini-btn {
+  margin: 0;
+}
+
+.agent-card {
+  margin-bottom: 18rpx;
+}
+
+.agent-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12rpx;
+  gap: 12rpx;
+}
+
+.agent-name {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #35271d;
+}
+
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22rpx;
+  color: #2f6b4d;
+  background: #e7f3eb;
+  border: 1rpx solid #bfdcca;
+  padding: 4rpx 12rpx;
+  border-radius: 999rpx;
+}
+
+.agent-meta {
+  font-size: 26rpx;
+  color: #7a6855;
+  margin-bottom: 8rpx;
+}

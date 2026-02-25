@@ -1,0 +1,57 @@
+<view class="container">
+  <view class="card header-card">
+    <view>
+      <view class="title">我的角色</view>
+      <view class="muted">共 {{list.length}} 个</view>
+    </view>
+    <button size="mini" class="btn-primary mini-btn" bindtap="openCreate">新增角色</button>
+  </view>
+
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无角色</view>
+  </view>
+
+  <view class="card role-card" wx:for="{{list}}" wx:key="id">
+    <view class="role-header">
+      <view class="role-name">{{item.name}}</view>
+      <view class="role-tags">
+        <text class="tag type-{{item.role_type}}">{{item.role_type_text}}</text>
+        <text class="tag status-{{item.status}}">{{item.status_text}}</text>
+      </view>
+    </view>
+    <view class="role-desc" wx:if="{{item.description}}">{{item.description}}</view>
+    <view class="role-prompt">{{item.prompt_preview}}</view>
+    <view class="role-meta">LLM：{{item.llm_config_id || '未设置'}}</view>
+    <view class="role-meta">TTS：{{item.tts_config_id || '未设置'}} / 音色：{{item.voice || '未设置'}}</view>
+    <view class="actions" wx:if="{{item.editable}}">
+      <button size="mini" data-id="{{item.id}}" bindtap="openEdit">编辑</button>
+      <button size="mini" data-id="{{item.id}}" bindtap="toggleRole">{{item.status === 'inactive' ? '启用' : '禁用'}}</button>
+      <button size="mini" type="warn" data-id="{{item.id}}" bindtap="removeRole">删除</button>
+    </view>
+  </view>
+
+  <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showForm}}" class="sheet-mask" catchtap="closeForm">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">{{isEdit ? '编辑角色' : '新增角色'}}</view>
+      <input class="sheet-input" placeholder="角色名称" value="{{form.name}}" bindinput="onNameInput" maxlength="100" />
+      <input class="sheet-input" placeholder="角色描述（可选）" value="{{form.description}}" bindinput="onDescriptionInput" maxlength="200" />
+      <textarea class="sheet-textarea" placeholder="系统提示词 Prompt" value="{{form.prompt}}" bindinput="onPromptInput" maxlength="12000" />
+      <picker mode="selector" range="{{llmNames}}" value="{{llmIndex}}" bindchange="onLLMChange">
+        <view class="picker-value">LLM：{{llmNames[llmIndex]}}</view>
+      </picker>
+      <picker mode="selector" range="{{ttsNames}}" value="{{ttsIndex}}" bindchange="onTTSChange">
+        <view class="picker-value">TTS：{{ttsNames[ttsIndex]}}</view>
+      </picker>
+      <input class="sheet-input" placeholder="音色（可选）" value="{{form.voice}}" bindinput="onVoiceInput" />
+      <picker mode="selector" range="{{statusOptions}}" value="{{statusIndex}}" bindchange="onStatusChange">
+        <view class="picker-value">状态：{{statusOptions[statusIndex]}}</view>
+      </picker>
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeForm">取消</button>
+        <button size="mini" class="btn-primary" loading="{{saving}}" bindtap="submitForm">保存</button>
+      </view>
+    </view>
+  </view>
+</view>

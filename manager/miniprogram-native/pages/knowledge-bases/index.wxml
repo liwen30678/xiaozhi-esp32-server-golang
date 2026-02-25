@@ -1,0 +1,54 @@
+<view class="container">
+  <view class="card header-card">
+    <view>
+      <view class="title">我的知识库</view>
+      <view class="muted">共 {{list.length}} 个</view>
+    </view>
+    <button size="mini" class="btn-primary mini-btn" bindtap="openCreate">新增知识库</button>
+  </view>
+
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无知识库</view>
+  </view>
+
+  <view class="card kb-card" wx:for="{{list}}" wx:key="id">
+    <view class="kb-header">
+      <view class="kb-name">{{item.name}}</view>
+      <view class="kb-tags">
+        <text class="tag status-{{item.status}}">{{item.status_text}}</text>
+        <text class="tag sync">{{item.sync_status_text}}</text>
+      </view>
+    </view>
+    <view class="kb-desc">{{item.description_preview || '无内容'}}</view>
+    <view class="kb-meta">文档数：{{item.doc_count || 0}}</view>
+    <view class="kb-meta">检索阈值：{{item.retrieval_text}}</view>
+    <view class="actions">
+      <button size="mini" data-id="{{item.id}}" bindtap="openEdit">编辑</button>
+      <button size="mini" data-id="{{item.id}}" bindtap="syncItem">同步</button>
+      <button size="mini" type="warn" data-id="{{item.id}}" bindtap="removeItem">删除</button>
+    </view>
+  </view>
+
+  <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showForm}}" class="sheet-mask" catchtap="closeForm">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-title">{{isEdit ? '编辑知识库' : '新增知识库'}}</view>
+      <input class="sheet-input" placeholder="知识库名称" value="{{form.name}}" bindinput="onNameInput" maxlength="100" />
+      <input class="sheet-input" placeholder="知识库描述（可选）" value="{{form.description}}" bindinput="onDescriptionInput" maxlength="300" />
+      <textarea class="sheet-textarea" placeholder="知识内容（支持文本）" value="{{form.content}}" bindinput="onContentInput" maxlength="30000" />
+      <picker mode="selector" range="{{statusOptions}}" value="{{statusIndex}}" bindchange="onStatusChange">
+        <view class="picker-value">状态：{{statusOptions[statusIndex]}}</view>
+      </picker>
+      <view class="switch-row">
+        <view>继承全局检索阈值</view>
+        <switch checked="{{form.inherit_global_threshold}}" color="#c67644" bindchange="onInheritThresholdChange" />
+      </view>
+      <input wx:if="{{!form.inherit_global_threshold}}" class="sheet-input" placeholder="检索阈值(0~1)" value="{{form.retrieval_threshold}}" bindinput="onThresholdInput" />
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeForm">取消</button>
+        <button size="mini" class="btn-primary" loading="{{saving}}" bindtap="submitForm">保存</button>
+      </view>
+    </view>
+  </view>
+</view>

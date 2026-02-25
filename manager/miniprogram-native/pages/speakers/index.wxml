@@ -1,0 +1,126 @@
+<view class="container">
+  <view class="card header-card">
+    <view>
+      <view class="title">声纹管理</view>
+      <view class="muted">管理声纹组、样本和验证结果</view>
+    </view>
+    <button size="mini" class="btn-primary mini-btn" bindtap="openCreate">创建声纹组</button>
+  </view>
+
+  <view class="card filter-card">
+    <picker mode="selector" range="{{filterAgentNames}}" value="{{filterAgentIndex}}" bindchange="onFilterAgentChange">
+      <view class="picker-value">筛选智能体：{{filterAgentNames[filterAgentIndex]}}</view>
+    </picker>
+  </view>
+
+  <view class="card" wx:if="{{!list.length && !loading}}">
+    <view class="muted">暂无声纹组</view>
+  </view>
+
+  <view class="card group-card" wx:for="{{list}}" wx:key="id">
+    <view class="group-header">
+      <view class="group-name">{{item.name}}</view>
+      <view class="group-count">样本 {{item.sample_count || 0}}</view>
+    </view>
+    <view class="group-meta">关联智能体：{{item.agent_name || '-'}}</view>
+    <view class="group-meta">创建时间：{{item.created_text}}</view>
+    <view class="group-meta">TTS：{{item.tts_text}} / 音色：{{item.voice_text}}</view>
+    <view class="group-prompt" wx:if="{{item.prompt_preview}}">{{item.prompt_preview}}</view>
+    <view class="actions">
+      <button size="mini" data-id="{{item.id}}" bindtap="openSamples">管理样本</button>
+      <button
+        size="mini"
+        data-id="{{item.id}}"
+        loading="{{verifyingGroupID == item.id}}"
+        bindtap="quickVerify"
+      >
+        验证
+      </button>
+      <button size="mini" data-id="{{item.id}}" bindtap="openEdit">编辑</button>
+      <button size="mini" type="warn" data-id="{{item.id}}" data-name="{{item.name}}" bindtap="deleteGroup">删除</button>
+    </view>
+  </view>
+
+  <view class="muted" wx:if="{{loading}}">加载中...</view>
+
+  <view wx:if="{{showForm}}" class="sheet-mask" catchtap="closeForm">
+    <view class="sheet form-sheet" catchtap="noop">
+      <view class="sheet-title">{{isEdit ? '编辑声纹组' : '创建声纹组'}}</view>
+      <picker mode="selector" range="{{agentNames}}" value="{{formAgentIndex}}" bindchange="onFormAgentChange">
+        <view class="picker-value">{{formAgentIndex >= 0 ? ('关联智能体：' + agentNames[formAgentIndex]) : '请选择智能体'}}</view>
+      </picker>
+      <input class="sheet-input" placeholder="声纹组名称" value="{{form.name}}" bindinput="onNameInput" maxlength="100" />
+      <textarea class="sheet-textarea" placeholder="Prompt（可选）" value="{{form.prompt}}" bindinput="onPromptInput" maxlength="4000" />
+      <textarea class="sheet-textarea mini-textarea" placeholder="描述（可选）" value="{{form.description}}" bindinput="onDescriptionInput" maxlength="200" />
+
+      <view wx:if="{{cloneVoices.length}}">
+        <view class="sub-title">我复刻的音色</view>
+        <scroll-view class="clone-scroll" scroll-x>
+          <view class="clone-row">
+            <button
+              size="mini"
+              wx:for="{{cloneVoices}}"
+              wx:key="id"
+              class="clone-btn"
+              data-id="{{item.id}}"
+              bindtap="applyCloneVoice"
+            >
+              {{item.name}}
+            </button>
+          </view>
+        </scroll-view>
+      </view>
+
+      <picker mode="selector" range="{{ttsNames}}" value="{{formTTSIndex}}" bindchange="onTTSChange">
+        <view class="picker-value">TTS：{{ttsNames[formTTSIndex]}}</view>
+      </picker>
+      <view class="help-text" wx:if="{{voiceLoading}}">音色列表加载中...</view>
+      <picker mode="selector" range="{{voiceOptionNames}}" value="{{voiceIndex}}" bindchange="onVoiceChange" wx:if="{{formTTSIndex > 0 && voiceOptionNames.length}}">
+        <view class="picker-value">{{voiceIndex >= 0 ? ('音色：' + voiceOptionNames[voiceIndex]) : '音色：请选择'}}</view>
+      </picker>
+      <view class="picker-value muted-picker" wx:if="{{formTTSIndex > 0 && !voiceOptionNames.length && !voiceLoading}}">音色：暂无可选项，可手动输入</view>
+      <input class="sheet-input" placeholder="手动输入音色（可选）" value="{{form.voice}}" bindinput="onVoiceInput" />
+
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeForm">取消</button>
+        <button size="mini" class="btn-primary" loading="{{saving}}" bindtap="submitForm">保存</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showSamples}}" class="sheet-mask" catchtap="closeSamples">
+    <view class="sheet samples-sheet" catchtap="noop">
+      <view class="sheet-title">样本管理 - {{selectedGroup.name}}</view>
+      <view class="group-meta">智能体：{{selectedGroup.agent_name || '-'}}</view>
+      <view class="group-prompt" wx:if="{{selectedGroup.prompt}}">{{selectedGroup.prompt}}</view>
+
+      <view class="sample-actions">
+        <button size="mini" class="btn-primary" loading="{{uploadingSample}}" bindtap="addSample">上传样本</button>
+        <button size="mini" loading="{{verifyingGroupID == selectedGroup.id}}" bindtap="verifyInSamples">验证声纹</button>
+      </view>
+
+      <view class="verify-result {{verifyResult.verified ? 'verify-success' : 'verify-failed'}}" wx:if="{{verifyResult}}">
+        <view class="verify-title">{{verifyResult.verified ? '验证通过' : '验证未通过'}}</view>
+        <view class="verify-text">置信度：{{verifyResult.confidence_text}}%</view>
+        <view class="verify-text">阈值：{{verifyResult.threshold_text}}%</view>
+        <view class="verify-text">{{verifyResult.message}}</view>
+      </view>
+
+      <view class="sample-list" wx:if="{{samples.length}}">
+        <view class="sample-item" wx:for="{{samples}}" wx:key="id">
+          <view class="sample-name">{{item.file_name || 'audio'}}</view>
+          <view class="sample-meta">大小：{{item.file_size_text}} · 时间：{{item.created_text}}</view>
+          <view class="actions">
+            <button size="mini" data-id="{{item.id}}" loading="{{playingSampleID == item.id}}" bindtap="playSample">播放</button>
+            <button size="mini" type="warn" data-id="{{item.id}}" loading="{{deletingSampleID == item.id}}" bindtap="deleteSample">删除</button>
+          </view>
+        </view>
+      </view>
+      <view class="muted" wx:if="{{!samples.length && !samplesLoading}}">暂无样本，先上传一条 WAV 音频</view>
+      <view class="muted" wx:if="{{samplesLoading}}">样本加载中...</view>
+      <view class="sheet-actions">
+        <button size="mini" bindtap="closeSamples">关闭</button>
+      </view>
+    </view>
+  </view>
+</view>

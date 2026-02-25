@@ -1,0 +1,57 @@
+<view class="container">
+  <view wx:if="{{loading}}" class="card">
+    <view class="muted">加载中...</view>
+  </view>
+
+  <view wx:else>
+    <view class="card">
+      <view class="title">基础信息</view>
+      <input class="field-input" placeholder="智能体名称" value="{{form.name}}" bindinput="onNameInput" maxlength="50" />
+      <textarea class="field-textarea" placeholder="角色提示词" value="{{form.custom_prompt}}" bindinput="onPromptInput" maxlength="10000" />
+    </view>
+
+    <view class="card">
+      <view class="title">模型配置</view>
+      <picker mode="selector" range="{{llmNames}}" value="{{llmIndex}}" bindchange="onLLMChange">
+        <view class="picker-value">{{llmIndex >= 0 ? ('LLM：' + llmNames[llmIndex]) : 'LLM：未设置'}}</view>
+      </picker>
+      <picker mode="selector" range="{{ttsNames}}" value="{{ttsIndex}}" bindchange="onTTSChange">
+        <view class="picker-value">{{ttsIndex >= 0 ? ('TTS：' + ttsNames[ttsIndex]) : 'TTS：未设置'}}</view>
+      </picker>
+      <view class="voice-row" wx:if="{{voiceLoading}}">
+        <view class="muted">音色列表加载中...</view>
+      </view>
+      <picker mode="selector" range="{{voiceOptionNames}}" value="{{voiceIndex}}" bindchange="onVoiceChange" wx:if="{{ttsIndex >= 0 && voiceOptionNames.length}}">
+        <view class="picker-value">{{voiceIndex >= 0 ? ('音色：' + voiceOptionNames[voiceIndex]) : '音色：请选择'}}</view>
+      </picker>
+      <view class="picker-value muted-picker" wx:if="{{ttsIndex >= 0 && !voiceOptionNames.length && !voiceLoading}}">音色：暂无可选项，可手动输入</view>
+      <input class="field-input" placeholder="或手动输入音色ID（可选）" value="{{form.voice}}" bindinput="onVoiceInput" />
+    </view>
+
+    <view class="card">
+      <view class="title">行为配置</view>
+      <picker mode="selector" range="{{asrModes}}" value="{{asrIndex}}" bindchange="onAsrChange">
+        <view class="picker-value">识别速度：{{asrModes[asrIndex]}}</view>
+      </picker>
+      <picker mode="selector" range="{{memoryModes}}" value="{{memoryIndex}}" bindchange="onMemoryChange">
+        <view class="picker-value">记忆模式：{{memoryModes[memoryIndex]}}</view>
+      </picker>
+    </view>
+
+    <view class="card">
+      <view class="title">关联知识库</view>
+      <view wx:if="{{!knowledgeBases.length}}" class="muted">暂无可关联知识库</view>
+      <checkbox-group wx:else bindchange="onKnowledgeChange">
+        <label class="kb-item" wx:for="{{knowledgeBases}}" wx:key="id">
+          <checkbox value="{{item.id}}" checked="{{item.checked}}" color="#c67644" />
+          <view class="kb-info">
+            <view class="kb-name">{{item.name}}</view>
+            <view class="kb-meta">状态：{{item.status || '-'}}</view>
+          </view>
+        </label>
+      </checkbox-group>
+    </view>
+
+    <button class="btn-primary save-btn" loading="{{saving}}" bindtap="submitSave">保存配置</button>
+  </view>
+</view>
