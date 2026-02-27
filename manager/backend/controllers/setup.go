@@ -95,6 +95,8 @@ func (sc *SetupController) InitializeDatabase(c *gin.Context) {
 		&models.SpeakerGroup{},
 		&models.SpeakerSample{},
 		&models.ChatMessage{},
+		&models.UserOpenClawConfig{},
+		&models.OpenClawOfflineMessage{},
 	)
 	if err != nil {
 		tx.Rollback()

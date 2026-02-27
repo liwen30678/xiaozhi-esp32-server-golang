@@ -36,19 +36,41 @@ type Device struct {
 
 // 智能体模型
 type Agent struct {
-	ID              uint      `json:"id" gorm:"primarykey"`
-	UserID          uint      `json:"user_id" gorm:"not null"`
-	Name            string    `json:"name" gorm:"type:varchar(100);not null"`              // 昵称
-	CustomPrompt    string    `json:"custom_prompt" gorm:"type:text"`                      // 角色介绍(prompt)
-	LLMConfigID     *string   `json:"llm_config_id" gorm:"type:varchar(100)"`              // 语言模型配置ID
-	TTSConfigID     *string   `json:"tts_config_id" gorm:"type:varchar(100)"`              // 音色配置ID
-	Voice           *string   `json:"voice" gorm:"type:varchar(200)"`                      // 音色值
-	ASRSpeed        string    `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`  // 语音识别速度: normal/patient/fast
-	MemoryMode      string    `json:"memory_mode" gorm:"type:varchar(20);default:'short'"` // 记忆模式: none/short/long
-	MCPServiceNames string    `json:"mcp_service_names" gorm:"type:text"`                  // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
-	Status          string    `json:"status" gorm:"type:varchar(20);default:'active'"`     // active, inactive
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                    uint      `json:"id" gorm:"primarykey"`
+	UserID                uint      `json:"user_id" gorm:"not null"`
+	Name                  string    `json:"name" gorm:"type:varchar(100);not null"`              // 昵称
+	CustomPrompt          string    `json:"custom_prompt" gorm:"type:text"`                      // 角色介绍(prompt)
+	LLMConfigID           *string   `json:"llm_config_id" gorm:"type:varchar(100)"`              // 语言模型配置ID
+	TTSConfigID           *string   `json:"tts_config_id" gorm:"type:varchar(100)"`              // 音色配置ID
+	Voice                 *string   `json:"voice" gorm:"type:varchar(200)"`                      // 音色值
+	ASRSpeed              string    `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`  // 语音识别速度: normal/patient/fast
+	MemoryMode            string    `json:"memory_mode" gorm:"type:varchar(20);default:'short'"` // 记忆模式: none/short/long
+	MCPServiceNames       string    `json:"mcp_service_names" gorm:"type:text"`                  // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
+	OpenClawConfigID      *uint     `json:"openclaw_config_id" gorm:"index"`                     // 用户级 OpenClaw 配置ID
+	OpenClawEnabled       bool      `json:"openclaw_enabled" gorm:"default:false"`               // 是否允许进入 OpenClaw 模式
+	OpenClawEnterKeywords string    `json:"openclaw_enter_keywords" gorm:"type:text"`            // 自定义进入关键词（逗号分隔）
+	OpenClawExitKeywords  string    `json:"openclaw_exit_keywords" gorm:"type:text"`             // 自定义退出关键词（逗号分隔）
+	Status                string    `json:"status" gorm:"type:varchar(20);default:'active'"`     // active, inactive
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+// UserOpenClawConfig 用户级 OpenClaw 网关配置
+type UserOpenClawConfig struct {
+	ID              uint       `json:"id" gorm:"primarykey"`
+	UserID          uint       `json:"user_id" gorm:"not null;index"`
+	Name            string     `json:"name" gorm:"type:varchar(100);not null"`
+	BaseURL         string     `json:"base_url" gorm:"type:varchar(500);not null"`
+	AuthType        string     `json:"auth_type" gorm:"type:varchar(20);not null;default:'bearer'"`
+	TokenCiphertext string     `json:"-" gorm:"type:text"`
+	TokenNonce      string     `json:"-" gorm:"type:varchar(255)"`
+	TokenMask       string     `json:"token_mask" gorm:"type:varchar(255)"`
+	Enabled         bool       `json:"enabled" gorm:"default:true"`
+	IsDefault       bool       `json:"is_default" gorm:"default:false"`
+	HealthStatus    string     `json:"health_status" gorm:"type:varchar(20);default:'unknown'"`
+	LastHealthAt    *time.Time `json:"last_health_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // KnowledgeBase 用户知识库（每用户独立）
@@ -198,6 +220,24 @@ type SpeakerSample struct {
 	Status         string    `json:"status" gorm:"type:varchar(20);default:'active'"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// OpenClawOfflineMessage OpenClaw 离线消息池
+// TTL 无限制；每设备保留最近100条 pending，由写入路径裁剪
+type OpenClawOfflineMessage struct {
+	ID               uint       `json:"id" gorm:"primarykey"`
+	DeviceID         string     `json:"device_id" gorm:"type:varchar(100);index;not null"`
+	UserID           uint       `json:"user_id" gorm:"index"`
+	AgentID          uint       `json:"agent_id" gorm:"index"`
+	OpenClawConfigID *uint      `json:"openclaw_config_id" gorm:"index"`
+	TaskID           string     `json:"task_id" gorm:"type:varchar(128);uniqueIndex"`
+	MessageType      string     `json:"message_type" gorm:"type:varchar(20);default:'text'"`
+	PayloadJSON      string     `json:"payload_json" gorm:"type:text;not null"`
+	Status           string     `json:"status" gorm:"type:varchar(20);default:'pending';index"`
+	RetryCount       int        `json:"retry_count" gorm:"default:0"`
+	DeliveredAt      *time.Time `json:"delivered_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 // VoiceClone 复刻音色模型

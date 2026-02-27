@@ -148,6 +148,16 @@ go build -o xiaozhi_server ./cmd/server/
 
 欢迎提交 Issue、PR 或建议！
 
+提交 PR 前建议至少执行以下基础自检：
+
+```bash
+# 后台管理模块测试
+cd manager/backend && go test ./...
+
+# 服务端主模块编译检查
+cd ../.. && go test ./cmd/server
+```
+
 ---
 
 ## 📄 License

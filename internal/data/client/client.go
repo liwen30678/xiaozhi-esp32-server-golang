@@ -117,6 +117,9 @@ type ClientState struct {
 	IsTtsStart        bool //是否tts开始
 	IsWelcomeSpeaking bool //是否已经欢迎语
 
+	SessionMode       string // llm/openclaw
+	OpenClawFailCount int
+
 	// 声纹识别相关
 	SpeakerProvider speaker.SpeakerProvider // 声纹识别提供者（在 session 中初始化）
 

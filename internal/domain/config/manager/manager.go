@@ -80,11 +80,16 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				Voice              *string  `json:"voice"`
 				VoiceModelOverride *string  `json:"voice_model_override"`
 			} `json:"voice_identify"`
-			KnowledgeBases  []types.KnowledgeBaseRef `json:"knowledge_bases"`
-			Prompt          string                   `json:"prompt"`
-			AgentId         string                   `json:"agent_id"`
-			MemoryMode      string                   `json:"memory_mode"`
-			MCPServiceNames string                   `json:"mcp_service_names"`
+			KnowledgeBases        []types.KnowledgeBaseRef `json:"knowledge_bases"`
+			Prompt                string                   `json:"prompt"`
+			AgentId               string                   `json:"agent_id"`
+			UserID                uint                     `json:"user_id"`
+			MemoryMode            string                   `json:"memory_mode"`
+			MCPServiceNames       string                   `json:"mcp_service_names"`
+			OpenClawEnabled       bool                     `json:"openclaw_enabled"`
+			OpenClawConfigID      string                   `json:"openclaw_config_id"`
+			OpenClawEnterKeywords []string                 `json:"openclaw_enter_keywords"`
+			OpenClawExitKeywords  []string                 `json:"openclaw_exit_keywords"`
 		} `json:"data"`
 	}
 
@@ -161,7 +166,14 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		VoiceIdentify:   voiceIdentifyData,
 		MemoryMode:      response.Data.MemoryMode,
 		AgentId:         response.Data.AgentId,
+		UserID:          response.Data.UserID,
 		MCPServiceNames: strings.TrimSpace(response.Data.MCPServiceNames),
+		OpenClaw: types.OpenClawConfig{
+			Enabled:       response.Data.OpenClawEnabled,
+			ConfigID:      strings.TrimSpace(response.Data.OpenClawConfigID),
+			EnterKeywords: response.Data.OpenClawEnterKeywords,
+			ExitKeywords:  response.Data.OpenClawExitKeywords,
+		},
 	}
 	if strings.TrimSpace(config.MemoryMode) == "" {
 		config.MemoryMode = "short"

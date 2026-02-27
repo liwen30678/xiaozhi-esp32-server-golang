@@ -91,18 +91,23 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	}
 
 	type ConfigResponse struct {
-		VAD             models.Config               `json:"vad"`
-		ASR             models.Config               `json:"asr"`
-		LLM             models.Config               `json:"llm"`
-		TTS             models.Config               `json:"tts"`
-		Memory          models.Config               `json:"memory"`
-		VoiceIdentify   map[string]SpeakerGroupInfo `json:"voice_identify"`
-		KnowledgeBases  []KnowledgeBaseInfo         `json:"knowledge_bases"`
-		Prompt          string                      `json:"prompt"`
-		AgentID         string                      `json:"agent_id"`
-		MemoryMode      string                      `json:"memory_mode"`
-		MCPServiceNames string                      `json:"mcp_service_names"`
-		ConfigSource    string                      `json:"config_source"` // 新增：配置来源
+		VAD                   models.Config               `json:"vad"`
+		ASR                   models.Config               `json:"asr"`
+		LLM                   models.Config               `json:"llm"`
+		TTS                   models.Config               `json:"tts"`
+		Memory                models.Config               `json:"memory"`
+		VoiceIdentify         map[string]SpeakerGroupInfo `json:"voice_identify"`
+		KnowledgeBases        []KnowledgeBaseInfo         `json:"knowledge_bases"`
+		Prompt                string                      `json:"prompt"`
+		AgentID               string                      `json:"agent_id"`
+		UserID                uint                        `json:"user_id"`
+		MemoryMode            string                      `json:"memory_mode"`
+		MCPServiceNames       string                      `json:"mcp_service_names"`
+		OpenClawEnabled       bool                        `json:"openclaw_enabled"`
+		OpenClawConfigID      string                      `json:"openclaw_config_id"`
+		OpenClawEnterKeywords []string                    `json:"openclaw_enter_keywords"`
+		OpenClawExitKeywords  []string                    `json:"openclaw_exit_keywords"`
+		ConfigSource          string                      `json:"config_source"` // 新增：配置来源
 	}
 
 	var response ConfigResponse
@@ -129,6 +134,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		// 设备存在，查找智能体
 		deviceFound = true
 		response.AgentID = fmt.Sprintf("%d", device.AgentID)
+		response.UserID = device.UserID
 		log.Printf("设备 %s 存在，AgentID: %d", deviceID, device.AgentID)
 		if err := ac.DB.First(&agent, device.AgentID).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
@@ -146,6 +152,12 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	if deviceFound && agent.ID != 0 {
 		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
 		response.MCPServiceNames = normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
+		response.OpenClawEnabled = agent.OpenClawEnabled
+		if agent.OpenClawConfigID != nil {
+			response.OpenClawConfigID = fmt.Sprintf("%d", *agent.OpenClawConfigID)
+		}
+		response.OpenClawEnterKeywords = splitOpenClawKeywords(agent.OpenClawEnterKeywords)
+		response.OpenClawExitKeywords = splitOpenClawKeywords(agent.OpenClawExitKeywords)
 	}
 
 	cloneVoiceCache := make(map[string]bool)
@@ -2938,6 +2950,8 @@ func (ac *AdminController) CreateAgent(c *gin.Context) {
 		return
 	}
 	agent.MCPServiceNames = normalizedMCPServiceNames
+	agent.OpenClawEnterKeywords = normalizeOpenClawKeywordsCSV(agent.OpenClawEnterKeywords)
+	agent.OpenClawExitKeywords = normalizeOpenClawKeywordsCSV(agent.OpenClawExitKeywords)
 
 	if err := ac.DB.Create(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建智能体失败"})
@@ -2967,6 +2981,8 @@ func (ac *AdminController) UpdateAgent(c *gin.Context) {
 		return
 	}
 	agent.MCPServiceNames = normalizedMCPServiceNames
+	agent.OpenClawEnterKeywords = normalizeOpenClawKeywordsCSV(agent.OpenClawEnterKeywords)
+	agent.OpenClawExitKeywords = normalizeOpenClawKeywordsCSV(agent.OpenClawExitKeywords)
 
 	if err := ac.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})

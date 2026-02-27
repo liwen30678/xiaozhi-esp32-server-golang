@@ -53,6 +53,13 @@ type KnowledgeBaseRef struct {
 	Status             string   `json:"status"`
 }
 
+type OpenClawConfig struct {
+	Enabled       bool     `json:"enabled"`
+	ConfigID      string   `json:"config_id"`
+	EnterKeywords []string `json:"enter_keywords"`
+	ExitKeywords  []string `json:"exit_keywords"`
+}
+
 type UConfig struct {
 	SystemPrompt    string                      `json:"system_prompt"`
 	Asr             AsrConfig                   `json:"asr"`
@@ -60,11 +67,13 @@ type UConfig struct {
 	Llm             LlmConfig                   `json:"llm"`
 	Vad             VadConfig                   `json:"vad"`
 	Memory          MemoryConfig                `json:"memory"`
-	VoiceIdentify   map[string]SpeakerGroupInfo `json:"voice_identify"`    // 声纹识别配置
-	MemoryMode      string                      `json:"memory_mode"`       // 记忆模式: none/short/long
-	AgentId         string                      `json:"agent_id"`          // 所属agent_id
+	VoiceIdentify   map[string]SpeakerGroupInfo `json:"voice_identify"` // 声纹识别配置
+	MemoryMode      string                      `json:"memory_mode"`    // 记忆模式: none/short/long
+	AgentId         string                      `json:"agent_id"`       // 所属agent_id
+	UserID          uint                        `json:"user_id"`
 	MCPServiceNames string                      `json:"mcp_service_names"` // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
 	KnowledgeBases  []KnowledgeBaseRef          `json:"knowledge_bases"`
+	OpenClaw        OpenClawConfig              `json:"openclaw"`
 }
 
 type TtsConfigItem struct {

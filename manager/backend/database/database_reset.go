@@ -50,6 +50,8 @@ func InitWithReset(cfg config.DatabaseConfig) *gorm.DB {
 		&models.SpeakerSample{},
 		&models.VoiceClone{},
 		&models.VoiceCloneAudio{},
+		&models.UserOpenClawConfig{},
+		&models.OpenClawOfflineMessage{},
 	)
 	if err != nil {
 		log.Printf("删除表时出现错误（可能表不存在）: %v", err)

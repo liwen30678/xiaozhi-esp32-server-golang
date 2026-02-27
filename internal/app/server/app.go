@@ -15,6 +15,7 @@ import (
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
+	"xiaozhi-esp32-server-golang/internal/domain/openclaw"
 	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -297,6 +298,7 @@ func (a *App) OnNewConnection(transport types.IConn) {
 
 	// 存储ChatManager
 	a.chatManagers.Set(deviceID, chatManager)
+	go a.replayOpenClawOfflineMessages(deviceID, chatManager)
 
 	a.DeviceOnline(deviceID)
 
@@ -317,6 +319,21 @@ func (a *App) OnNewConnection(transport types.IConn) {
 			log.Errorf("ChatManager启动失败: %v", err)
 		}
 	}()
+}
+
+func (a *App) replayOpenClawOfflineMessages(deviceID string, chatManager *chat.ChatManager) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	items, err := openclaw.ListPendingOfflineMessages(ctx, deviceID)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	for _, item := range items {
+		if err := chatManager.InjectMessage(item.PayloadJSON, true); err != nil {
+			continue
+		}
+		_ = openclaw.MarkOfflineMessageDelivered(ctx, item.ID)
+	}
 }
 
 // GetChatManager 获取指定设备的ChatManager

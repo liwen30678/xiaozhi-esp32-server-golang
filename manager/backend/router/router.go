@@ -74,6 +74,10 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		api.POST("/internal/pool/stats", poolStatsController.ReportPoolStats)                             // 上报资源池统计数据（内部服务接口）
 		api.POST("/internal/devices/:device_name/switch-role", adminController.SwitchDeviceRoleByNameInternal)
 		api.POST("/internal/devices/:device_name/restore-default-role", adminController.RestoreDeviceDefaultRoleInternal)
+		api.GET("/internal/openclaw/runtime-config", adminController.GetOpenClawRuntimeConfig)
+		api.POST("/internal/openclaw/offline-messages", adminController.CreateOpenClawOfflineMessage)
+		api.GET("/internal/openclaw/offline-messages", adminController.ListOpenClawOfflineMessages)
+		api.POST("/internal/openclaw/offline-messages/:id/delivered", adminController.MarkOpenClawOfflineMessageDelivered)
 
 		// 需要认证的路由
 		auth := api.Group("")
@@ -158,6 +162,14 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				// 配置列表
 				user.GET("/llm-configs", userController.GetLLMConfigs)
 				user.GET("/tts-configs", userController.GetTTSConfigs)
+
+				// OpenClaw 配置与绑定
+				user.GET("/openclaw/configs", userController.GetOpenClawConfigs)
+				user.POST("/openclaw/configs", userController.CreateOpenClawConfig)
+				user.PUT("/openclaw/configs/:id", userController.UpdateOpenClawConfig)
+				user.DELETE("/openclaw/configs/:id", userController.DeleteOpenClawConfig)
+				user.POST("/openclaw/configs/:id/test", userController.TestOpenClawConfig)
+				user.PUT("/agents/:id/openclaw-binding", userController.UpdateAgentOpenClawBinding)
 
 				// MCP接入点
 				user.GET("/agents/:id/mcp-services/options", userController.GetAgentMCPServiceOptions)

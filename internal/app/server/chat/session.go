@@ -26,6 +26,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
 	"xiaozhi-esp32-server-golang/internal/domain/memory"
 	"xiaozhi-esp32-server-golang/internal/domain/memory/llm_memory"
+	"xiaozhi-esp32-server-golang/internal/domain/openclaw"
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -707,6 +708,33 @@ func (a *ChatSession) checkExitWords(text string) bool {
 	return false
 }
 
+func (s *ChatSession) handleOpenClawModeCommand(text string) (bool, error) {
+	t := strings.ToLower(strings.TrimSpace(text))
+	if t == "" {
+		return false, nil
+	}
+	enterKeywords := append([]string{"进入 openclaw", "打开 openclaw", "切换到 openclaw"}, s.clientState.DeviceConfig.OpenClaw.EnterKeywords...)
+	exitKeywords := append([]string{"退出 openclaw", "关闭 openclaw", "返回助手"}, s.clientState.DeviceConfig.OpenClaw.ExitKeywords...)
+	for _, k := range enterKeywords {
+		if strings.TrimSpace(k) != "" && strings.Contains(t, strings.ToLower(strings.TrimSpace(k))) {
+			if !s.clientState.DeviceConfig.OpenClaw.Enabled || strings.TrimSpace(s.clientState.DeviceConfig.OpenClaw.ConfigID) == "" {
+				return true, s.AddTextToTTSQueue("当前智能体未配置可用 OpenClaw。")
+			}
+			s.clientState.SessionMode = "openclaw"
+			s.clientState.OpenClawFailCount = 0
+			return true, s.AddTextToTTSQueue("已进入 OpenClaw 模式。")
+		}
+	}
+	for _, k := range exitKeywords {
+		if strings.TrimSpace(k) != "" && strings.Contains(t, strings.ToLower(strings.TrimSpace(k))) {
+			s.clientState.SessionMode = "llm"
+			s.clientState.OpenClawFailCount = 0
+			return true, s.AddTextToTTSQueue("已退出 OpenClaw 模式，恢复默认助手。")
+		}
+	}
+	return false, nil
+}
+
 func (s *ChatSession) GetRandomGreeting() string {
 	greetingList := viper.GetStringSlice("greeting_list")
 	if len(greetingList) == 0 {
@@ -1033,6 +1061,40 @@ func (s *ChatSession) actionDoChat(ctx context.Context, text string, speakerResu
 		log.Debugf("actionDoChat ctx done, return")
 		return nil
 	default:
+	}
+
+	handled, err := s.handleOpenClawModeCommand(text)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+
+	if s.clientState.SessionMode == "openclaw" {
+		resp, err := openclaw.HandleRequest(ctx, s.clientState.DeviceID, s.clientState.AgentID, s.clientState.DeviceConfig.UserID, s.clientState.DeviceConfig.OpenClaw.ConfigID, text)
+		if err == openclaw.ErrFallbackToLLM {
+			s.clientState.SessionMode = "llm"
+			s.clientState.OpenClawFailCount = 0
+			_ = s.AddTextToTTSQueue(resp)
+			return nil
+		}
+		if err != nil {
+			s.clientState.OpenClawFailCount++
+			if s.clientState.OpenClawFailCount >= 3 {
+				s.clientState.SessionMode = "llm"
+				s.clientState.OpenClawFailCount = 0
+				_ = s.AddTextToTTSQueue("OpenClaw 暂不可用，已自动切回默认助手。")
+				return nil
+			}
+			_ = s.AddTextToTTSQueue("OpenClaw 请求失败，请稍后再试。")
+			return nil
+		}
+		s.clientState.OpenClawFailCount = 0
+		if strings.TrimSpace(resp) != "" {
+			_ = s.AddTextToTTSQueue(resp)
+		}
+		return nil
 	}
 
 	if s.checkExitWords(text) {
