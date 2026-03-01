@@ -72,6 +72,9 @@ type ClientState struct {
 	// 会话ID
 	SessionID string
 
+	// OpenClaw 运行态（仅内存态）
+	OpenClawMode bool
+
 	//设备配置
 	DeviceConfig utypes.UConfig
 
@@ -424,6 +427,7 @@ func (c *ClientState) Destroy() {
 	c.Statistic.Reset()
 	c.SetStatus(ClientStatusInit)
 	c.SetTtsStart(false)
+	c.OpenClawMode = false
 }
 
 func (state *ClientState) OnManualStop() {

@@ -158,6 +158,7 @@ func (c *ChatManager) ReloadDeviceConfig(ctx context.Context) error {
 	c.clientState.SystemPrompt = deviceConfig.SystemPrompt
 	// 切换角色后清空声纹临时TTS配置，避免旧配置污染
 	c.clientState.SpeakerTTSConfig = nil
+	c.clientState.OpenClawMode = false
 	applyOutputAudioFormatForTTS(c.clientState)
 	log.Infof("设备 %s 配置已刷新，当前agent=%s", c.DeviceID, deviceConfig.AgentId)
 	return nil

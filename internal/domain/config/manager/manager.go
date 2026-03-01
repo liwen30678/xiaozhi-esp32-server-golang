@@ -85,6 +85,11 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 			AgentId         string                   `json:"agent_id"`
 			MemoryMode      string                   `json:"memory_mode"`
 			MCPServiceNames string                   `json:"mcp_service_names"`
+			OpenClaw        struct {
+				Allowed       bool     `json:"allowed"`
+				EnterKeywords []string `json:"enter_keywords"`
+				ExitKeywords  []string `json:"exit_keywords"`
+			} `json:"openclaw"`
 		} `json:"data"`
 	}
 
@@ -135,6 +140,15 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 	}
 
 	// 构建配置结果
+	enterKeywords := response.Data.OpenClaw.EnterKeywords
+	if enterKeywords == nil {
+		enterKeywords = []string{}
+	}
+	exitKeywords := response.Data.OpenClaw.ExitKeywords
+	if exitKeywords == nil {
+		exitKeywords = []string{}
+	}
+
 	config := types.UConfig{
 		SystemPrompt: response.Data.Prompt, // 使用智能体的自定义提示
 		Asr: types.AsrConfig{
@@ -162,6 +176,11 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		MemoryMode:      response.Data.MemoryMode,
 		AgentId:         response.Data.AgentId,
 		MCPServiceNames: strings.TrimSpace(response.Data.MCPServiceNames),
+		OpenClaw: types.OpenClawConfig{
+			Allowed:       response.Data.OpenClaw.Allowed,
+			EnterKeywords: enterKeywords,
+			ExitKeywords:  exitKeywords,
+		},
 	}
 	if strings.TrimSpace(config.MemoryMode) == "" {
 		config.MemoryMode = "short"

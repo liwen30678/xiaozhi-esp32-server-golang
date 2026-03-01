@@ -102,11 +102,17 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		AgentID         string                      `json:"agent_id"`
 		MemoryMode      string                      `json:"memory_mode"`
 		MCPServiceNames string                      `json:"mcp_service_names"`
+		OpenClaw        OpenClawConfigResponse      `json:"openclaw"`
 		ConfigSource    string                      `json:"config_source"` // 新增：配置来源
 	}
 
 	var response ConfigResponse
 	response.MemoryMode = "short"
+	response.OpenClaw = OpenClawConfigResponse{
+		Allowed:       false,
+		EnterKeywords: []string{},
+		ExitKeywords:  []string{},
+	}
 	var configSource string // 记录配置来源
 
 	// 查找设备
@@ -146,6 +152,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	if deviceFound && agent.ID != 0 {
 		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
 		response.MCPServiceNames = normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
+		response.OpenClaw = buildOpenClawConfigFromAgent(agent)
 	}
 
 	cloneVoiceCache := make(map[string]bool)
@@ -2908,6 +2915,35 @@ func (ac *AdminController) GetAgentMCPEndpoint(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"endpoint": endpoint}})
 }
 
+// GetAgentOpenClawEndpoint 获取智能体的OpenClaw接入点URL
+func (ac *AdminController) GetAgentOpenClawEndpoint(c *gin.Context) {
+	agentID := c.Param("id")
+	if agentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id parameter is required"})
+		return
+	}
+
+	// 从JWT中间件获取当前用户ID
+	userIDInterface, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		return
+	}
+	userID, ok := userIDInterface.(uint)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "用户ID类型错误"})
+		return
+	}
+
+	endpoint, err := GenerateAgentOpenClawEndpoint(ac.DB, agentID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"endpoint": endpoint}})
+}
+
 // GetAgentMcpTools 获取智能体的MCP工具列表
 func (ac *AdminController) GetAgentMcpTools(c *gin.Context) {
 	agentID := c.Param("id")
@@ -2938,6 +2974,8 @@ func (ac *AdminController) CreateAgent(c *gin.Context) {
 		return
 	}
 	agent.MCPServiceNames = normalizedMCPServiceNames
+	agent.OpenClawEnterKeywords = normalizeOpenClawKeywordsRaw(agent.OpenClawEnterKeywords)
+	agent.OpenClawExitKeywords = normalizeOpenClawKeywordsRaw(agent.OpenClawExitKeywords)
 
 	if err := ac.DB.Create(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建智能体失败"})
@@ -2967,6 +3005,8 @@ func (ac *AdminController) UpdateAgent(c *gin.Context) {
 		return
 	}
 	agent.MCPServiceNames = normalizedMCPServiceNames
+	agent.OpenClawEnterKeywords = normalizeOpenClawKeywordsRaw(agent.OpenClawEnterKeywords)
+	agent.OpenClawExitKeywords = normalizeOpenClawKeywordsRaw(agent.OpenClawExitKeywords)
 
 	if err := ac.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})
@@ -4544,6 +4584,49 @@ func GenerateAgentMCPEndpoint(db *gorm.DB, agentID string, userID uint) (string,
 	return endpointWithToken, nil
 }
 
+// GenerateAgentOpenClawEndpoint 公共的OpenClaw接入点生成函数
+func GenerateAgentOpenClawEndpoint(db *gorm.DB, agentID string, userID uint) (string, error) {
+	var otaConfig models.Config
+	if err := db.Where("type = ? AND is_default = ?", "ota", true).First(&otaConfig).Error; err != nil {
+		return "", fmt.Errorf("failed to get OTA config: %v", err)
+	}
+
+	var otaData map[string]interface{}
+	if err := json.Unmarshal([]byte(otaConfig.JsonData), &otaData); err != nil {
+		return "", fmt.Errorf("failed to parse OTA config: %v", err)
+	}
+
+	externalURL, ok := otaData["external"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("external config not found in OTA config")
+	}
+
+	websocketConfig, ok := externalURL["websocket"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("websocket config not found in external config")
+	}
+
+	wsURL, ok := websocketConfig["url"].(string)
+	if !ok || wsURL == "" {
+		return "", fmt.Errorf("websocket URL not found in external config")
+	}
+
+	parsedURL, err := url.Parse(wsURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse WebSocket URL: %v", err)
+	}
+
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+
+	token, err := generateOpenClawToken(agentID, userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate OpenClaw token: %v", err)
+	}
+
+	endpointWithToken := fmt.Sprintf("%s/ws/openclaw?token=%s", baseURL, token)
+	return endpointWithToken, nil
+}
+
 // Memory配置管理
 func (ac *AdminController) GetMemoryConfigs(c *gin.Context) {
 	var configs []models.Config
@@ -4684,6 +4767,35 @@ func generateMCPToken(agentID string, userID uint) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	// 使用与middleware相同的密钥
+	jwtSecret := []byte("xiaozhi_admin_secret_key")
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		return "", err
+	}
+
+	return tokenString, nil
+}
+
+// generateOpenClawToken 生成稳定的OpenClaw JWT Token（同一agentID+userID下保持不变）
+func generateOpenClawToken(agentID string, userID uint) (string, error) {
+	type OpenClawClaims struct {
+		UserID     uint   `json:"userId"`
+		AgentID    string `json:"agentId"`
+		EndpointID string `json:"endpointId"`
+		Purpose    string `json:"purpose"`
+		jwt.RegisteredClaims
+	}
+
+	endpointID := fmt.Sprintf("agent_%s", agentID)
+	claims := OpenClawClaims{
+		UserID:           userID,
+		AgentID:          agentID,
+		EndpointID:       endpointID,
+		Purpose:          "openclaw-endpoint",
+		RegisteredClaims: jwt.RegisteredClaims{},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	jwtSecret := []byte("xiaozhi_admin_secret_key")
 	tokenString, err := token.SignedString(jwtSecret)
 	if err != nil {

@@ -290,15 +290,18 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var req struct {
-		Name             string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt     string  `json:"custom_prompt"`
-		LLMConfigID      *string `json:"llm_config_id"`
-		TTSConfigID      *string `json:"tts_config_id"`
-		Voice            *string `json:"voice"`
-		ASRSpeed         string  `json:"asr_speed"`
-		MemoryMode       string  `json:"memory_mode"`
-		MCPServiceNames  string  `json:"mcp_service_names"`
-		KnowledgeBaseIDs []uint  `json:"knowledge_base_ids"`
+		Name                  string   `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt          string   `json:"custom_prompt"`
+		LLMConfigID           *string  `json:"llm_config_id"`
+		TTSConfigID           *string  `json:"tts_config_id"`
+		Voice                 *string  `json:"voice"`
+		ASRSpeed              string   `json:"asr_speed"`
+		MemoryMode            string   `json:"memory_mode"`
+		MCPServiceNames       string   `json:"mcp_service_names"`
+		OpenClawEnabled       bool     `json:"openclaw_enabled"`
+		OpenClawEnterKeywords []string `json:"openclaw_enter_keywords"`
+		OpenClawExitKeywords  []string `json:"openclaw_exit_keywords"`
+		KnowledgeBaseIDs      []uint   `json:"knowledge_base_ids"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -323,16 +326,19 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 	}
 
 	agent := models.Agent{
-		UserID:          userID.(uint),
-		Name:            req.Name,
-		CustomPrompt:    req.CustomPrompt,
-		LLMConfigID:     req.LLMConfigID,
-		TTSConfigID:     req.TTSConfigID,
-		Voice:           req.Voice,
-		ASRSpeed:        req.ASRSpeed,
-		MemoryMode:      req.MemoryMode,
-		MCPServiceNames: normalizedMCPServiceNames,
-		Status:          "active",
+		UserID:                userID.(uint),
+		Name:                  req.Name,
+		CustomPrompt:          req.CustomPrompt,
+		LLMConfigID:           req.LLMConfigID,
+		TTSConfigID:           req.TTSConfigID,
+		Voice:                 req.Voice,
+		ASRSpeed:              req.ASRSpeed,
+		MemoryMode:            req.MemoryMode,
+		MCPServiceNames:       normalizedMCPServiceNames,
+		OpenClawEnabled:       req.OpenClawEnabled,
+		OpenClawEnterKeywords: mustOpenClawKeywordsJSON(req.OpenClawEnterKeywords),
+		OpenClawExitKeywords:  mustOpenClawKeywordsJSON(req.OpenClawExitKeywords),
+		Status:                "active",
 	}
 
 	if err := uc.DB.Create(&agent).Error; err != nil {
@@ -400,15 +406,18 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 	}
 
 	var req struct {
-		Name             string  `json:"name" binding:"required,min=2,max=50"`
-		CustomPrompt     string  `json:"custom_prompt"`
-		LLMConfigID      *string `json:"llm_config_id"`
-		TTSConfigID      *string `json:"tts_config_id"`
-		Voice            *string `json:"voice"`
-		ASRSpeed         string  `json:"asr_speed"`
-		MemoryMode       *string `json:"memory_mode"`
-		MCPServiceNames  string  `json:"mcp_service_names"`
-		KnowledgeBaseIDs []uint  `json:"knowledge_base_ids"`
+		Name                  string   `json:"name" binding:"required,min=2,max=50"`
+		CustomPrompt          string   `json:"custom_prompt"`
+		LLMConfigID           *string  `json:"llm_config_id"`
+		TTSConfigID           *string  `json:"tts_config_id"`
+		Voice                 *string  `json:"voice"`
+		ASRSpeed              string   `json:"asr_speed"`
+		MemoryMode            *string  `json:"memory_mode"`
+		MCPServiceNames       string   `json:"mcp_service_names"`
+		OpenClawEnabled       bool     `json:"openclaw_enabled"`
+		OpenClawEnterKeywords []string `json:"openclaw_enter_keywords"`
+		OpenClawExitKeywords  []string `json:"openclaw_exit_keywords"`
+		KnowledgeBaseIDs      []uint   `json:"knowledge_base_ids"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -439,6 +448,9 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 		return
 	}
 	agent.MCPServiceNames = normalizedMCPServiceNames
+	agent.OpenClawEnabled = req.OpenClawEnabled
+	agent.OpenClawEnterKeywords = mustOpenClawKeywordsJSON(req.OpenClawEnterKeywords)
+	agent.OpenClawExitKeywords = mustOpenClawKeywordsJSON(req.OpenClawExitKeywords)
 
 	if err := uc.DB.Save(&agent).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新智能体失败"})
@@ -930,6 +942,30 @@ func (uc *UserController) GetAgentMCPEndpoint(c *gin.Context) {
 	}
 
 	// 返回单个endpoint字符串
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"endpoint": endpoint}})
+}
+
+// GetAgentOpenClawEndpoint 获取智能体的OpenClaw接入点URL（用户版本）
+func (uc *UserController) GetAgentOpenClawEndpoint(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	agentID := c.Param("id")
+	if agentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id parameter is required"})
+		return
+	}
+
+	var agent models.Agent
+	if err := uc.DB.Where("id = ? AND user_id = ?", agentID, userID).First(&agent).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "智能体不存在或不属于当前用户"})
+		return
+	}
+
+	endpoint, err := GenerateAgentOpenClawEndpoint(uc.DB, agentID, userID.(uint))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"endpoint": endpoint}})
 }
 

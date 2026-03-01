@@ -15,6 +15,7 @@ import (
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
+	"xiaozhi-esp32-server-golang/internal/domain/openclaw"
 	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -153,7 +154,11 @@ func (app *App) newUdpServer() (*mqtt_udp.UdpServer, error) {
 
 func (app *App) newWebSocketServer() *websocket.WebSocketServer {
 	port := viper.GetInt("websocket.port")
-	return websocket.NewWebSocketServer(port, websocket.WithOnNewConnection(app.OnNewConnection))
+	return websocket.NewWebSocketServer(
+		port,
+		websocket.WithOnNewConnection(app.OnNewConnection),
+		websocket.WithOnOpenClawResponse(app.OnOpenClawResponse),
+	)
 }
 
 func (app *App) startMqttServer() error {
@@ -302,6 +307,9 @@ func (a *App) OnNewConnection(transport types.IConn) {
 
 	log.Infof("设备 %s 的ChatManager已创建并存储", deviceID)
 
+	// OpenClaw离线消息补发（延迟重试，避免连接刚建立时会话尚未初始化）
+	go a.replayOpenClawOfflineMessages(deviceID)
+
 	// 启动ChatManager
 	go func() {
 		defer func() {
@@ -317,6 +325,40 @@ func (a *App) OnNewConnection(transport types.IConn) {
 			log.Errorf("ChatManager启动失败: %v", err)
 		}
 	}()
+}
+
+// OnOpenClawResponse OpenClaw实时响应下发回调
+func (a *App) OnOpenClawResponse(deviceID string, text string) bool {
+	chatManager, exists := a.GetChatManager(deviceID)
+	if !exists || chatManager == nil {
+		return false
+	}
+	if err := chatManager.InjectMessage(text, true); err != nil {
+		log.Warnf("OpenClaw实时消息注入失败, device=%s err=%v", deviceID, err)
+		return false
+	}
+	return true
+}
+
+func (a *App) replayOpenClawOfflineMessages(deviceID string) {
+	manager := openclaw.GetManager()
+	const maxRetry = 10
+	for i := 0; i < maxRetry; i++ {
+		time.Sleep(1 * time.Second)
+		delivered, remaining := manager.ReplayOfflineMessages(deviceID, func(msg openclaw.OfflineMessage) error {
+			chatManager, exists := a.GetChatManager(deviceID)
+			if !exists || chatManager == nil {
+				return fmt.Errorf("chat manager not ready")
+			}
+			return chatManager.InjectMessage(msg.Text, true)
+		})
+		if delivered > 0 {
+			log.Infof("OpenClaw离线消息补发成功, device=%s delivered=%d remaining=%d", deviceID, delivered, remaining)
+		}
+		if remaining == 0 {
+			return
+		}
+	}
 }
 
 // GetChatManager 获取指定设备的ChatManager

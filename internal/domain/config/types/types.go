@@ -53,6 +53,12 @@ type KnowledgeBaseRef struct {
 	Status             string   `json:"status"`
 }
 
+type OpenClawConfig struct {
+	Allowed       bool     `json:"allowed"`
+	EnterKeywords []string `json:"enter_keywords"`
+	ExitKeywords  []string `json:"exit_keywords"`
+}
+
 type UConfig struct {
 	SystemPrompt    string                      `json:"system_prompt"`
 	Asr             AsrConfig                   `json:"asr"`
@@ -64,6 +70,7 @@ type UConfig struct {
 	MemoryMode      string                      `json:"memory_mode"`       // 记忆模式: none/short/long
 	AgentId         string                      `json:"agent_id"`          // 所属agent_id
 	MCPServiceNames string                      `json:"mcp_service_names"` // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
+	OpenClaw        OpenClawConfig              `json:"openclaw"`          // OpenClaw 配置
 	KnowledgeBases  []KnowledgeBaseRef          `json:"knowledge_bases"`
 }
 

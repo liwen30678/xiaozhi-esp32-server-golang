@@ -27,7 +27,8 @@ type WebSocketServer struct {
 	// MCP管理器
 	globalMCPManager *mcp.GlobalMCPManager
 
-	onNewConnection types.OnNewConnection
+	onNewConnection    types.OnNewConnection
+	onOpenClawResponse func(deviceID string, text string) bool
 }
 
 // Option 类型定义
@@ -51,6 +52,12 @@ func WithMCPManager(mcpManager *mcp.GlobalMCPManager) WebSocketServerOption {
 func WithOnNewConnection(onNewConnection types.OnNewConnection) WebSocketServerOption {
 	return func(s *WebSocketServer) {
 		s.onNewConnection = onNewConnection
+	}
+}
+
+func WithOnOpenClawResponse(handler func(deviceID string, text string) bool) WebSocketServerOption {
+	return func(s *WebSocketServer) {
+		s.onOpenClawResponse = handler
 	}
 }
 
@@ -92,6 +99,7 @@ func (s *WebSocketServer) Start() error {
 	http.HandleFunc("/xiaozhi/ota/", s.handleOta)
 	http.HandleFunc("/xiaozhi/ota/activate", s.handleOtaActivate)
 	http.HandleFunc("/mcp", s.handleMCPWebSocket)
+	http.HandleFunc("/ws/openclaw", s.handleOpenClawWebSocket)
 	http.HandleFunc("/xiaozhi/api/mcp/tools/", s.handleMCPAPI)
 	http.HandleFunc("/xiaozhi/api/vision", s.handleVisionAPI) //图片识别API
 
@@ -100,6 +108,7 @@ func (s *WebSocketServer) Start() error {
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", s.port)
 	log.Infof("WebSocket 服务器启动在 ws://%s/xiaozhi/v1/", listenAddr)
 	log.Infof("MCP WebSocket 端点: ws://%s/mcp?token=xxx", listenAddr)
+	log.Infof("OpenClaw WebSocket 端点: ws://%s/ws/openclaw?token=xxx", listenAddr)
 	log.Infof("MCP API 端点: http://%s/xiaozhi/api/mcp/tools/{deviceId}", listenAddr)
 
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
