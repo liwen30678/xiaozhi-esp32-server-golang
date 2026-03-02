@@ -62,6 +62,10 @@ func (h *DeviceHook) OnDisconnect(cl *mqttServer.Client, err error, ok bool) {
 	if isAdmin {
 		return
 	}
+	if cl.IsTakenOver() {
+		log.Infof("客户端 %s 已被同ID新连接接管，跳过取消订阅", cl.ID)
+		return
+	}
 	mac := parseMacFromClientId(cl.ID)
 	if mac == "" {
 		log.Info("警告: 无法从客户端ID解析MAC地址:", cl.ID)
@@ -96,9 +100,7 @@ func (h *DeviceHook) OnSessionEstablished(cl *mqttServer.Client, pk packets.Pack
 		Qos:    0,
 	})
 
-	if exists {
-		log.Infof("订阅客户端 %s 到主题 %s, exists: %v", clientID, topic, exists)
-	}
+	log.Infof("订阅客户端 %s 到主题 %s, exists: %v", clientID, topic, exists)
 }
 
 // OnSubscribe 打印订阅包
