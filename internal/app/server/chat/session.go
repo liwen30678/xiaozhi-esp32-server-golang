@@ -635,26 +635,14 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 
 		// 检查是否是唤醒词
 		isWakeupWord := isWakeupWord(text)
-		enableGreeting := viper.GetBool("enable_greeting") // 从配置获取
-
-		var needStartChat bool
-		if !isWakeupWord || (isWakeupWord && enableGreeting) {
-			needStartChat = true
+		if isWakeupWord {
+			return nil
 		}
-		if needStartChat {
-			// 否则开始对话
-			if enableGreeting && isWakeupWord {
-				//进行tts欢迎语
-				if !s.clientState.IsWelcomeSpeaking {
-					s.HandleWelcome()
-				}
-			} else {
-				s.clientState.Destroy()
-				//进行llm->tts聊天
-				if err := s.AddAsrResultToQueue(text, nil); err != nil {
-					log.Errorf("开始对话失败: %v", err)
-				}
-			}
+
+		s.clientState.Destroy()
+		//进行llm->tts聊天
+		if err := s.AddAsrResultToQueue(text, nil); err != nil {
+			log.Errorf("开始对话失败: %v", err)
 		}
 	}
 	return nil
@@ -837,6 +825,10 @@ func (s *ChatSession) HandleListenStart(msg *ClientMessage) error {
 	//if s.clientState.ListenMode == "manual" {
 	s.StopSpeaking(false)
 	//}
+
+	if viper.GetBool("enable_greeting") && !s.clientState.IsWelcomeSpeaking {
+		s.HandleWelcome()
+	}
 
 	return s.OnListenStart()
 }
