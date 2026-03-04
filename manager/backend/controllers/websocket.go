@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,13 @@ type MCPTool struct {
 	Schema      bool                   `json:"schema"`
 	InputSchema map[string]interface{} `json:"input_schema,omitempty"`
 }
+
+const (
+	defaultBroadcastRequestTimeout = 30 * time.Second
+	openClawChatDefaultTimeoutMs   = 10 * 60 * 1000
+	openClawChatMinTimeoutMs       = 1000
+	openClawChatMaxTimeoutMs       = 10 * 60 * 1000
+)
 
 // NewWebSocketController 创建WebSocket控制器
 func NewWebSocketController(db *gorm.DB) *WebSocketController {
@@ -686,7 +694,81 @@ func (ctrl *WebSocketController) CallMcpToolFromClient(ctx context.Context, body
 	return response.Body, nil
 }
 
+// RequestOpenClawStatusFromClient 请求客户端返回 OpenClaw 连接状态
+func (ctrl *WebSocketController) RequestOpenClawStatusFromClient(ctx context.Context, agentID string) (map[string]interface{}, error) {
+	body := map[string]interface{}{
+		"agent_id": agentID,
+	}
+
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccess(ctx, "GET", "/api/openclaw/status", body)
+	if err != nil {
+		return nil, err
+	}
+	if response.Body == nil {
+		return map[string]interface{}{}, nil
+	}
+
+	return response.Body, nil
+}
+
+// CallOpenClawChatFromClient 请求客户端执行 OpenClaw 对话测试
+func (ctrl *WebSocketController) CallOpenClawChatFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error) {
+	if body == nil {
+		body = map[string]interface{}{}
+	}
+	timeoutMs := normalizeOpenClawChatTimeoutMs(body["timeout_ms"])
+	body["timeout_ms"] = timeoutMs
+	waitTimeout := time.Duration(timeoutMs)*time.Millisecond + 5*time.Second
+
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccessWithTimeout(ctx, "POST", "/api/openclaw/chat", body, waitTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if response.Body == nil {
+		return map[string]interface{}{}, nil
+	}
+
+	return response.Body, nil
+}
+
 func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context.Context, method, path string, body map[string]interface{}) (*WebSocketResponse, error) {
+	return ctrl.broadcastRequestAndWaitFirstSuccessWithTimeout(ctx, method, path, body, defaultBroadcastRequestTimeout)
+}
+
+func normalizeOpenClawChatTimeoutMs(v interface{}) int {
+	timeout := openClawChatDefaultTimeoutMs
+	switch x := v.(type) {
+	case int:
+		timeout = x
+	case int32:
+		timeout = int(x)
+	case int64:
+		timeout = int(x)
+	case float32:
+		timeout = int(x)
+	case float64:
+		timeout = int(x)
+	}
+
+	if timeout < openClawChatMinTimeoutMs {
+		timeout = openClawChatMinTimeoutMs
+	}
+	if timeout > openClawChatMaxTimeoutMs {
+		timeout = openClawChatMaxTimeoutMs
+	}
+	return timeout
+}
+
+func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccessWithTimeout(
+	ctx context.Context,
+	method, path string,
+	body map[string]interface{},
+	waitTimeout time.Duration,
+) (*WebSocketResponse, error) {
+	if waitTimeout <= 0 {
+		waitTimeout = defaultBroadcastRequestTimeout
+	}
+
 	responseChan := make(chan *WebSocketResponse, 10)
 	requestID := uuid.New().String()
 
@@ -730,7 +812,8 @@ func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context
 	}()
 
 	responsesReceived := 0
-	timeout := time.After(30 * time.Second)
+	firstError := ""
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case response := <-responseChan:
@@ -738,7 +821,16 @@ func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context
 			if response != nil && response.Status == http.StatusOK {
 				return response, nil
 			}
+			if response != nil && firstError == "" {
+				msg := strings.TrimSpace(response.Error)
+				if msg != "" {
+					firstError = msg
+				}
+			}
 			if responsesReceived >= callbacksRegistered {
+				if firstError != "" {
+					return nil, fmt.Errorf("%s", firstError)
+				}
 				return nil, fmt.Errorf("所有客户端都返回失败")
 			}
 		case <-timeout:

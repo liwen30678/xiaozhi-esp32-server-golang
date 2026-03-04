@@ -174,7 +174,17 @@ OpenClaw OpenClawConfig `json:"openclaw"`
 11. `internal/app/server/chat/session.go`
 12. `internal/app/server/app.go`
 
-## 8. 验证清单
+## 8. 安装步骤（含配置channel）
+
+1. 安装 xiaozhi OpenClaw 插件：
+   `openclaw plugins install @xiaozhi_openclaw/xiaozhi`
+2. 在控制台打开智能体 OpenClaw 配置，复制该智能体的 OpenClaw 接入点（`ws(s)://.../ws/openclaw?token=...`）。
+3. 在 OpenClaw 会话中执行“配置channel”：
+   - 将上一步接入点直接发给 OpenClaw
+   - 明确告诉它：`配置xiaozhi渠道插件`
+4. 配置完成后，使用测试会话发送一条消息，确认能收到 OpenClaw 回复。
+
+## 9. 验证清单
 
 1. 控制台可获取 OpenClaw endpoint（与 MCP 生成逻辑一致）。
 2. `/api/configs` 返回结构化 `openclaw` 字段。

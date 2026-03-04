@@ -12,6 +12,20 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
+var (
+	defaultManagerOpenClawEnterKeywords = []string{"打开龙虾", "进入龙虾"}
+	defaultManagerOpenClawExitKeywords  = []string{"关闭龙虾", "退出龙虾"}
+)
+
+func cloneOpenClawKeywords(keywords []string) []string {
+	if len(keywords) == 0 {
+		return []string{}
+	}
+	cloned := make([]string, len(keywords))
+	copy(cloned, keywords)
+	return cloned
+}
+
 // ConfigManager 配置管理器
 // 提供高层级的配置管理功能，包括缓存、热更新、配置验证等
 type ConfigManager struct {
@@ -141,12 +155,12 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 
 	// 构建配置结果
 	enterKeywords := response.Data.OpenClaw.EnterKeywords
-	if enterKeywords == nil {
-		enterKeywords = []string{}
+	if len(enterKeywords) == 0 {
+		enterKeywords = cloneOpenClawKeywords(defaultManagerOpenClawEnterKeywords)
 	}
 	exitKeywords := response.Data.OpenClaw.ExitKeywords
-	if exitKeywords == nil {
-		exitKeywords = []string{}
+	if len(exitKeywords) == 0 {
+		exitKeywords = cloneOpenClawKeywords(defaultManagerOpenClawExitKeywords)
 	}
 
 	config := types.UConfig{

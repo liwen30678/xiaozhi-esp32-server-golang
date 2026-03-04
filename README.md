@@ -21,6 +21,7 @@ xiaozhi-esp32-server-golang 是一款高性能、全流式的 AI 后端服务，
 - 🤖 **多引擎AI能力集成**：基于 Eino 框架，支持 FunASR、OpenAI 兼容、Ollama、Doubao、EdgeTTS、CosyVoice 等多种引擎
 - 🧩 **模块化可扩展架构**：VAD/ASR/LLM/TTS/MCP/视觉等核心模块独立可插拔
 - 🎵 **MCP Audio Server**：音频资源分页获取与流式处理，音乐播放与音量控制
+- 🦞 **OpenClaw 智能体接入**：按智能体生成专属 OpenClaw Endpoint，支持连接状态查看、会话测试、进入/退出关键词路由（默认“打开龙虾/进入龙虾”与“关闭龙虾/退出龙虾”）
 - 🖥️ **全功能Web管理控制台**：可视化配置向导、VAD/ASR/LLM/TTS全链路可用性测试、设备管理与消息注入、实时延迟监控与OTA验证
 - 🧠 **高级业务功能**：MCP 市场聚合与导入、声音复刻、知识库（Dify/RAGFlow/WeKnora）、设备/智能体维度 MCP 远程调用调试
 - 📦 **易用的一键部署方案**：预编译 aio 包开箱即用（主程序+控制台+声纹服务）、Docker 一键部署、支持 Linux/Windows/macOS 本地编译
@@ -104,6 +105,7 @@ go build -o xiaozhi_server ./cmd/server/
 - [MCP 架构](doc/mcp.md)
 - [MCP 音频资源](doc/mcp_resource.md)
 - [MCP 市场（市场发现/导入/热更新）](doc/mcp_market.md)
+- [OpenClaw 智能体接入（Endpoint/关键词路由/会话测试）](doc/openclaw_integration.md)
 - [声音复刻（用户操作与管理员额度）](doc/voice_clone.md)
 - [知识库（Provider 配置/同步/召回测试/RAG）](doc/knowledge_base.md)
 - [设备/智能体维度 MCP 远程调用（Endpoint/Tools/Call）](doc/mcp_remote_call_agent_device.md)
@@ -123,6 +125,7 @@ go build -o xiaozhi_server ./cmd/server/
 | LLM | 大模型推理 | Eino 框架兼容、OpenAI、Ollama 等 |
 | TTS | 语音合成 | Doubao / EdgeTTS / CosyVoice |
 | MCP | 多协议接入、MCP 市场发现导入、设备/智能体维度远程调用调试 | MCP Server / 接入点 / MCP Market / SSE / StreamableHTTP / WebSocket Controller / MCP Tool Call |
+| OpenClaw | 智能体维度接入点、进入/退出关键词模式切换、会话消息转发与测试 | OpenClaw WebSocket / Agent Endpoint / Chat Router |
 | 视觉 | 视觉处理 | Doubao / 阿里云视觉 |
 | 声纹识别 | 说话人识别 | sherpa-onnx + 向量数据库 |
 | 声音复刻 | 用户侧复刻音色创建与试听 | Minimax / CosyVoice / 千问 |

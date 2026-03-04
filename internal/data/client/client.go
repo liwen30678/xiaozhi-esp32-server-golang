@@ -330,7 +330,10 @@ func (c *Ctx) Reset() {
 func (c *Ctx) Get(parentCtx context.Context) context.Context {
 	c.Lock()
 	defer c.Unlock()
-	if c.ctx == nil {
+	if c.ctx == nil || c.ctx.Err() != nil {
+		if c.ctx != nil {
+			c.cancel()
+		}
 		c.ctx, c.cancel = context.WithCancel(parentCtx)
 	}
 	return c.ctx

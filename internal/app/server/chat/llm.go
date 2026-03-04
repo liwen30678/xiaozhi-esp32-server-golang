@@ -142,7 +142,10 @@ func (l *LLMManager) AddTextToTTSQueue(text string) error {
 
 	sessionCtx := l.clientState.SessionCtx.Get(l.clientState.Ctx)
 	ctx := l.clientState.AfterAsrSessionCtx.Get(sessionCtx)
-	l.HandleLLMResponseChannelAsync(ctx, msg, llmResponseChan)
+	if err := l.HandleLLMResponseChannelAsync(ctx, msg, llmResponseChan); err != nil {
+		log.Warnf("AddTextToTTSQueue enqueue failed: %v", err)
+		return err
+	}
 
 	return nil
 }

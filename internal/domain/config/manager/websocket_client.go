@@ -18,6 +18,7 @@ import (
 
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
+	"xiaozhi-esp32-server-golang/internal/domain/openclaw"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -726,6 +727,12 @@ func (c *WebSocketClient) handleDefaultRequest(request *WebSocketRequest) {
 		// 处理MCP工具调用请求
 		c.handleMcpToolCallRequest(request)
 
+	case "/api/openclaw/status":
+		c.handleOpenClawStatusRequest(request)
+
+	case "/api/openclaw/chat":
+		c.handleOpenClawChatRequest(request)
+
 	case "/api/server/info":
 		// 返回服务器信息
 		response := map[string]interface{}{
@@ -1243,5 +1250,157 @@ func (c *WebSocketClient) handleMcpToolCallRequest(request *WebSocketRequest) {
 		"device_id": deviceID,
 		"tool_name": toolName,
 		"result":    result,
+	}, "")
+}
+
+func (c *WebSocketClient) handleOpenClawStatusRequest(request *WebSocketRequest) {
+	agentID := ""
+	if request.Body != nil {
+		if id, ok := request.Body["agent_id"].(string); ok {
+			agentID = strings.TrimSpace(id)
+		}
+	}
+	if agentID == "" {
+		_ = c.SendResponse(request.ID, 400, nil, "missing agent_id")
+		return
+	}
+
+	manager := openclaw.GetManager()
+	connected := manager.GetAgentSession(agentID) != nil
+	status := "offline"
+	if connected {
+		status = "online"
+	}
+
+	_ = c.SendResponse(request.ID, 200, map[string]interface{}{
+		"agent_id":  agentID,
+		"connected": connected,
+		"status":    status,
+	}, "")
+}
+
+const (
+	defaultOpenClawChatTimeoutMs = 10 * 60 * 1000
+	minOpenClawChatTimeoutMs     = 1000
+	maxOpenClawChatTimeoutMs     = 10 * 60 * 1000
+	openClawChatTestSessionID    = "openclaw-chat-test-global"
+)
+
+func buildOpenClawTestDeviceID(agentID string) string {
+	trimmed := strings.TrimSpace(agentID)
+	if trimmed == "" {
+		trimmed = "unknown"
+	}
+	return "__openclaw_test__:" + trimmed
+}
+
+func buildOpenClawTestSessionID() string {
+	return openClawChatTestSessionID
+}
+
+func parseOpenClawTimeoutMs(v interface{}) int {
+	timeout := defaultOpenClawChatTimeoutMs
+	switch x := v.(type) {
+	case int:
+		timeout = x
+	case int32:
+		timeout = int(x)
+	case int64:
+		timeout = int(x)
+	case float64:
+		timeout = int(x)
+	case float32:
+		timeout = int(x)
+	}
+	if timeout < minOpenClawChatTimeoutMs {
+		timeout = minOpenClawChatTimeoutMs
+	}
+	if timeout > maxOpenClawChatTimeoutMs {
+		timeout = maxOpenClawChatTimeoutMs
+	}
+	return timeout
+}
+
+func (c *WebSocketClient) handleOpenClawChatRequest(request *WebSocketRequest) {
+	agentID := ""
+	message := ""
+	sessionID := ""
+	timeoutMs := defaultOpenClawChatTimeoutMs
+
+	if request.Body != nil {
+		if id, ok := request.Body["agent_id"].(string); ok {
+			agentID = strings.TrimSpace(id)
+		}
+		if msg, ok := request.Body["message"].(string); ok {
+			message = strings.TrimSpace(msg)
+		}
+		if rawSessionID, ok := request.Body["session_id"].(string); ok && strings.TrimSpace(rawSessionID) != "" {
+			sessionID = strings.TrimSpace(rawSessionID)
+		}
+		timeoutMs = parseOpenClawTimeoutMs(request.Body["timeout_ms"])
+	}
+
+	if agentID == "" {
+		_ = c.SendResponse(request.ID, 400, nil, "missing agent_id")
+		return
+	}
+	if message == "" {
+		_ = c.SendResponse(request.ID, 400, nil, "missing message")
+		return
+	}
+	if sessionID == "" {
+		sessionID = buildOpenClawTestSessionID()
+	}
+
+	manager := openclaw.GetManager()
+	if manager.GetAgentSession(agentID) == nil {
+		_ = c.SendResponse(request.ID, 409, nil, fmt.Sprintf("openclaw session not connected for agent %s", agentID))
+		return
+	}
+
+	testDeviceID := buildOpenClawTestDeviceID(agentID)
+	start := time.Now()
+	messageID, err := manager.SendMessage(agentID, testDeviceID, message, sessionID)
+	if err != nil {
+		errMsg := strings.ToLower(strings.TrimSpace(err.Error()))
+		if strings.Contains(errMsg, "session not found") {
+			_ = c.SendResponse(request.ID, 409, nil, fmt.Sprintf("openclaw session not connected for agent %s", agentID))
+			return
+		}
+		_ = c.SendResponse(request.ID, 500, nil, fmt.Sprintf("openclaw send failed: %v", err))
+		return
+	}
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	reply := ""
+	for time.Now().Before(deadline) {
+		manager.ReplayOfflineMessages(testDeviceID, func(msg openclaw.OfflineMessage) error {
+			if strings.TrimSpace(msg.CorrelationID) == messageID || strings.TrimSpace(msg.CorrelationID) == "" {
+				reply = strings.TrimSpace(msg.Text)
+			}
+			return nil
+		})
+		if reply != "" {
+			break
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+
+	if reply == "" {
+		// 清理测试设备离线缓存，避免累积。
+		manager.ReplayOfflineMessages(testDeviceID, func(msg openclaw.OfflineMessage) error {
+			return nil
+		})
+		_ = c.SendResponse(request.ID, 504, nil, "openclaw response timeout")
+		return
+	}
+
+	latencyMs := int(time.Since(start).Milliseconds())
+	_ = c.SendResponse(request.ID, 200, map[string]interface{}{
+		"agent_id":   agentID,
+		"message_id": messageID,
+		"reply":      reply,
+		"latency_ms": latencyMs,
+		"timeout_ms": timeoutMs,
 	}, "")
 }
