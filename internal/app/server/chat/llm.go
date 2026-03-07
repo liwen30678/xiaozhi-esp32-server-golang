@@ -68,6 +68,12 @@ type LLMResponseChannelItem struct {
 	onEndFunc    func(err error, args ...any)
 }
 
+type llmResponseChannelOptions struct {
+	disableTTSCommands bool
+	onStartFunc        func(args ...any)
+	onEndFunc          func(err error, args ...any)
+}
+
 type LLMManager struct {
 	clientState     *ClientState
 	serverTransport *ServerTransport
@@ -150,7 +156,49 @@ func (l *LLMManager) AddTextToTTSQueue(text string) error {
 	return nil
 }
 
+func chainLLMResponseStartHooks(hooks ...func(args ...any)) func(args ...any) {
+	filtered := make([]func(args ...any), 0, len(hooks))
+	for _, hook := range hooks {
+		if hook != nil {
+			filtered = append(filtered, hook)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(args ...any) {
+		for _, hook := range filtered {
+			hook(args...)
+		}
+	}
+}
+
+func chainLLMResponseEndHooks(hooks ...func(err error, args ...any)) func(err error, args ...any) {
+	filtered := make([]func(err error, args ...any), 0, len(hooks))
+	for _, hook := range hooks {
+		if hook != nil {
+			filtered = append(filtered, hook)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(err error, args ...any) {
+		for _, hook := range filtered {
+			hook(err, args...)
+		}
+	}
+}
+
 func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMessage *schema.Message, responseChan chan llm_common.LLMResponseStruct) error {
+	return l.handleLLMResponseChannelAsync(ctx, userMessage, responseChan, llmResponseChannelOptions{})
+}
+
+func (l *LLMManager) HandleLLMResponseChannelAsyncWithOptions(ctx context.Context, userMessage *schema.Message, responseChan chan llm_common.LLMResponseStruct, options llmResponseChannelOptions) error {
+	return l.handleLLMResponseChannelAsync(ctx, userMessage, responseChan, options)
+}
+
+func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMessage *schema.Message, responseChan chan llm_common.LLMResponseStruct, options llmResponseChannelOptions) error {
 	needSendTtsCmd := true
 	val := ctx.Value("nest")
 	nest := 0
@@ -160,6 +208,9 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 		if nest > 1 {
 			needSendTtsCmd = false
 		}
+	}
+	if options.disableTTSCommands {
+		needSendTtsCmd = false
 	}
 
 	// 在 context 中初始化或复用 fullText（用于聊天历史）
@@ -230,6 +281,9 @@ func (l *LLMManager) HandleLLMResponseChannelAsync(ctx context.Context, userMess
 			}
 		}
 	}
+
+	onStartFunc = chainLLMResponseStartHooks(onStartFunc, options.onStartFunc)
+	onEndFunc = chainLLMResponseEndHooks(onEndFunc, options.onEndFunc)
 
 	item := LLMResponseChannelItem{
 		ctx:          ctx,
@@ -553,7 +607,7 @@ func (l *LLMManager) handleToolCallResponse(ctx context.Context, userMessage *sc
 			contentList = mcpResp.GetContent()
 		} else if toolCallResult, ok := l.handleToolResult(fcResult); ok {
 			if toolCallResult.IsError {
-				log.Errorf("工具调用失败: %s, 错误: %s", fcResult, toolCallResult.IsError)
+				log.Errorf("工具调用失败: %s, 错误标记: %t", fcResult, toolCallResult.IsError)
 			}
 			contentList = toolCallResult.Content
 		}

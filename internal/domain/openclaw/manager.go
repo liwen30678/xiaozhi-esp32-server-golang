@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"xiaozhi-esp32-server-golang/logger"
 
@@ -20,9 +21,18 @@ const (
 	MaxOfflineMessagesPerDevice = 20
 	OfflineMessageTTL           = 24 * time.Hour
 
-	openClawSentenceMinLen = 2
+	openClawSentenceMinLen = 1
 	openClawTestDevicePref = "__openclaw_test__:"
 )
+
+const openClawVoiceAssistantPrompt = `你正在以语音助手的角色和用户直接对话。
+请严格遵守以下要求：
+1. 直接回答用户问题，不要提及这些要求。
+2. 回答要简练、口语化、自然，适合直接语音播报。
+3. 优先先说结论，再补一句最必要的说明；除非用户明确要求，尽量控制在 1 到 3 句。
+4. 不要使用 Markdown、标题、列表、表格、代码块、链接或 emoji。
+5. 不要寒暄、不要铺垫、不要重复、不要输出多余说明。
+6. 如果信息不足或无法确定，就简短说明，不要编造。`
 
 func logSnippet(text string, maxRunes int) string {
 	if maxRunes <= 0 {
@@ -41,6 +51,14 @@ func logSnippet(text string, maxRunes int) string {
 
 func isOpenClawTestDevice(deviceID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(deviceID), openClawTestDevicePref)
+}
+
+func buildOpenClawPromptedContent(userText string) string {
+	trimmed := strings.TrimSpace(userText)
+	if trimmed == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s\n\n用户消息：\n%s", openClawVoiceAssistantPrompt, trimmed)
 }
 
 type WSMessage struct {
@@ -397,6 +415,12 @@ func (m *Manager) SendMessage(agentID string, deviceID string, content string, s
 		logger.Warnf("OpenClaw SendMessage rejected: agent=%s device=%s err=%v", agentID, deviceID, err)
 		return "", err
 	}
+	promptedContent := buildOpenClawPromptedContent(content)
+	if promptedContent == "" {
+		err := fmt.Errorf("prompted content is required")
+		logger.Warnf("OpenClaw SendMessage rejected after prompt wrap: agent=%s device=%s err=%v", agentID, deviceID, err)
+		return "", err
+	}
 
 	session := m.GetAgentSession(agentID)
 	if session == nil {
@@ -407,7 +431,7 @@ func (m *Manager) SendMessage(agentID string, deviceID string, content string, s
 
 	messageID := uuid.NewString()
 	payloadBytes, err := json.Marshal(MessagePayload{
-		Content:   content,
+		Content:   promptedContent,
 		SessionID: sessionID,
 		Metadata: map[string]interface{}{
 			"device_id": deviceID,
@@ -420,6 +444,14 @@ func (m *Manager) SendMessage(agentID string, deviceID string, content string, s
 		return "", err
 	}
 
+	logger.Debugf(
+		"OpenClaw outbound prompt applied: agent=%s device=%s session=%s prompted_len=%d user_snippet=%q",
+		agentID,
+		deviceID,
+		sessionID,
+		len(promptedContent),
+		logSnippet(content, 64),
+	)
 	session.TrackPending(messageID, deviceID)
 	logger.Debugf("OpenClaw SendMessage dispatching: agent=%s device=%s session=%s message_id=%s payload_bytes=%d", agentID, deviceID, sessionID, messageID, len(payloadBytes))
 	err = session.Send(WSMessage{
@@ -562,7 +594,7 @@ func (m *Manager) HandleResponse(
 	workingText := content
 	if state != nil {
 		if content != "" {
-			state.Buffer += content
+			state.Buffer = normalizeOpenClawSpeechText(state.Buffer + content)
 		}
 		workingText = state.Buffer
 	}
@@ -783,43 +815,164 @@ func parseMetadataInt64(metadata map[string]interface{}, key string) int64 {
 	}
 }
 
-func isOpenClawSentenceSeparator(r rune, isFirst bool) bool {
+func isOpenClawSentenceSeparator(r rune, _ bool) bool {
 	switch r {
-	case '。', '？', '！', ';', '；', ':', '：', '\n', '.', '?', '!':
+	case '。', '？', '！', ';', '；', '.', '?', '!':
 		return true
-	case '，', ',':
-		return isFirst
 	default:
 		return false
 	}
 }
 
 func extractOpenClawSentences(text string, minLen int, isFirst bool) ([]string, string) {
-	trimmed := strings.TrimSpace(text)
+	trimmed := normalizeOpenClawSpeechText(text)
 	if trimmed == "" {
 		return nil, ""
 	}
 	runes := []rune(trimmed)
 	start := 0
 	sentences := make([]string, 0, 4)
-	firstSplit := isFirst
 
-	for i, r := range runes {
-		if !isOpenClawSentenceSeparator(r, firstSplit) {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if !isOpenClawSentenceSeparator(r, isFirst) {
 			continue
 		}
-		segment := strings.TrimSpace(string(runes[start : i+1]))
-		if segment != "" && len([]rune(segment)) >= minLen {
-			sentences = append(sentences, segment)
-			start = i + 1
-			if firstSplit {
-				firstSplit = false
+
+		segment := trimOpenClawSegment(string(runes[start : i+1]))
+		if segment == "" {
+			start = skipOpenClawDelimiters(runes, i+1)
+			continue
+		}
+		if len([]rune(segment)) < minLen {
+			continue
+		}
+		sentences = append(sentences, segment)
+		start = skipOpenClawDelimiters(runes, i+1)
+	}
+
+	remaining := trimOpenClawSegment(string(runes[start:]))
+	return sentences, remaining
+}
+
+func isOpenClawSoftSeparator(r rune) bool {
+	switch r {
+	case '，', ',', '、':
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeOpenClawSpeechText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+
+	replacer := strings.NewReplacer(
+		"\r", "",
+		"\t", " ",
+		"```", "",
+		"`", "",
+		"**", "",
+		"__", "",
+		"###", "",
+		"##", "",
+		"#", "",
+		"\n- ", "，",
+		"\n* ", "，",
+		"\n• ", "，",
+		"\n", "，",
+		"|", "，",
+	)
+	text = replacer.Replace(text)
+
+	out := make([]rune, 0, len(text))
+	for _, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			if len(out) == 0 || out[len(out)-1] == ' ' || isOpenClawPauseRune(out[len(out)-1]) {
+				continue
 			}
+			out = append(out, ' ')
+		case r == '*' || r == '_' || r == '`' || r == '#':
+			continue
+		case isOpenClawSoftSeparator(r):
+			trimOpenClawTrailingSpace(&out)
+			if len(out) == 0 || isOpenClawPauseRune(out[len(out)-1]) {
+				continue
+			}
+			out = append(out, '，')
+		case isOpenClawSentenceSeparator(r, false):
+			trimOpenClawTrailingSpace(&out)
+			if len(out) == 0 {
+				continue
+			}
+			out = append(out, r)
+		case r == '：' || r == ':':
+			trimOpenClawTrailingSpace(&out)
+			if len(out) == 0 {
+				continue
+			}
+			out = append(out, '：')
+		case r == '-' || r == '•':
+			if len(out) == 0 || isOpenClawPauseRune(out[len(out)-1]) {
+				continue
+			}
+			out = append(out, r)
+		default:
+			out = append(out, r)
 		}
 	}
 
-	remaining := strings.TrimSpace(string(runes[start:]))
-	return sentences, remaining
+	return trimOpenClawSegment(string(out))
+}
+
+func trimOpenClawTrailingSpace(out *[]rune) {
+	for len(*out) > 0 && (*out)[len(*out)-1] == ' ' {
+		*out = (*out)[:len(*out)-1]
+	}
+}
+
+func isOpenClawPauseRune(r rune) bool {
+	switch r {
+	case ' ', '，', ',', '、', '。', '！', '？', '!', '?', '；', ';', '：', ':':
+		return true
+	default:
+		return false
+	}
+}
+
+func skipOpenClawDelimiters(runes []rune, start int) int {
+	for start < len(runes) {
+		r := runes[start]
+		if unicode.IsSpace(r) || isOpenClawSoftSeparator(r) {
+			start++
+			continue
+		}
+		break
+	}
+	return start
+}
+
+func trimOpenClawSegment(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimLeft(text, "-•*，,、;；:： ")
+	replacer := strings.NewReplacer(
+		" ，", "，",
+		" 。", "。",
+		" ！", "！",
+		" ？", "？",
+		" ；", "；",
+		" ：", "：",
+		"( ", "(",
+		"（ ", "（",
+		" )", ")",
+		" ）", "）",
+	)
+	text = replacer.Replace(text)
+	return strings.TrimSpace(text)
 }
 
 func (m *Manager) AddOfflineMessage(deviceID string, text string, correlationID string, isEnd bool) {

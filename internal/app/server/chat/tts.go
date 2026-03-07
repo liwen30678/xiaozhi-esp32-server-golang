@@ -93,9 +93,10 @@ func (t *TTSManager) Start(ctx context.Context) {
 func (t *TTSManager) runSenderLoop(ctx context.Context) {
 	frameDuration := time.Duration(t.clientState.OutputAudioFormat.FrameDuration) * time.Millisecond
 	cacheFrameCount := 120 / t.clientState.OutputAudioFormat.FrameDuration
-	startTime := time.Now()
 	totalFrames := 0
 	needReportFirstFrame := false
+	currentSentenceFrames := 0
+	playbackTail := time.Time{}
 
 	for {
 		select {
@@ -105,6 +106,10 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 			return
 		case <-t.interruptCh:
 			t.drainSessionAudioQueue()
+			totalFrames = 0
+			needReportFirstFrame = false
+			currentSentenceFrames = 0
+			playbackTail = time.Time{}
 			log.Debugf("runSenderLoop interrupt, drained queue and continue")
 			continue
 		case elem, ok := <-t.sessionAudioQueue:
@@ -116,6 +121,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 			}
 			switch elem.Kind {
 			case AudioQueueKindSentenceStart:
+				currentSentenceFrames = 0
 				if elem.IsStart {
 					needReportFirstFrame = true
 				}
@@ -132,18 +138,24 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 					}
 				}
 			case AudioQueueKindFrame:
-				if totalFrames == 0 {
-					startTime = time.Now()
+				now := time.Now()
+				if playbackTail.IsZero() || now.After(playbackTail) {
+					playbackTail = now
 				}
-				nextFrameTime := startTime.Add(time.Duration(totalFrames-cacheFrameCount) * frameDuration)
-				if now := time.Now(); now.Before(nextFrameTime) {
-					sleepDuration := nextFrameTime.Sub(now)
+				allowedAhead := time.Duration(cacheFrameCount) * frameDuration
+				sendAt := playbackTail.Add(-allowedAhead)
+				if now.Before(sendAt) {
+					sleepDuration := sendAt.Sub(now)
 					select {
 					case <-ctx.Done():
 						_ = t.serverTransport.SendTtsStop()
 						t.drainSessionAudioQueue()
 						return
 					case <-time.After(sleepDuration):
+					}
+					now = time.Now()
+					if now.After(playbackTail) {
+						playbackTail = now
 					}
 				}
 				if err := t.serverTransport.SendAudio(elem.Data); err != nil {
@@ -156,6 +168,8 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				t.audioHistoryBuffer = append(t.audioHistoryBuffer, frameCopy)
 				t.audioMutex.Unlock()
 				totalFrames++
+				currentSentenceFrames++
+				playbackTail = playbackTail.Add(frameDuration)
 				if needReportFirstFrame && totalFrames == 1 {
 					log.Debugf("从接收音频结束 asr->llm->tts首帧 整体 耗时: %d ms", t.clientState.GetAsrLlmTtsDuration())
 					needReportFirstFrame = false
@@ -166,6 +180,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 						log.Errorf("发送 TTS 文本失败: %s, %v", elem.Text, err)
 					}
 				}
+				currentSentenceFrames = 0
 				if elem.OnEnd != nil {
 					elem.OnEnd(elem.Err)
 				}
@@ -173,26 +188,31 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				if err := t.serverTransport.SendTtsStart(); err != nil {
 					log.Errorf("发送 TtsStart 失败: %v", err)
 				}
-				// 新语音段：仅重置帧计数，startTime 在收到第一帧时设置
+				// 新语音段：重置帧计数与播放尾指针
 				totalFrames = 0
+				playbackTail = time.Time{}
 			case AudioQueueKindTtsStop:
-				// 精确等待：本段已发送 totalFrames 帧，等播放到最后一帧结束再发 TtsStop
-				expectedPlayEnd := startTime.Add(time.Duration(totalFrames) * frameDuration)
-				if now := time.Now(); now.Before(expectedPlayEnd) {
-					sleepDuration := expectedPlayEnd.Sub(now)
-					select {
-					case <-ctx.Done():
-						_ = t.serverTransport.SendTtsStop()
-						t.drainSessionAudioQueue()
-						return
-					case <-time.After(sleepDuration):
+				// 等待当前播放尾指针走到最后一帧结束再发 TtsStop
+				if !playbackTail.IsZero() {
+					if now := time.Now(); now.Before(playbackTail) {
+						sleepDuration := playbackTail.Sub(now)
+						select {
+						case <-ctx.Done():
+							_ = t.serverTransport.SendTtsStop()
+							t.drainSessionAudioQueue()
+							return
+						case <-time.After(sleepDuration):
+						}
 					}
 				}
-				//固定150ms等待，确保客户端播放完成
+				// 固定150ms等待，确保客户端播放完成
 				time.Sleep(150 * time.Millisecond)
 				if err := t.serverTransport.SendTtsStop(); err != nil {
 					log.Errorf("发送 TtsStop 失败: %v", err)
 				}
+				playbackTail = time.Time{}
+				totalFrames = 0
+				currentSentenceFrames = 0
 			}
 		}
 	}
