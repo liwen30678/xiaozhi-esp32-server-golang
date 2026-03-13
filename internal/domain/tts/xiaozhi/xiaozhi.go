@@ -106,7 +106,6 @@ func NewXiaozhiProvider(config map[string]interface{}) *XiaozhiProvider {
 		"format":         "opus",
 	}
 
-
 	header := http.Header{}
 	header.Set("Device-Id", deviceID)
 	header.Set("Content-Type", "application/json")
@@ -208,7 +207,7 @@ type RecvMsg struct {
 func sendStopMessage(conn *websocket.Conn, deviceId string) {
 	stopMsg := map[string]interface{}{
 		"type":      "listen",
-		"device_id":  deviceId,
+		"device_id": deviceId,
 		"state":     "stop",
 	}
 	if err := conn.WriteJSON(stopMsg); err != nil {
@@ -386,4 +385,3 @@ func (p *XiaozhiProvider) TextToSpeech(ctx context.Context, text string, sampleR
 	}
 	return frames, nil
 }
-

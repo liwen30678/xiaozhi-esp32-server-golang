@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -182,8 +183,225 @@ func (d *AudioDecoder) Run(startTs int64) error {
 		d.RunWavDecoder(startTs, true)
 	} else if d.AudioFormat == "mp3" {
 		return d.RunMp3Decoder(startTs)
+	} else if d.AudioFormat == "opus" {
+		return d.RunOpusDecoder(startTs)
 	}
 	return nil
+}
+
+// WriteLengthPrefixedFrame 将单帧音频数据写成“4字节长度头 + payload”格式，便于流式传给通用解码器。
+func WriteLengthPrefixedFrame(writer io.Writer, frame []byte) error {
+	if writer == nil {
+		return fmt.Errorf("writer 不能为空")
+	}
+	if len(frame) == 0 {
+		return fmt.Errorf("frame 不能为空")
+	}
+
+	var header [4]byte
+	binary.LittleEndian.PutUint32(header[:], uint32(len(frame)))
+	if _, err := writer.Write(header[:]); err != nil {
+		return fmt.Errorf("写入帧长度失败: %v", err)
+	}
+	if _, err := writer.Write(frame); err != nil {
+		return fmt.Errorf("写入帧数据失败: %v", err)
+	}
+	return nil
+}
+
+func readLengthPrefixedFrame(reader io.Reader) ([]byte, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return nil, err
+	}
+
+	frameLen := binary.LittleEndian.Uint32(header[:])
+	if frameLen == 0 {
+		return nil, fmt.Errorf("帧长度不能为0")
+	}
+	if frameLen > 64*1024 {
+		return nil, fmt.Errorf("帧长度过大: %d", frameLen)
+	}
+
+	frame := make([]byte, int(frameLen))
+	if _, err := io.ReadFull(reader, frame); err != nil {
+		return nil, err
+	}
+	return frame, nil
+}
+
+func (d *AudioDecoder) RunOpusDecoder(startTs int64) error {
+	defer func() {
+		close(d.outputOpusChan)
+		if d.pipeReader != nil {
+			d.pipeReader.Close()
+		}
+	}()
+
+	sourceSampleRate := int(d.format.SampleRate)
+	if sourceSampleRate < 1 {
+		sourceSampleRate = 16000
+		log.Warnf("Opus 输入采样率为0，按 16000 Hz 处理")
+	}
+
+	channels := d.format.NumChannels
+	if channels < 1 {
+		channels = 1
+		log.Warnf("Opus 输入通道数为0，按单声道处理")
+	}
+
+	targetSampleRate := sourceSampleRate
+	if d.targetSampleRate > 0 {
+		targetSampleRate = d.targetSampleRate
+	}
+
+	frameDurationMs := d.perFrameDurationMs
+	if frameDurationMs <= 0 {
+		frameDurationMs = 60
+	}
+	sourceFrameSize := sourceSampleRate * frameDurationMs / 1000
+	if sourceFrameSize <= 0 {
+		return fmt.Errorf("无效的 Opus 帧时长: %d ms", frameDurationMs)
+	}
+
+	outputChannels := 1
+	var enc *opus.Encoder
+	var err error
+	if d.TargetAudioFormat == "opus" {
+		enc, err = opus.NewEncoder(targetSampleRate, outputChannels, opus.AppAudio)
+		if err != nil {
+			return fmt.Errorf("创建Opus编码器失败: %v", err)
+		}
+		d.enc = enc
+	}
+
+	opusDecoder, err := opus.NewDecoder(sourceSampleRate, channels)
+	if err != nil {
+		return fmt.Errorf("创建Opus解码器失败: %v", err)
+	}
+
+	maxDecodeSamples := channels * sourceSampleRate * 120 / 1000
+	if maxDecodeSamples < channels*sourceSampleRate/50 {
+		maxDecodeSamples = channels * sourceSampleRate / 50
+	}
+	decodedBuffer := make([]int16, maxDecodeSamples)
+	pcmBuffer := make([]int16, 0, sourceFrameSize*2)
+	opusBuffer := make([]byte, 1000)
+	var firstFrame bool
+
+	log.Debugf("Opus解码器开始，原始采样率: %d, 目标采样率: %d, 原始通道: %d, 帧大小: %d, 目标格式: %s", sourceSampleRate, targetSampleRate, channels, sourceFrameSize, d.TargetAudioFormat)
+
+	emitFrame := func(frame []int16) error {
+		if len(frame) == 0 {
+			return nil
+		}
+
+		outputPCM := append([]int16(nil), frame...)
+		if targetSampleRate > 0 && targetSampleRate != sourceSampleRate {
+			pcmBytes := Int16SliceToBytes(outputPCM)
+			pcmFloat32 := PCM16BytesToFloat32(pcmBytes)
+			pcmFloat32 = ResampleLinearFloat32(pcmFloat32, sourceSampleRate, targetSampleRate)
+			outputPCM = Float32SliceToInt16Slice(pcmFloat32)
+		}
+
+		if !firstFrame {
+			firstFrame = true
+			log.Infof("tts云端->首帧解码完成耗时: %d ms", time.Now().UnixMilli()-startTs)
+		}
+
+		switch d.TargetAudioFormat {
+		case "opus":
+			n, encodeErr := enc.Encode(outputPCM, opusBuffer)
+			if encodeErr != nil {
+				return fmt.Errorf("Opus重编码失败: %v", encodeErr)
+			}
+			frameData := make([]byte, n)
+			copy(frameData, opusBuffer[:n])
+			select {
+			case <-d.ctx.Done():
+				log.Debugf("opusDecoder context done, exit")
+				return nil
+			case d.outputOpusChan <- frameData:
+			}
+		case "pcm":
+			pcmData := Int16SliceToBytes(outputPCM)
+			select {
+			case <-d.ctx.Done():
+				log.Debugf("opusDecoder context done, exit")
+				return nil
+			case d.outputOpusChan <- pcmData:
+			}
+		default:
+			return fmt.Errorf("不支持的目标音频格式: %s", d.TargetAudioFormat)
+		}
+
+		return nil
+	}
+
+	flushFrames := func(flushLast bool) error {
+		for len(pcmBuffer) >= sourceFrameSize {
+			frame := append([]int16(nil), pcmBuffer[:sourceFrameSize]...)
+			if err := emitFrame(frame); err != nil {
+				return err
+			}
+			pcmBuffer = pcmBuffer[sourceFrameSize:]
+		}
+		if flushLast && len(pcmBuffer) > 0 {
+			padded := make([]int16, sourceFrameSize)
+			copy(padded, pcmBuffer)
+			if err := emitFrame(padded); err != nil {
+				return err
+			}
+			pcmBuffer = pcmBuffer[:0]
+		}
+		return nil
+	}
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opusDecoder context done, exit")
+			return nil
+		default:
+		}
+
+		packet, err := readLengthPrefixedFrame(d.pipeReader)
+		if err == io.EOF {
+			log.Debugf("Opus流读取结束，处理剩余数据")
+			return flushFrames(true)
+		}
+		if err == io.ErrUnexpectedEOF {
+			return fmt.Errorf("读取Opus帧失败: 数据不完整")
+		}
+		if err != nil {
+			return fmt.Errorf("读取Opus帧失败: %v", err)
+		}
+
+		n, err := opusDecoder.Decode(packet, decodedBuffer)
+		if err != nil {
+			return fmt.Errorf("解码Opus帧失败: %v", err)
+		}
+		if n <= 0 {
+			continue
+		}
+
+		if channels == 1 {
+			pcmBuffer = append(pcmBuffer, decodedBuffer[:n]...)
+		} else {
+			for i := 0; i < n; i++ {
+				base := i * channels
+				var sampleSum int32
+				for ch := 0; ch < channels; ch++ {
+					sampleSum += int32(decodedBuffer[base+ch])
+				}
+				pcmBuffer = append(pcmBuffer, int16(sampleSum/int32(channels)))
+			}
+		}
+
+		if err := flushFrames(false); err != nil {
+			return err
+		}
+	}
 }
 
 func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {

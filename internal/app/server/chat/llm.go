@@ -453,11 +453,14 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 					toolCalls = append(toolCalls, llmResponse.ToolCalls...)
 				}
 
-				if strings.TrimSpace(llmResponse.Text) != "" {
-					// 处理文本内容响应
+				hasText := strings.TrimSpace(llmResponse.Text) != ""
+				if hasText || llmResponse.IsStart || llmResponse.IsEnd {
+					// 双流式收尾依赖空文本的 IsEnd 信号，不能只在有文本时才传给 TTS。
 					if err := l.ttsManager.handleTextResponse(ctx, llmResponse, true); err != nil {
 						return true, err
 					}
+				}
+				if hasText {
 					fullText.WriteString(llmResponse.Text)
 				}
 

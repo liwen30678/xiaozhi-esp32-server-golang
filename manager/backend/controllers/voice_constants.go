@@ -300,6 +300,43 @@ var VoiceOptions = map[string][]VoiceOption{
 		{Value: "Ryan", Label: "甜茶"},
 	},
 
+	// 讯飞在线 TTS 音色列表
+	// 说明：这里保留一组常用静态音色，最终是否可用以讯飞控制台实际授权为准。
+	// 参考：
+	// https://www.xfyun.cn/doc/tts/online_tts/API.html
+	// https://aiui.xfyun.cn/doc/aiui/3_access_service/access_interact/functions/speech_synthesis.html
+	"xunfei": {
+		{Value: "xiaoyan", Label: "小燕（女声，默认推荐）"},
+		{Value: "xiaofeng", Label: "晓峰（男声）"},
+		{Value: "yezi", Label: "小露（女声）"},
+		{Value: "yifei", Label: "一菲（女声）"},
+		{Value: "yiping", Label: "一萍（女声）"},
+		{Value: "qige", Label: "七哥（男声）"},
+		{Value: "chaoge", Label: "超哥（男声）"},
+		{Value: "pengfei", Label: "小鹏（男声）"},
+		{Value: "xiaoxin", Label: "萌小新（童声）"},
+		{Value: "john", Label: "John（英文男声）"},
+		{Value: "catherine", Label: "Catherine（英文女声）"},
+	},
+
+	// 讯飞超拟人 TTS 音色列表
+	// 说明：保留一组推荐静态音色，最终可用性以讯飞控制台授权为准。
+	"xunfei_super_tts": {
+		{Value: "x6_lingxiaoxue_pro", Label: "灵小雪（x6）"},
+		{Value: "x6_lingfeiyi_pro", Label: "灵飞逸（x6）"},
+		{Value: "x6_lingxiaoli_pro", Label: "灵小丽（x6）"},
+		{Value: "x6_lingxiaoyue_pro", Label: "灵小玥（x6）"},
+		{Value: "x6_lingxiaoxuan_pro", Label: "灵小萱（x6）"},
+		{Value: "x6_lingyuyan_pro", Label: "灵语嫣（x6）"},
+		{Value: "x6_lingyouyou_pro", Label: "灵悠悠（x6）"},
+		{Value: "x6_feizheChat_pro", Label: "飞哲 Chat（x6）"},
+		{Value: "x6_xiaoqiChat_pro", Label: "小琪 Chat（x6）"},
+		{Value: "x5_lingxiaotang_flow", Label: "灵小棠（x5）"},
+		{Value: "x5_lingyuzhao_flow", Label: "灵语昭（x5）"},
+		{Value: "x4_zijin_oral", Label: "紫瑾（x4，口语化）"},
+		{Value: "x4_ziyang_oral", Label: "紫阳（x4，口语化）"},
+	},
+
 	// 智谱 TTS 音色列表
 	"zhipu": {
 		{Value: "tongtong", Label: "彤彤（默认音色）"},
@@ -328,14 +365,14 @@ func GetAliyunQwenVoicesByModel(model string) []VoiceOption {
 		// 如果没有模型，返回基础列表
 		return GetVoiceOptionsByProvider("aliyun_qwen")
 	}
-	
+
 	// 使用本地函数获取模型对应的音色列表
 	voices := GetVoicesByModel(model)
 	if voices == nil || len(voices) == 0 {
 		// 如果找不到对应模型的音色，返回基础列表
 		return GetVoiceOptionsByProvider("aliyun_qwen")
 	}
-	
+
 	// 将 VoiceInfo 转换为 VoiceOption
 	result := make([]VoiceOption, 0, len(voices))
 	for _, v := range voices {

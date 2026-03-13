@@ -142,6 +142,7 @@ const form = reactive({
   provider: 'doubao_ws',
   is_default: false,
   enabled: true,
+  double_stream: false,
   cosyvoice: {
     api_url: 'https://tts.linkerai.cn/tts',
     spk_id: 'spk_id',
@@ -200,6 +201,47 @@ const form = reactive({
     speed: 1.0,
     stream: true,
     frame_duration: 60
+  },
+  xunfei: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://tts-api.xfyun.cn/v2/tts',
+    voice: 'xiaoyan',
+    audio_encoding: 'raw',
+    sample_rate: 16000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    tte: 'UTF8',
+    reg: 0,
+    rdn: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
+  },
+  xunfei_super_tts: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6',
+    voice: 'x6_lingxiaoxue_pro',
+    audio_encoding: 'raw',
+    sample_rate: 24000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    bgs: 0,
+    reg: 0,
+    rdn: 0,
+    rhy: 0,
+    oral_level: 'mid',
+    spark_assist: 1,
+    stop_split: 0,
+    remain: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
   },
   indextts_vllm: {
     api_url: 'http://127.0.0.1:7860',
@@ -261,6 +303,17 @@ const rules = {
   'edge_offline.server_url': [{ required: true, message: '请输入服务器URL', trigger: 'blur' }],
   // OpenAI TTS 验证规则
   'openai.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // 讯飞 TTS 验证规则
+  'xunfei.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
+  'xunfei_super_tts.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei_super_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei_super_tts.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei_super_tts.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei_super_tts.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
   // 智谱 TTS 验证规则
   'zhipu.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   // Minimax TTS 验证规则
@@ -289,13 +342,15 @@ const editConfig = (config) => {
   form.provider = config.provider
   form.is_default = config.is_default
   form.enabled = config.enabled
-  
+  form.double_stream = false
+
   // IndexTTS 改为点击音色下拉时再请求
   loadVoiceOptions(config.provider)
-  
+
   // 解析配置JSON并填充到对应的表单字段
   try {
     const configData = JSON.parse(config.json_data || '{}')
+    form.double_stream = configData.double_stream === true
     
     switch (config.provider) {
       case 'cosyvoice':
@@ -356,6 +411,47 @@ const editConfig = (config) => {
         form.openai.speed = configData.speed || 1.0
         form.openai.stream = configData.stream !== undefined ? configData.stream : true
         form.openai.frame_duration = configData.frame_duration || 60
+        break
+      case 'xunfei':
+        form.xunfei.app_id = configData.app_id || ''
+        form.xunfei.api_key = configData.api_key || ''
+        form.xunfei.api_secret = configData.api_secret || ''
+        form.xunfei.ws_url = configData.ws_url || 'wss://tts-api.xfyun.cn/v2/tts'
+        form.xunfei.voice = configData.voice || 'xiaoyan'
+        form.xunfei.audio_encoding = configData.audio_encoding || 'raw'
+        form.xunfei.sample_rate = configData.sample_rate || 16000
+        form.xunfei.speed = configData.speed ?? 50
+        form.xunfei.volume = configData.volume ?? 50
+        form.xunfei.pitch = configData.pitch ?? 50
+        form.xunfei.tte = configData.tte || 'UTF8'
+        form.xunfei.reg = configData.reg ?? 0
+        form.xunfei.rdn = configData.rdn ?? 0
+        form.xunfei.frame_duration = configData.frame_duration || 60
+        form.xunfei.connect_timeout = configData.connect_timeout || 10
+        form.xunfei.read_timeout = configData.read_timeout || 30
+        break
+      case 'xunfei_super_tts':
+        form.xunfei_super_tts.app_id = configData.app_id || ''
+        form.xunfei_super_tts.api_key = configData.api_key || ''
+        form.xunfei_super_tts.api_secret = configData.api_secret || ''
+        form.xunfei_super_tts.ws_url = configData.ws_url || 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6'
+        form.xunfei_super_tts.voice = configData.voice || 'x6_lingxiaoxue_pro'
+        form.xunfei_super_tts.audio_encoding = configData.audio_encoding || 'raw'
+        form.xunfei_super_tts.sample_rate = configData.sample_rate || 24000
+        form.xunfei_super_tts.speed = configData.speed ?? 50
+        form.xunfei_super_tts.volume = configData.volume ?? 50
+        form.xunfei_super_tts.pitch = configData.pitch ?? 50
+        form.xunfei_super_tts.bgs = configData.bgs ?? 0
+        form.xunfei_super_tts.reg = configData.reg ?? 0
+        form.xunfei_super_tts.rdn = configData.rdn ?? 0
+        form.xunfei_super_tts.rhy = configData.rhy ?? 0
+        form.xunfei_super_tts.oral_level = configData.oral_level || 'mid'
+        form.xunfei_super_tts.spark_assist = configData.spark_assist ?? 1
+        form.xunfei_super_tts.stop_split = configData.stop_split ?? 0
+        form.xunfei_super_tts.remain = configData.remain ?? 0
+        form.xunfei_super_tts.frame_duration = configData.frame_duration || 60
+        form.xunfei_super_tts.connect_timeout = configData.connect_timeout || 10
+        form.xunfei_super_tts.read_timeout = configData.read_timeout || 30
         break
       case 'indextts_vllm':
         form.indextts_vllm.api_url = configData.api_url || 'http://127.0.0.1:7860'
@@ -654,6 +750,47 @@ const resetForm = () => {
       speed: 1.0,
       stream: true,
       frame_duration: 60
+    },
+    xunfei: {
+      app_id: '',
+      api_key: '',
+      api_secret: '',
+      ws_url: 'wss://tts-api.xfyun.cn/v2/tts',
+      voice: 'xiaoyan',
+      audio_encoding: 'raw',
+      sample_rate: 16000,
+      speed: 50,
+      volume: 50,
+      pitch: 50,
+      tte: 'UTF8',
+      reg: 0,
+      rdn: 0,
+      frame_duration: 60,
+      connect_timeout: 10,
+      read_timeout: 30
+    },
+    xunfei_super_tts: {
+      app_id: '',
+      api_key: '',
+      api_secret: '',
+      ws_url: 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6',
+      voice: 'x6_lingxiaoxue_pro',
+      audio_encoding: 'raw',
+      sample_rate: 24000,
+      speed: 50,
+      volume: 50,
+      pitch: 50,
+      bgs: 0,
+      reg: 0,
+      rdn: 0,
+      rhy: 0,
+      oral_level: 'mid',
+      spark_assist: 1,
+      stop_split: 0,
+      remain: 0,
+      frame_duration: 60,
+      connect_timeout: 10,
+      read_timeout: 30
     },
     indextts_vllm: {
       api_url: 'http://127.0.0.1:7860',

@@ -350,6 +350,7 @@ const ttsForm = reactive({
   name: '默认TTS',
   config_id: 'minimax_default',
   provider: 'minimax',
+  double_stream: false,
   qwen_tts: {
     api_key: '',
     api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
@@ -393,6 +394,47 @@ const ttsForm = reactive({
     stream: true,
     frame_duration: 60
   },
+  xunfei: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://tts-api.xfyun.cn/v2/tts',
+    voice: 'xiaoyan',
+    audio_encoding: 'raw',
+    sample_rate: 16000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    tte: 'UTF8',
+    reg: 0,
+    rdn: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
+  },
+  xunfei_super_tts: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6',
+    voice: 'x6_lingxiaoxue_pro',
+    audio_encoding: 'raw',
+    sample_rate: 24000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    bgs: 0,
+    reg: 0,
+    rdn: 0,
+    rhy: 0,
+    oral_level: 'mid',
+    spark_assist: 1,
+    stop_split: 0,
+    remain: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
+  },
   zhipu: {
     api_key: '',
     api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
@@ -428,6 +470,16 @@ const ttsFormRules = {
   'doubao_ws.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
   'doubao_ws.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
   'doubao_ws.ws_host': [{ required: true, message: '请输入WebSocket主机', trigger: 'blur' }],
+  'xunfei.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
+  'xunfei_super_tts.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei_super_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei_super_tts.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei_super_tts.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei_super_tts.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
   'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
 }
@@ -829,6 +881,8 @@ async function loadTtsIfExists() {
     else if (p === 'edge_offline') Object.assign(ttsForm.edge_offline, data)
     else if (p === 'aliyun_qwen') Object.assign(ttsForm.qwen_tts, data)
     else if (p === 'openai') Object.assign(ttsForm.openai, data)
+    else if (p === 'xunfei') Object.assign(ttsForm.xunfei, data)
+    else if (p === 'xunfei_super_tts') Object.assign(ttsForm.xunfei_super_tts, data)
     else if (p === 'zhipu') Object.assign(ttsForm.zhipu, data)
     else if (p === 'minimax') Object.assign(ttsForm.minimax, data)
   } catch (_) {}
@@ -1106,7 +1160,7 @@ async function loadTtsVoiceOptions(provider) {
     voiceOptions.value = []
     return
   }
-  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai']
+  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai', 'xunfei_super_tts']
   if (!providersWithVoices.includes(provider)) {
     voiceOptions.value = []
     return

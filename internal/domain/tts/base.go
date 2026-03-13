@@ -14,7 +14,10 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/tts/minimax"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/openai"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/qwen"
+	"xiaozhi-esp32-server-golang/internal/domain/tts/streaming"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/xiaozhi"
+	"xiaozhi-esp32-server-golang/internal/domain/tts/xunfei"
+	"xiaozhi-esp32-server-golang/internal/domain/tts/xunfei_super_tts"
 	"xiaozhi-esp32-server-golang/internal/domain/tts/zhipu"
 )
 
@@ -22,6 +25,11 @@ import (
 type BaseTTSProvider interface {
 	TextToSpeech(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) ([][]byte, error)
 	TextToSpeechStream(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) (outputChan chan []byte, err error)
+}
+
+// DualStreamProvider TTS 输入与输出均为流式的可选接口：边收文本边合成输出。Provider 若支持则实现此接口。
+type DualStreamProvider interface {
+	StreamingSynthesize(ctx context.Context, textChan <-chan string, sampleRate int, channels int, frameDuration int) (outputChan chan streaming.SynthesisEvent, err error)
 }
 
 // 完整TTS提供者接口（包含Context方法）
@@ -64,6 +72,10 @@ func GetTTSProvider(providerName string, config map[string]interface{}) (TTSProv
 		baseProvider = edge_offline.NewEdgeOfflineTTSProvider(config)
 	case constants.TtsTypeXiaozhi:
 		baseProvider = xiaozhi.NewXiaozhiProvider(config)
+	case constants.TtsTypeXunfei:
+		baseProvider = xunfei.NewXunfeiTTSProvider(config)
+	case constants.TtsTypeXunfeiSuper:
+		baseProvider = xunfei_super_tts.NewXunfeiSuperTTSProvider(config)
 	case constants.TtsTypeOpenAI:
 		baseProvider = openai.NewOpenAITTSProvider(config)
 	case constants.TtsTypeZhipu:
