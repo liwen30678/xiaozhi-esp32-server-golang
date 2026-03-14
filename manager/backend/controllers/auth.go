@@ -46,7 +46,7 @@ func (ac *AuthController) Login(c *gin.Context) {
 			log.Printf("[Login] 找到用户: ID=%d, Username=%s, Role=%s, Email=%s", user.ID, user.Username, user.Role, user.Email)
 			log.Printf("[Login] 数据库中密码哈希长度: %d, 哈希前缀: %s", len(user.Password), user.Password[:10])
 			log.Printf("[Login] 开始bcrypt密码比较验证")
-			
+
 			if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err == nil {
 				log.Printf("[Login] ✅ 密码验证成功 - 用户: %s", req.Username)
 				token, err := middleware.GenerateToken(user.ID, user.Username, user.Role)
@@ -130,7 +130,12 @@ func (ac *AuthController) Register(c *gin.Context) {
 		Role:     "user",
 	}
 
-	if err := ac.DB.Create(&user).Error; err != nil {
+	if err := ac.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&user).Error; err != nil {
+			return err
+		}
+		return initUserVoiceCloneQuotas(tx, user.ID, 0)
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建用户失败"})
 		return
 	}
@@ -149,14 +154,14 @@ func (ac *AuthController) Register(c *gin.Context) {
 // 获取当前用户信息
 func (ac *AuthController) GetProfile(c *gin.Context) {
 	log.Printf("[GetProfile] 开始处理获取用户信息请求, 客户端IP: %s", c.ClientIP())
-	
+
 	userID, exists := c.Get("user_id")
 	if !exists {
 		log.Printf("[GetProfile] ❌ 无法获取用户ID，认证中间件可能未正确设置")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "认证信息缺失"})
 		return
 	}
-	
+
 	log.Printf("[GetProfile] 从上下文获取用户ID: %v", userID)
 
 	var user models.User

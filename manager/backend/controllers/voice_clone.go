@@ -848,8 +848,8 @@ func (vcc *VoiceCloneController) consumeVoiceCloneQuota(tx *gorm.DB, userID uint
 	err := tx.Where("user_id = ? AND tts_config_id = ?", userID, ttsConfigID).First(&quota).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// 未配置额度时默认不限制，兼容历史行为
-			return nil
+			// 未配置额度记录时默认禁止复刻，需管理员先分配额度
+			return errVoiceCloneQuotaExceeded
 		}
 		return err
 	}
