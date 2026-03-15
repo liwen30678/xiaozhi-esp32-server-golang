@@ -94,6 +94,7 @@ func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, 
 	}
 
 	s.hookHub = GlobalHookHub()
+	ensureStatisticPluginRegistered()
 	s.asrManager = NewASRManager(clientState, serverTransport)
 	s.asrManager.session = s // 设置 session 引用
 	s.ttsManager = NewTTSManager(clientState, serverTransport, s)
