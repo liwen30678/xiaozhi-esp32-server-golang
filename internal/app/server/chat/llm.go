@@ -16,6 +16,7 @@ import (
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
+	domainhooks "xiaozhi-esp32-server-golang/internal/domain/hooks"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
@@ -249,12 +250,14 @@ func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMess
 			strFullText := fullText.String()
 			if l.session != nil && l.session.hookHub != nil {
 				hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
-				hookOut, stop, hookErr := l.session.hookHub.RunLLMOutput(hctx, LLMOutputData{FullText: strFullText, Err: err})
+				payload, stop, hookErr := l.session.hookHub.Emit(domainhooks.EventChatLLMOutput, hctx, LLMOutputData{FullText: strFullText, Err: err})
 				if hookErr != nil {
 					log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
 				}
-				strFullText = hookOut.FullText
-				err = hookOut.Err
+				if hookOut, ok := payload.(LLMOutputData); ok {
+					strFullText = hookOut.FullText
+					err = hookOut.Err
+				}
 				if stop {
 					log.Infof("LLM_OUTPUT hook 请求停止当前流程")
 					return
@@ -363,12 +366,14 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 	strFullText := fullText.String()
 	if l.session != nil && l.session.hookHub != nil {
 		hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
-		hookOut, stop, hookErr := l.session.hookHub.RunLLMOutput(hctx, LLMOutputData{FullText: strFullText, Err: err})
+		payload, stop, hookErr := l.session.hookHub.Emit(domainhooks.EventChatLLMOutput, hctx, LLMOutputData{FullText: strFullText, Err: err})
 		if hookErr != nil {
 			log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
 		}
-		strFullText = hookOut.FullText
-		err = hookOut.Err
+		if hookOut, ok := payload.(LLMOutputData); ok {
+			strFullText = hookOut.FullText
+			err = hookOut.Err
+		}
 		if stop {
 			log.Infof("LLM_OUTPUT hook 请求停止当前流程")
 			return ok, err
@@ -1093,7 +1098,7 @@ func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Messa
 
 	if l.session != nil && l.session.hookHub != nil {
 		hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
-		hookOut, stop, hookErr := l.session.hookHub.RunLLMInput(hctx, LLMInputData{
+		payload, stop, hookErr := l.session.hookHub.Emit(domainhooks.EventChatLLMInput, hctx, LLMInputData{
 			UserMessage:     userMessage,
 			RequestMessages: requestMessages,
 			Tools:           einoTools,
@@ -1101,9 +1106,11 @@ func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Messa
 		if hookErr != nil {
 			log.Warnf("LLM_INPUT hook 执行失败: %v", hookErr)
 		}
-		userMessage = hookOut.UserMessage
-		requestMessages = hookOut.RequestMessages
-		einoTools = hookOut.Tools
+		if hookOut, ok := payload.(LLMInputData); ok {
+			userMessage = hookOut.UserMessage
+			requestMessages = hookOut.RequestMessages
+			einoTools = hookOut.Tools
+		}
 		if stop {
 			log.Infof("LLM_INPUT hook 请求停止当前流程")
 			return nil

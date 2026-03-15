@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	domainhooks "xiaozhi-esp32-server-golang/internal/domain/hooks"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/tts"
 	"xiaozhi-esp32-server-golang/internal/pool"
@@ -193,7 +194,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 			case AudioQueueKindTtsStart:
 				if t.session != nil && t.session.hookHub != nil {
 					hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
-					_, stop, hookErr := t.session.hookHub.RunTTSOutputStart(hctx, TTSOutputStartData{})
+					_, stop, hookErr := t.session.hookHub.Emit(domainhooks.EventChatTTSOutputStart, hctx, TTSOutputStartData{})
 					if hookErr != nil {
 						log.Warnf("TTS_OUTPUT_START hook 执行失败: %v", hookErr)
 					}
@@ -237,7 +238,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				}
 				if t.session != nil && t.session.hookHub != nil {
 					hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
-					_, _, hookErr := t.session.hookHub.RunTTSOutputStop(hctx, TTSOutputStopData{})
+					_, _, hookErr := t.session.hookHub.Emit(domainhooks.EventChatTTSOutputStop, hctx, TTSOutputStopData{})
 					if hookErr != nil {
 						log.Warnf("TTS_OUTPUT_STOP hook 执行失败: %v", hookErr)
 					}
@@ -424,13 +425,15 @@ func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_com
 
 	if t.session != nil && t.session.hookHub != nil {
 		hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
-		hookOut, stop, hookErr := t.session.hookHub.RunTTSInput(hctx, TTSInputData{Text: llmResponse.Text, IsStart: llmResponse.IsStart, IsEnd: llmResponse.IsEnd})
+		payload, stop, hookErr := t.session.hookHub.Emit(domainhooks.EventChatTTSInput, hctx, TTSInputData{Text: llmResponse.Text, IsStart: llmResponse.IsStart, IsEnd: llmResponse.IsEnd})
 		if hookErr != nil {
 			log.Warnf("TTS_INPUT hook 执行失败: %v", hookErr)
 		}
-		llmResponse.Text = hookOut.Text
-		llmResponse.IsStart = hookOut.IsStart
-		llmResponse.IsEnd = hookOut.IsEnd
+		if hookOut, ok := payload.(TTSInputData); ok {
+			llmResponse.Text = hookOut.Text
+			llmResponse.IsStart = hookOut.IsStart
+			llmResponse.IsEnd = hookOut.IsEnd
+		}
 		if stop {
 			log.Infof("TTS_INPUT hook 请求停止当前流程")
 			return nil

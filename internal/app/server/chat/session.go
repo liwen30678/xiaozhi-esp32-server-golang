@@ -21,6 +21,7 @@ import (
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
+	domainhooks "xiaozhi-esp32-server-golang/internal/domain/hooks"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/mcp"
@@ -1524,7 +1525,7 @@ func (s *ChatSession) EmitMetricHook(ctx context.Context, stage MetricStage, ts 
 		return
 	}
 	hctx := HookContext{Ctx: ctx, Session: s, SessionID: s.clientState.SessionID, DeviceID: s.clientState.DeviceID}
-	_, stop, hookErr := s.hookHub.RunMetric(hctx, MetricData{Stage: stage, Ts: ts, Err: err})
+	_, stop, hookErr := s.hookHub.Emit(domainhooks.EventChatMetric, hctx, MetricData{Stage: stage, Ts: ts, Err: err})
 	if stop {
 		log.Debugf("METRIC hook returned stop (ignored): stage=%s", stage)
 	}

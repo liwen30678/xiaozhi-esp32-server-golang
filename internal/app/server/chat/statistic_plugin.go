@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	domainhooks "xiaozhi-esp32-server-golang/internal/domain/hooks"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
@@ -43,22 +44,27 @@ var (
 
 func ensureStatisticPluginRegistered() {
 	statPluginOnce.Do(func() {
-		AddMetricAsyncHook("statistic_plugin", 100, statPluginInst.onMetric)
+		GlobalHookHub().RegisterAsync(domainhooks.EventChatMetric, "statistic_plugin", 100, statPluginInst.onMetric)
 	})
 }
 
-func (p *statisticPlugin) onMetric(ctx HookContext, data MetricData) {
-	if ctx.SessionID == "" {
+func (p *statisticPlugin) onMetric(ctx domainhooks.Context, payload any) {
+	data, ok := payload.(MetricData)
+	if !ok {
+		return
+	}
+	sessionID, _ := ctx.Meta[domainhooks.MetaSessionID].(string)
+	if sessionID == "" {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	nowTs := time.Now().UnixMilli()
-	p.lastSeen[ctx.SessionID] = nowTs
+	p.lastSeen[sessionID] = nowTs
 	p.cleanupStale(nowTs)
 
-	tm := p.getOrCreateTurn(ctx.SessionID, data.Stage)
+	tm := p.getOrCreateTurn(sessionID, data.Stage)
 	switch data.Stage {
 	case MetricTurnStart:
 		tm.turnStartTs = data.Ts
@@ -78,8 +84,8 @@ func (p *statisticPlugin) onMetric(ctx HookContext, data MetricData) {
 		tm.ttsFirstFrameTs = data.Ts
 	case MetricTtsStop:
 		tm.ttsStopTs = data.Ts
-		p.logTurnMetric(ctx.SessionID, tm)
-		delete(p.turns, ctx.SessionID)
+		p.logTurnMetric(sessionID, tm)
+		delete(p.turns, sessionID)
 	}
 }
 
