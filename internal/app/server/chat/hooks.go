@@ -208,8 +208,8 @@ func emitAsyncHooks[T any](asyncTasks chan func(), hooks []namedAsyncHook[T], hc
 
 func (h *HookHub) RunASROutput(hctx HookContext, in ASROutputData) (ASROutputData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[ASROutputData](nil), h.asrOutputSync...)
-	asyncHooks := append([]namedAsyncHook[ASROutputData](nil), h.asrOutputAsync...)
+	syncHooks := h.asrOutputSync
+	asyncHooks := h.asrOutputAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -218,8 +218,8 @@ func (h *HookHub) RunASROutput(hctx HookContext, in ASROutputData) (ASROutputDat
 
 func (h *HookHub) RunLLMInput(hctx HookContext, in LLMInputData) (LLMInputData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[LLMInputData](nil), h.llmInputSync...)
-	asyncHooks := append([]namedAsyncHook[LLMInputData](nil), h.llmInputAsync...)
+	syncHooks := h.llmInputSync
+	asyncHooks := h.llmInputAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -228,8 +228,8 @@ func (h *HookHub) RunLLMInput(hctx HookContext, in LLMInputData) (LLMInputData, 
 
 func (h *HookHub) RunLLMOutput(hctx HookContext, in LLMOutputData) (LLMOutputData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[LLMOutputData](nil), h.llmOutputSync...)
-	asyncHooks := append([]namedAsyncHook[LLMOutputData](nil), h.llmOutputAsync...)
+	syncHooks := h.llmOutputSync
+	asyncHooks := h.llmOutputAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -238,8 +238,8 @@ func (h *HookHub) RunLLMOutput(hctx HookContext, in LLMOutputData) (LLMOutputDat
 
 func (h *HookHub) RunTTSInput(hctx HookContext, in TTSInputData) (TTSInputData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[TTSInputData](nil), h.ttsInputSync...)
-	asyncHooks := append([]namedAsyncHook[TTSInputData](nil), h.ttsInputAsync...)
+	syncHooks := h.ttsInputSync
+	asyncHooks := h.ttsInputAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -248,8 +248,8 @@ func (h *HookHub) RunTTSInput(hctx HookContext, in TTSInputData) (TTSInputData, 
 
 func (h *HookHub) RunTTSOutputStart(hctx HookContext, in TTSOutputStartData) (TTSOutputStartData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[TTSOutputStartData](nil), h.ttsOutputStartSync...)
-	asyncHooks := append([]namedAsyncHook[TTSOutputStartData](nil), h.ttsOutputStartAsync...)
+	syncHooks := h.ttsOutputStartSync
+	asyncHooks := h.ttsOutputStartAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -258,8 +258,8 @@ func (h *HookHub) RunTTSOutputStart(hctx HookContext, in TTSOutputStartData) (TT
 
 func (h *HookHub) RunTTSOutputStop(hctx HookContext, in TTSOutputStopData) (TTSOutputStopData, bool, error) {
 	h.mu.RLock()
-	syncHooks := append([]namedSyncHook[TTSOutputStopData](nil), h.ttsOutputStopSync...)
-	asyncHooks := append([]namedAsyncHook[TTSOutputStopData](nil), h.ttsOutputStopAsync...)
+	syncHooks := h.ttsOutputStopSync
+	asyncHooks := h.ttsOutputStopAsync
 	h.mu.RUnlock()
 	out, stop, err := runSyncHooks(syncHooks, hctx, in)
 	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
@@ -277,72 +277,112 @@ func sortAsync[T any](hooks []namedAsyncHook[T]) {
 func AddASROutputSyncHook(name string, priority int, hook ASROutputSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.asrOutputSync = append(globalHookHub.asrOutputSync, namedSyncHook[ASROutputData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.asrOutputSync)
+	globalHookHub.asrOutputSync = appendSortedSyncHook(
+		globalHookHub.asrOutputSync,
+		namedSyncHook[ASROutputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddASROutputAsyncHook(name string, priority int, hook ASROutputAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.asrOutputAsync = append(globalHookHub.asrOutputAsync, namedAsyncHook[ASROutputData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.asrOutputAsync)
+	globalHookHub.asrOutputAsync = appendSortedAsyncHook(
+		globalHookHub.asrOutputAsync,
+		namedAsyncHook[ASROutputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddLLMInputSyncHook(name string, priority int, hook LLMInputSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmInputSync = append(globalHookHub.llmInputSync, namedSyncHook[LLMInputData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.llmInputSync)
+	globalHookHub.llmInputSync = appendSortedSyncHook(
+		globalHookHub.llmInputSync,
+		namedSyncHook[LLMInputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddLLMInputAsyncHook(name string, priority int, hook LLMInputAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmInputAsync = append(globalHookHub.llmInputAsync, namedAsyncHook[LLMInputData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.llmInputAsync)
+	globalHookHub.llmInputAsync = appendSortedAsyncHook(
+		globalHookHub.llmInputAsync,
+		namedAsyncHook[LLMInputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddLLMOutputSyncHook(name string, priority int, hook LLMOutputSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmOutputSync = append(globalHookHub.llmOutputSync, namedSyncHook[LLMOutputData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.llmOutputSync)
+	globalHookHub.llmOutputSync = appendSortedSyncHook(
+		globalHookHub.llmOutputSync,
+		namedSyncHook[LLMOutputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddLLMOutputAsyncHook(name string, priority int, hook LLMOutputAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmOutputAsync = append(globalHookHub.llmOutputAsync, namedAsyncHook[LLMOutputData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.llmOutputAsync)
+	globalHookHub.llmOutputAsync = appendSortedAsyncHook(
+		globalHookHub.llmOutputAsync,
+		namedAsyncHook[LLMOutputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSInputSyncHook(name string, priority int, hook TTSInputSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsInputSync = append(globalHookHub.ttsInputSync, namedSyncHook[TTSInputData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.ttsInputSync)
+	globalHookHub.ttsInputSync = appendSortedSyncHook(
+		globalHookHub.ttsInputSync,
+		namedSyncHook[TTSInputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSInputAsyncHook(name string, priority int, hook TTSInputAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsInputAsync = append(globalHookHub.ttsInputAsync, namedAsyncHook[TTSInputData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.ttsInputAsync)
+	globalHookHub.ttsInputAsync = appendSortedAsyncHook(
+		globalHookHub.ttsInputAsync,
+		namedAsyncHook[TTSInputData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSOutputStartSyncHook(name string, priority int, hook TTSOutputStartSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStartSync = append(globalHookHub.ttsOutputStartSync, namedSyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.ttsOutputStartSync)
+	globalHookHub.ttsOutputStartSync = appendSortedSyncHook(
+		globalHookHub.ttsOutputStartSync,
+		namedSyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSOutputStartAsyncHook(name string, priority int, hook TTSOutputStartAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStartAsync = append(globalHookHub.ttsOutputStartAsync, namedAsyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.ttsOutputStartAsync)
+	globalHookHub.ttsOutputStartAsync = appendSortedAsyncHook(
+		globalHookHub.ttsOutputStartAsync,
+		namedAsyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSOutputStopSyncHook(name string, priority int, hook TTSOutputStopSyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStopSync = append(globalHookHub.ttsOutputStopSync, namedSyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook})
-	sortSync(globalHookHub.ttsOutputStopSync)
+	globalHookHub.ttsOutputStopSync = appendSortedSyncHook(
+		globalHookHub.ttsOutputStopSync,
+		namedSyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook},
+	)
 }
 func AddTTSOutputStopAsyncHook(name string, priority int, hook TTSOutputStopAsyncHook) {
 	globalHookHub.mu.Lock()
 	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStopAsync = append(globalHookHub.ttsOutputStopAsync, namedAsyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook})
-	sortAsync(globalHookHub.ttsOutputStopAsync)
+	globalHookHub.ttsOutputStopAsync = appendSortedAsyncHook(
+		globalHookHub.ttsOutputStopAsync,
+		namedAsyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook},
+	)
+}
+
+func appendSortedSyncHook[T any](src []namedSyncHook[T], item namedSyncHook[T]) []namedSyncHook[T] {
+	dst := make([]namedSyncHook[T], 0, len(src)+1)
+	dst = append(dst, src...)
+	dst = append(dst, item)
+	sortSync(dst)
+	return dst
+}
+
+func appendSortedAsyncHook[T any](src []namedAsyncHook[T], item namedAsyncHook[T]) []namedAsyncHook[T] {
+	dst := make([]namedAsyncHook[T], 0, len(src)+1)
+	dst = append(dst, src...)
+	dst = append(dst, item)
+	sortAsync(dst)
+	return dst
 }
