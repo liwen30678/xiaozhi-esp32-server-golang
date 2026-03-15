@@ -3,12 +3,20 @@ package chat
 import (
 	"context"
 	"fmt"
-	"runtime"
-	"sort"
-	"sync"
 
 	"github.com/cloudwego/eino/schema"
+	domainhooks "xiaozhi-esp32-server-golang/internal/domain/hooks"
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
+)
+
+const (
+	eventASROutput      = "chat.asr.output"
+	eventLLMInput       = "chat.llm.input"
+	eventLLMOutput      = "chat.llm.output"
+	eventTTSInput       = "chat.tts.input"
+	eventTTSOutputStart = "chat.tts.output.start"
+	eventTTSOutputStop  = "chat.tts.output.stop"
+	eventMetric         = "chat.metric"
 )
 
 type HookContext struct {
@@ -87,61 +95,12 @@ type TTSOutputStopAsyncHook func(HookContext, TTSOutputStopData)
 type MetricSyncHook func(HookContext, MetricData) (MetricData, bool, error)
 type MetricAsyncHook func(HookContext, MetricData)
 
-type namedSyncHook[T any] struct {
-	name     string
-	priority int
-	hook     func(HookContext, T) (T, bool, error)
-}
-
-type namedAsyncHook[T any] struct {
-	name     string
-	priority int
-	hook     func(HookContext, T)
-}
-
 type HookHub struct {
-	mu sync.RWMutex
-
-	asrOutputSync  []namedSyncHook[ASROutputData]
-	asrOutputAsync []namedAsyncHook[ASROutputData]
-
-	llmInputSync  []namedSyncHook[LLMInputData]
-	llmInputAsync []namedAsyncHook[LLMInputData]
-
-	llmOutputSync  []namedSyncHook[LLMOutputData]
-	llmOutputAsync []namedAsyncHook[LLMOutputData]
-
-	ttsInputSync  []namedSyncHook[TTSInputData]
-	ttsInputAsync []namedAsyncHook[TTSInputData]
-
-	ttsOutputStartSync  []namedSyncHook[TTSOutputStartData]
-	ttsOutputStartAsync []namedAsyncHook[TTSOutputStartData]
-
-	ttsOutputStopSync  []namedSyncHook[TTSOutputStopData]
-	ttsOutputStopAsync []namedAsyncHook[TTSOutputStopData]
-
-	metricSync  []namedSyncHook[MetricData]
-	metricAsync []namedAsyncHook[MetricData]
-
-	asyncTasks chan func()
+	hub *domainhooks.Hub
 }
 
 func NewHookHub() *HookHub {
-	h := &HookHub{asyncTasks: make(chan func(), 256)}
-	workers := runtime.NumCPU() / 2
-	if workers < 2 {
-		workers = 2
-	}
-	for i := 0; i < workers; i++ {
-		go func() {
-			for task := range h.asyncTasks {
-				if task != nil {
-					task()
-				}
-			}
-		}()
-	}
-	return h
+	return &HookHub{hub: domainhooks.NewHub()}
 }
 
 var globalHookHub = NewHookHub()
@@ -214,237 +173,210 @@ func AddPluginHooks(p PluginHooks) {
 	}
 }
 
-func runSyncHooks[T any](hooks []namedSyncHook[T], hctx HookContext, data T) (T, bool, error) {
-	for _, hk := range hooks {
-		out, stop, err := hk.hook(hctx, data)
-		if err != nil {
-			return data, stop, fmt.Errorf("hook %s failed: %w", hk.name, err)
-		}
-		data = out
-		if stop {
-			return data, true, nil
-		}
+func toDomainCtx(ctx HookContext) domainhooks.Context {
+	return domainhooks.Context{
+		Ctx: ctx.Ctx,
+		Meta: map[string]any{
+			"session":    ctx.Session,
+			"session_id": ctx.SessionID,
+			"device_id":  ctx.DeviceID,
+		},
 	}
-	return data, false, nil
 }
 
-func emitAsyncHooks[T any](asyncTasks chan func(), hooks []namedAsyncHook[T], hctx HookContext, data T) {
-	for _, hk := range hooks {
-		hookFn := hk.hook
-		d := data
-		c := hctx
-		select {
-		case asyncTasks <- func() { hookFn(c, d) }:
-		default:
-		}
+func fromDomainCtx(ctx domainhooks.Context) HookContext {
+	hctx := HookContext{Ctx: ctx.Ctx}
+	if ctx.Meta == nil {
+		return hctx
 	}
+	if s, ok := ctx.Meta["session"].(*ChatSession); ok {
+		hctx.Session = s
+	}
+	if sid, ok := ctx.Meta["session_id"].(string); ok {
+		hctx.SessionID = sid
+	}
+	if did, ok := ctx.Meta["device_id"].(string); ok {
+		hctx.DeviceID = did
+	}
+	return hctx
+}
+
+func emitTyped[T any](h *HookHub, event string, hctx HookContext, in T) (T, bool, error) {
+	out, stop, err := h.hub.Emit(event, toDomainCtx(hctx), in)
+	if err != nil {
+		return in, stop, err
+	}
+	typed, ok := out.(T)
+	if !ok {
+		return in, stop, fmt.Errorf("hook output type mismatch for event %s", event)
+	}
+	return typed, stop, nil
 }
 
 func (h *HookHub) RunASROutput(hctx HookContext, in ASROutputData) (ASROutputData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.asrOutputSync
-	asyncHooks := h.asrOutputAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventASROutput, hctx, in)
 }
 
 func (h *HookHub) RunLLMInput(hctx HookContext, in LLMInputData) (LLMInputData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.llmInputSync
-	asyncHooks := h.llmInputAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventLLMInput, hctx, in)
 }
 
 func (h *HookHub) RunLLMOutput(hctx HookContext, in LLMOutputData) (LLMOutputData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.llmOutputSync
-	asyncHooks := h.llmOutputAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventLLMOutput, hctx, in)
 }
 
 func (h *HookHub) RunTTSInput(hctx HookContext, in TTSInputData) (TTSInputData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.ttsInputSync
-	asyncHooks := h.ttsInputAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventTTSInput, hctx, in)
 }
 
 func (h *HookHub) RunTTSOutputStart(hctx HookContext, in TTSOutputStartData) (TTSOutputStartData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.ttsOutputStartSync
-	asyncHooks := h.ttsOutputStartAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventTTSOutputStart, hctx, in)
 }
 
 func (h *HookHub) RunTTSOutputStop(hctx HookContext, in TTSOutputStopData) (TTSOutputStopData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.ttsOutputStopSync
-	asyncHooks := h.ttsOutputStopAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
+	return emitTyped(h, eventTTSOutputStop, hctx, in)
 }
 
 func (h *HookHub) RunMetric(hctx HookContext, in MetricData) (MetricData, bool, error) {
-	h.mu.RLock()
-	syncHooks := h.metricSync
-	asyncHooks := h.metricAsync
-	h.mu.RUnlock()
-	out, stop, err := runSyncHooks(syncHooks, hctx, in)
-	emitAsyncHooks(h.asyncTasks, asyncHooks, hctx, out)
-	return out, stop, err
-}
-
-func sortSync[T any](hooks []namedSyncHook[T]) {
-	sort.SliceStable(hooks, func(i, j int) bool { return hooks[i].priority < hooks[j].priority })
-}
-
-func sortAsync[T any](hooks []namedAsyncHook[T]) {
-	sort.SliceStable(hooks, func(i, j int) bool { return hooks[i].priority < hooks[j].priority })
+	return emitTyped(h, eventMetric, hctx, in)
 }
 
 func AddASROutputSyncHook(name string, priority int, hook ASROutputSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.asrOutputSync = appendSortedSyncHook(
-		globalHookHub.asrOutputSync,
-		namedSyncHook[ASROutputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventASROutput, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(ASROutputData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid ASR_OUTPUT payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddASROutputAsyncHook(name string, priority int, hook ASROutputAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.asrOutputAsync = appendSortedAsyncHook(
-		globalHookHub.asrOutputAsync,
-		namedAsyncHook[ASROutputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventASROutput, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(ASROutputData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddLLMInputSyncHook(name string, priority int, hook LLMInputSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmInputSync = appendSortedSyncHook(
-		globalHookHub.llmInputSync,
-		namedSyncHook[LLMInputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventLLMInput, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(LLMInputData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid LLM_INPUT payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddLLMInputAsyncHook(name string, priority int, hook LLMInputAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmInputAsync = appendSortedAsyncHook(
-		globalHookHub.llmInputAsync,
-		namedAsyncHook[LLMInputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventLLMInput, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(LLMInputData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddLLMOutputSyncHook(name string, priority int, hook LLMOutputSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmOutputSync = appendSortedSyncHook(
-		globalHookHub.llmOutputSync,
-		namedSyncHook[LLMOutputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventLLMOutput, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(LLMOutputData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid LLM_OUTPUT payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddLLMOutputAsyncHook(name string, priority int, hook LLMOutputAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.llmOutputAsync = appendSortedAsyncHook(
-		globalHookHub.llmOutputAsync,
-		namedAsyncHook[LLMOutputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventLLMOutput, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(LLMOutputData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSInputSyncHook(name string, priority int, hook TTSInputSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsInputSync = appendSortedSyncHook(
-		globalHookHub.ttsInputSync,
-		namedSyncHook[TTSInputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventTTSInput, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(TTSInputData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid TTS_INPUT payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSInputAsyncHook(name string, priority int, hook TTSInputAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsInputAsync = appendSortedAsyncHook(
-		globalHookHub.ttsInputAsync,
-		namedAsyncHook[TTSInputData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventTTSInput, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(TTSInputData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSOutputStartSyncHook(name string, priority int, hook TTSOutputStartSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStartSync = appendSortedSyncHook(
-		globalHookHub.ttsOutputStartSync,
-		namedSyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventTTSOutputStart, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(TTSOutputStartData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid TTS_OUTPUT_START payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSOutputStartAsyncHook(name string, priority int, hook TTSOutputStartAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStartAsync = appendSortedAsyncHook(
-		globalHookHub.ttsOutputStartAsync,
-		namedAsyncHook[TTSOutputStartData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventTTSOutputStart, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(TTSOutputStartData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSOutputStopSyncHook(name string, priority int, hook TTSOutputStopSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStopSync = appendSortedSyncHook(
-		globalHookHub.ttsOutputStopSync,
-		namedSyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventTTSOutputStop, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(TTSOutputStopData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid TTS_OUTPUT_STOP payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
+
 func AddTTSOutputStopAsyncHook(name string, priority int, hook TTSOutputStopAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.ttsOutputStopAsync = appendSortedAsyncHook(
-		globalHookHub.ttsOutputStopAsync,
-		namedAsyncHook[TTSOutputStopData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterAsync(eventTTSOutputStop, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(TTSOutputStopData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
 
 func AddMetricSyncHook(name string, priority int, hook MetricSyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.metricSync = appendSortedSyncHook(
-		globalHookHub.metricSync,
-		namedSyncHook[MetricData]{name: name, priority: priority, hook: hook},
-	)
+	globalHookHub.hub.RegisterSync(eventMetric, name, priority, func(ctx domainhooks.Context, payload any) (any, bool, error) {
+		in, ok := payload.(MetricData)
+		if !ok {
+			return payload, false, fmt.Errorf("invalid METRIC payload")
+		}
+		return hook(fromDomainCtx(ctx), in)
+	})
 }
 
 func AddMetricAsyncHook(name string, priority int, hook MetricAsyncHook) {
-	globalHookHub.mu.Lock()
-	defer globalHookHub.mu.Unlock()
-	globalHookHub.metricAsync = appendSortedAsyncHook(
-		globalHookHub.metricAsync,
-		namedAsyncHook[MetricData]{name: name, priority: priority, hook: hook},
-	)
-}
-
-func appendSortedSyncHook[T any](src []namedSyncHook[T], item namedSyncHook[T]) []namedSyncHook[T] {
-	dst := make([]namedSyncHook[T], 0, len(src)+1)
-	dst = append(dst, src...)
-	dst = append(dst, item)
-	sortSync(dst)
-	return dst
-}
-
-func appendSortedAsyncHook[T any](src []namedAsyncHook[T], item namedAsyncHook[T]) []namedAsyncHook[T] {
-	dst := make([]namedAsyncHook[T], 0, len(src)+1)
-	dst = append(dst, src...)
-	dst = append(dst, item)
-	sortAsync(dst)
-	return dst
+	globalHookHub.hub.RegisterAsync(eventMetric, name, priority, func(ctx domainhooks.Context, payload any) {
+		in, ok := payload.(MetricData)
+		if !ok {
+			return
+		}
+		hook(fromDomainCtx(ctx), in)
+	})
 }
