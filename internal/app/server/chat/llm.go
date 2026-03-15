@@ -76,6 +76,7 @@ type llmResponseChannelOptions struct {
 
 type LLMManager struct {
 	clientState     *ClientState
+	session         *ChatSession
 	serverTransport *ServerTransport
 	ttsManager      *TTSManager
 
@@ -89,9 +90,10 @@ type LLMManager struct {
 	lastMessageIDMu sync.RWMutex // 保护 lastMessageID 的并发访问
 }
 
-func NewLLMManager(clientState *ClientState, serverTransport *ServerTransport, ttsManager *TTSManager) *LLMManager {
+func NewLLMManager(clientState *ClientState, serverTransport *ServerTransport, ttsManager *TTSManager, session *ChatSession) *LLMManager {
 	return &LLMManager{
 		clientState:      clientState,
+		session:          session,
 		serverTransport:  serverTransport,
 		ttsManager:       ttsManager,
 		llmResponseQueue: util.NewQueue[LLMResponseChannelItem](10),
@@ -240,6 +242,22 @@ func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMess
 			l.ttsManager.EnqueueTtsStart(ctx)
 		}
 		onEndFunc = func(err error, args ...any) {
+			l.clientState.MarkLlmEnd()
+			strFullText := fullText.String()
+			if l.session != nil && l.session.hookHub != nil {
+				hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
+				hookOut, stop, hookErr := l.session.hookHub.RunLLMOutput(hctx, LLMOutputData{FullText: strFullText, Err: err})
+				if hookErr != nil {
+					log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
+				}
+				strFullText = hookOut.FullText
+				err = hookOut.Err
+				if stop {
+					log.Infof("LLM_OUTPUT hook 请求停止当前流程")
+					return
+				}
+			}
+
 			// 非 realtime 模式下，由 runSenderLoop 统一发送 TtsStop
 			if !l.clientState.IsRealTime() {
 				l.ttsManager.EnqueueTtsStop(ctx)
@@ -247,7 +265,6 @@ func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMess
 
 			// 从 closure 中获取 fullText
 			audioData := l.ttsManager.GetAndClearAudioHistory()
-			strFullText := fullText.String()
 
 			// 计算总音频大小（所有帧的字节数之和）
 			audioSize := 0
@@ -336,6 +353,23 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 	}
 
 	ok, err := l.handleLLMResponse(ctx, userMessage, llmResponseChannel)
+	l.clientState.MarkLlmEnd()
+	strFullText := fullText.String()
+	if l.session != nil && l.session.hookHub != nil {
+		hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
+		hookOut, stop, hookErr := l.session.hookHub.RunLLMOutput(hctx, LLMOutputData{FullText: strFullText, Err: err})
+		if hookErr != nil {
+			log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
+		}
+		strFullText = hookOut.FullText
+		err = hookOut.Err
+		if stop {
+			log.Infof("LLM_OUTPUT hook 请求停止当前流程")
+			return ok, err
+		}
+	}
+	fullText.Reset()
+	fullText.WriteString(strFullText)
 
 	if needSendTtsCmd {
 		if !l.clientState.IsRealTime() {
@@ -396,6 +430,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 	// toolCalls 使用局部变量（内部工具调用逻辑，不涉及聊天历史）
 	var toolCalls []schema.ToolCall
 	assistantSaved := false
+	llmFirstTokenMarked := false
 
 	saveInterruptedAssistant := func() {
 		if assistantSaved {
@@ -454,6 +489,10 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 				}
 
 				if strings.TrimSpace(llmResponse.Text) != "" {
+					if !llmFirstTokenMarked {
+						state.MarkLlmFirstToken()
+						llmFirstTokenMarked = true
+					}
 					// 处理文本内容响应
 					if err := l.ttsManager.handleTextResponse(ctx, llmResponse, true); err != nil {
 						return true, err
@@ -1042,6 +1081,27 @@ func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Messa
 
 	//组装历史消息和当前用户的消息
 	requestMessages := l.GetMessages(ctx, userMessage, MaxMessageCount, speakerResult)
+
+	if l.session != nil && l.session.hookHub != nil {
+		hctx := HookContext{Ctx: ctx, Session: l.session, SessionID: l.clientState.SessionID, DeviceID: l.clientState.DeviceID}
+		hookOut, stop, hookErr := l.session.hookHub.RunLLMInput(hctx, LLMInputData{
+			UserMessage:     userMessage,
+			RequestMessages: requestMessages,
+			Tools:           einoTools,
+		})
+		if hookErr != nil {
+			log.Warnf("LLM_INPUT hook 执行失败: %v", hookErr)
+		}
+		userMessage = hookOut.UserMessage
+		requestMessages = hookOut.RequestMessages
+		einoTools = hookOut.Tools
+		if stop {
+			log.Infof("LLM_INPUT hook 请求停止当前流程")
+			return nil
+		}
+	}
+
+	clientState.SetStartLlmTs()
 	clientState.SetStatus(ClientStatusLLMStart)
 
 	// 调用内部方法处理 LLM 响应，资源在方法内部管理

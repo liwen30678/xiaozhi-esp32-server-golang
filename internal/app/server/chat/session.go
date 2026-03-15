@@ -75,6 +75,8 @@ type ChatSession struct {
 
 	openClawWarmupMu sync.Mutex
 	openClawWarmup   *openClawWarmupTask
+
+	hookHub *HookHub
 }
 
 type ChatSessionOption func(*ChatSession)
@@ -91,10 +93,11 @@ func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, 
 		opt(s)
 	}
 
+	s.hookHub = GlobalHookHub()
 	s.asrManager = NewASRManager(clientState, serverTransport)
 	s.asrManager.session = s // 设置 session 引用
-	s.ttsManager = NewTTSManager(clientState, serverTransport)
-	s.llmManager = NewLLMManager(clientState, serverTransport, s.ttsManager)
+	s.ttsManager = NewTTSManager(clientState, serverTransport, s)
+	s.llmManager = NewLLMManager(clientState, serverTransport, s.ttsManager, s)
 
 	// 如果启用声纹识别，创建声纹管理器
 	if clientState.IsSpeakerEnabled() {

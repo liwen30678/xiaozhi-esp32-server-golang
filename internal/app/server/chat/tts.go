@@ -56,6 +56,7 @@ type TTSManagerOption func(*TTSManager)
 
 type TTSManager struct {
 	clientState       *ClientState
+	session           *ChatSession
 	serverTransport   *ServerTransport
 	ttsQueue          *util.Queue[TTSQueueItem]
 	sessionAudioQueue chan AudioQueueElem // 会话级全局音频队列，兼容帧与控制消息
@@ -68,9 +69,10 @@ type TTSManager struct {
 }
 
 // NewTTSManager 只接受WithClientState
-func NewTTSManager(clientState *ClientState, serverTransport *ServerTransport, opts ...TTSManagerOption) *TTSManager {
+func NewTTSManager(clientState *ClientState, serverTransport *ServerTransport, session *ChatSession, opts ...TTSManagerOption) *TTSManager {
 	t := &TTSManager{
 		clientState:       clientState,
+		session:           session,
 		serverTransport:   serverTransport,
 		ttsQueue:          util.NewQueue[TTSQueueItem](10),
 		sessionAudioQueue: make(chan AudioQueueElem, SessionAudioQueueCap),
@@ -171,6 +173,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				currentSentenceFrames++
 				playbackTail = playbackTail.Add(frameDuration)
 				if needReportFirstFrame && totalFrames == 1 {
+					t.clientState.MarkTtsFirstFrame()
 					log.Debugf("从接收音频结束 asr->llm->tts首帧 整体 耗时: %d ms", t.clientState.GetAsrLlmTtsDuration())
 					needReportFirstFrame = false
 				}
@@ -185,6 +188,18 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 					elem.OnEnd(elem.Err)
 				}
 			case AudioQueueKindTtsStart:
+				if t.session != nil && t.session.hookHub != nil {
+					hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
+					_, stop, hookErr := t.session.hookHub.RunTTSOutputStart(hctx, TTSOutputStartData{})
+					if hookErr != nil {
+						log.Warnf("TTS_OUTPUT_START hook 执行失败: %v", hookErr)
+					}
+					if stop {
+						log.Infof("TTS_OUTPUT_START hook 请求停止当前流程")
+						continue
+					}
+				}
+				t.clientState.SetStartTtsTs()
 				if err := t.serverTransport.SendTtsStart(); err != nil {
 					log.Errorf("发送 TtsStart 失败: %v", err)
 				}
@@ -209,6 +224,14 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				time.Sleep(150 * time.Millisecond)
 				if err := t.serverTransport.SendTtsStop(); err != nil {
 					log.Errorf("发送 TtsStop 失败: %v", err)
+				}
+				t.clientState.MarkTtsStop()
+				if t.session != nil && t.session.hookHub != nil {
+					hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
+					_, _, hookErr := t.session.hookHub.RunTTSOutputStop(hctx, TTSOutputStopData{})
+					if hookErr != nil {
+						log.Warnf("TTS_OUTPUT_STOP hook 执行失败: %v", hookErr)
+					}
 				}
 				playbackTail = time.Time{}
 				totalFrames = 0
@@ -388,6 +411,21 @@ func (t *TTSManager) handleTts(ctx context.Context, generation uint64, llmRespon
 func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_common.LLMResponseStruct, isSync bool) error {
 	if strings.TrimSpace(llmResponse.Text) == "" {
 		return nil
+	}
+
+	if t.session != nil && t.session.hookHub != nil {
+		hctx := HookContext{Ctx: ctx, Session: t.session, SessionID: t.clientState.SessionID, DeviceID: t.clientState.DeviceID}
+		hookOut, stop, hookErr := t.session.hookHub.RunTTSInput(hctx, TTSInputData{Text: llmResponse.Text, IsStart: llmResponse.IsStart, IsEnd: llmResponse.IsEnd})
+		if hookErr != nil {
+			log.Warnf("TTS_INPUT hook 执行失败: %v", hookErr)
+		}
+		llmResponse.Text = hookOut.Text
+		llmResponse.IsStart = hookOut.IsStart
+		llmResponse.IsEnd = hookOut.IsEnd
+		if stop {
+			log.Infof("TTS_INPUT hook 请求停止当前流程")
+			return nil
+		}
 	}
 
 	ttsQueueItem := TTSQueueItem{ctx: ctx, llmResponse: llmResponse, generation: t.currentAudioGeneration()}

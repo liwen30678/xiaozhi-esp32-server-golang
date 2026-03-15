@@ -413,8 +413,6 @@ func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 	}
 
 	state.AsrResultChannel = asrResultChannel
-	// 设置ASR开始时间，用于统计识别耗时
-	state.SetStartAsrTs()
 	log.Debugf("重启ASR识别成功")
 	return nil
 }
@@ -539,6 +537,22 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 
 				// 获取暂存的声纹结果（带超时）
 				speakerResult := a.getSpeakerResult()
+				state.MarkAsrFirstText()
+				state.MarkAsrFinalText()
+
+				if a.session != nil && a.session.hookHub != nil {
+					hctx := HookContext{Ctx: ctx, Session: a.session, SessionID: state.SessionID, DeviceID: state.DeviceID}
+					hookOut, stop, hookErr := a.session.hookHub.RunASROutput(hctx, ASROutputData{Text: text, SpeakerResult: speakerResult})
+					if hookErr != nil {
+						log.Warnf("ASR_OUTPUT hook 执行失败: %v", hookErr)
+					}
+					text = hookOut.Text
+					speakerResult = hookOut.SpeakerResult
+					if stop {
+						log.Infof("ASR_OUTPUT hook 请求停止当前流程")
+						continue
+					}
+				}
 
 				// 添加到队列（迁移到 ASRManager 中处理）
 				if err := a.addAsrResultToQueue(text, speakerResult); err != nil {
