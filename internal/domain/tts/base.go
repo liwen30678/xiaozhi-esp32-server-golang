@@ -154,6 +154,15 @@ type ContextTTSAdapter struct {
 	Provider BaseTTSProvider
 }
 
+// StreamingSynthesize 代理到原始提供者的双流式合成接口
+func (a *ContextTTSAdapter) StreamingSynthesize(ctx context.Context, textChan <-chan string, sampleRate int, channels int, frameDuration int) (outputChan chan streaming.SynthesisEvent, err error) {
+	// 检查底层 Provider 是否支持双流式
+	if dsProvider, ok := a.Provider.(DualStreamProvider); ok {
+		return dsProvider.StreamingSynthesize(ctx, textChan, sampleRate, channels, frameDuration)
+	}
+	return nil, fmt.Errorf("底层 Provider 不支持双流式合成")
+}
+
 // TextToSpeech 代理到原始提供者
 func (a *ContextTTSAdapter) TextToSpeech(ctx context.Context, text string, sampleRate int, channels int, frameDuration int) ([][]byte, error) {
 	return a.Provider.TextToSpeech(ctx, text, sampleRate, channels, frameDuration)

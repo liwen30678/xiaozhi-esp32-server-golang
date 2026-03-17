@@ -275,18 +275,7 @@
     </template>
 
     <template v-if="model.provider === 'xunfei'">
-      <el-form-item label="应用ID" prop="xunfei.app_id">
-        <el-input v-model="model.xunfei.app_id" placeholder="请输入讯飞应用ID" />
-      </el-form-item>
-      <el-form-item label="API Key" prop="xunfei.api_key">
-        <el-input v-model="model.xunfei.api_key" placeholder="请输入API Key" type="password" show-password />
-      </el-form-item>
-      <el-form-item label="API Secret" prop="xunfei.api_secret">
-        <el-input v-model="model.xunfei.api_secret" placeholder="请输入API Secret" type="password" show-password />
-      </el-form-item>
-      <el-form-item label="WebSocket URL" prop="xunfei.ws_url">
-        <el-input v-model="model.xunfei.ws_url" placeholder="wss://tts-api.xfyun.cn/v2/tts" />
-      </el-form-item>
+      <XunfeiCommonConfig :model-value="model" prefix="xunfei" default-ws-url="wss://tts-api.xfyun.cn/v2/tts" />
       <el-form-item label="音色" prop="xunfei.voice">
         <el-input v-model="model.xunfei.voice" placeholder="请输入音色，例如 xiaoyan" />
       </el-form-item>
@@ -324,30 +313,10 @@
       <el-form-item label="数字读法" prop="xunfei.rdn">
         <el-input-number v-model="model.xunfei.rdn" :min="0" :max="2" style="width: 100%" />
       </el-form-item>
-      <el-form-item label="帧时长" prop="xunfei.frame_duration">
-        <el-input-number v-model="model.xunfei.frame_duration" :min="1" :max="1000" style="width: 100%" />
-      </el-form-item>
-      <el-form-item label="连接超时" prop="xunfei.connect_timeout">
-        <el-input-number v-model="model.xunfei.connect_timeout" :min="1" :max="60" style="width: 100%" />
-      </el-form-item>
-      <el-form-item label="读取超时" prop="xunfei.read_timeout">
-        <el-input-number v-model="model.xunfei.read_timeout" :min="1" :max="300" style="width: 100%" />
-      </el-form-item>
     </template>
 
     <template v-if="model.provider === 'xunfei_super_tts'">
-      <el-form-item label="应用ID" prop="xunfei_super_tts.app_id">
-        <el-input v-model="model.xunfei_super_tts.app_id" placeholder="请输入讯飞应用ID" />
-      </el-form-item>
-      <el-form-item label="API Key" prop="xunfei_super_tts.api_key">
-        <el-input v-model="model.xunfei_super_tts.api_key" placeholder="请输入API Key" type="password" show-password />
-      </el-form-item>
-      <el-form-item label="API Secret" prop="xunfei_super_tts.api_secret">
-        <el-input v-model="model.xunfei_super_tts.api_secret" placeholder="请输入API Secret" type="password" show-password />
-      </el-form-item>
-      <el-form-item label="WebSocket URL" prop="xunfei_super_tts.ws_url">
-        <el-input v-model="model.xunfei_super_tts.ws_url" placeholder="wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6" />
-      </el-form-item>
+      <XunfeiCommonConfig :model-value="model" prefix="xunfei_super_tts" default-ws-url="wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6" />
       <el-form-item label="音色" prop="xunfei_super_tts.voice">
         <el-select
           v-model="model.xunfei_super_tts.voice"
@@ -411,15 +380,6 @@
       </el-form-item>
       <el-form-item label="保留口语化" prop="xunfei_super_tts.remain">
         <el-input-number v-model="model.xunfei_super_tts.remain" :min="0" :max="1" style="width: 100%" />
-      </el-form-item>
-      <el-form-item label="帧时长" prop="xunfei_super_tts.frame_duration">
-        <el-input-number v-model="model.xunfei_super_tts.frame_duration" :min="1" :max="1000" style="width: 100%" />
-      </el-form-item>
-      <el-form-item label="连接超时" prop="xunfei_super_tts.connect_timeout">
-        <el-input-number v-model="model.xunfei_super_tts.connect_timeout" :min="1" :max="60" style="width: 100%" />
-      </el-form-item>
-      <el-form-item label="读取超时" prop="xunfei_super_tts.read_timeout">
-        <el-input-number v-model="model.xunfei_super_tts.read_timeout" :min="1" :max="300" style="width: 100%" />
       </el-form-item>
       <el-form-item label-width="0">
         <div class="indextts-help">
@@ -508,6 +468,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { TTS_PROVIDER_OPTIONS } from './ttsProviderOptions'
+import XunfeiCommonConfig from './XunfeiCommonConfig.vue'
 
 const props = defineProps({
   model: { type: Object, required: true },
