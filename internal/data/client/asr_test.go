@@ -14,12 +14,12 @@ func TestRetireAsrResult_DoubaoRetryableError(t *testing.T) {
 	}
 	a.AsrResultChannel <- asr_types.StreamingResult{Error: errors.New("asr response code: 45000081")}
 
-	text, isRetry, err := a.RetireAsrResult(context.Background())
+	result, isRetry, err := a.RetireAsrResult(context.Background())
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if text != "" {
-		t.Fatalf("expected empty text, got %q", text)
+	if result.Text != "" {
+		t.Fatalf("expected empty text, got %q", result.Text)
 	}
 	if !isRetry {
 		t.Fatalf("expected isRetry to be true")

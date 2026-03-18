@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	asrtypes "xiaozhi-esp32-server-golang/internal/domain/asr/types"
+	log "xiaozhi-esp32-server-golang/logger"
 )
 
 // ASR 讯飞流式听写实现
@@ -133,6 +134,7 @@ func (a *ASR) handleStreaming(ctx context.Context, conn *websocket.Conn, audioSt
 	go a.sendAudio(ctx, conn, audioStream)
 
 	var resultBuilder strings.Builder
+	recvCount := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,12 +146,22 @@ func (a *ASR) handleStreaming(ctx context.Context, conn *websocket.Conn, audioSt
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-				resultChan <- asrtypes.StreamingResult{Text: resultBuilder.String(), IsFinal: true}
+				finalText := resultBuilder.String()
+				emptyReason := asrtypes.EmptyReasonNone
+				if finalText == "" {
+					if recvCount == 0 {
+						emptyReason = asrtypes.EmptyReasonNoServerResponse
+					} else {
+						emptyReason = asrtypes.EmptyReasonProviderEmptyFinal
+					}
+				}
+				resultChan <- asrtypes.StreamingResult{Text: finalText, IsFinal: true, EmptyReason: emptyReason}
 				return
 			}
 			resultChan <- asrtypes.StreamingResult{Error: fmt.Errorf("xunfei read message failed: %w", err)}
 			return
 		}
+		recvCount++
 
 		var rsp response
 		if err := json.Unmarshal(msg, &rsp); err != nil {
@@ -162,13 +174,48 @@ func (a *ASR) handleStreaming(ctx context.Context, conn *websocket.Conn, audioSt
 		}
 
 		text := rsp.extractText()
+		if text == "" {
+			log.Debugf(
+				"xunfei asr recv[%d]: sid=%s status=%d sn=%d ls=%v pgs=%q rg=%v ws=%d cw=%d text_len=%d raw=%s",
+				recvCount,
+				rsp.SID,
+				rsp.Data.Status,
+				rsp.Data.Result.Sn,
+				rsp.Data.Result.Ls,
+				rsp.Data.Result.Pgs,
+				rsp.Data.Result.Rg,
+				len(rsp.Data.Result.Ws),
+				rsp.candidateCount(),
+				len(text),
+				truncateForLog(string(msg), 512),
+			)
+		}
 		if text != "" {
 			resultBuilder.WriteString(text)
 			resultChan <- asrtypes.StreamingResult{Text: text, IsFinal: false}
 		}
 
 		if rsp.Data.Status == 2 {
-			resultChan <- asrtypes.StreamingResult{Text: resultBuilder.String(), IsFinal: true}
+			finalText := resultBuilder.String()
+			emptyReason := asrtypes.EmptyReasonNone
+			if finalText == "" {
+				emptyReason = asrtypes.EmptyReasonProviderEmptyFinal
+			}
+			if finalText == "" {
+				log.Debugf(
+					"xunfei asr final result empty: sid=%s recv_count=%d ws=%d cw=%d sn=%d ls=%v pgs=%q rg=%v raw=%s",
+					rsp.SID,
+					recvCount,
+					len(rsp.Data.Result.Ws),
+					rsp.candidateCount(),
+					rsp.Data.Result.Sn,
+					rsp.Data.Result.Ls,
+					rsp.Data.Result.Pgs,
+					rsp.Data.Result.Rg,
+					truncateForLog(string(msg), 512),
+				)
+			}
+			resultChan <- asrtypes.StreamingResult{Text: finalText, IsFinal: true, EmptyReason: emptyReason}
 			return
 		}
 	}
@@ -243,4 +290,11 @@ func float32ToPCMBytes(samples []float32, pcmBytes []byte) {
 		pcmBytes[i*2] = byte(v)
 		pcmBytes[i*2+1] = byte(v >> 8)
 	}
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "...(truncated)"
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	"xiaozhi-esp32-server-golang/internal/domain/asr"
+	asr_types "xiaozhi-esp32-server-golang/internal/domain/asr/types"
 	"xiaozhi-esp32-server-golang/internal/domain/audio"
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
 	"xiaozhi-esp32-server-golang/internal/domain/vad/inter"
@@ -285,6 +286,14 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 				}
 
 				if clientHaveVoice {
+					if state.Asr.ShouldRestartOnVoice() {
+						log.Debugf("检测到新的语音输入，重启待恢复的ASR流")
+						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
+							log.Errorf("检测到语音后重启ASR识别失败: %v", restartErr)
+							continue
+						}
+					}
+
 					//vad识别成功, 往asr音频通道里发送数据
 					//log.Infof("vad识别成功, 往asr音频通道里发送数据, len: %d", len(pcmData))
 					state.Asr.AddAudioData(pcmData)
@@ -413,6 +422,7 @@ func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 	}
 
 	state.AsrResultChannel = asrResultChannel
+	state.Asr.SetPendingRestartOnVoice(false)
 	// 设置ASR开始时间，用于统计识别耗时
 	state.SetStartAsrTs()
 	log.Debugf("重启ASR识别成功")
@@ -463,7 +473,12 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 			default:
 			}
 
-			text, isRetry, err := state.RetireAsrResult(ctx)
+			if state.Asr.ShouldRestartOnVoice() {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			result, isRetry, err := state.RetireAsrResult(ctx)
 			if err != nil {
 				log.Errorf("处理asr结果失败: %v", err)
 				if onError != nil {
@@ -475,6 +490,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 				log.Debugf("asrResult is not retry, return")
 				return
 			}
+			text := result.Text
 
 			//统计asr耗时
 			log.Debugf("处理asr结果: %s, 耗时: %d ms", text, state.GetAsrDuration())
@@ -566,6 +582,21 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 				// realtime模式下, 继续循环处理下一个 ASR 结果
 				continue
 			} else {
+				if result.EmptyReason != "" {
+					log.Debugf("ASR空结果已分类: reason=%s, status=%s", result.EmptyReason, state.Status)
+					emptyResultWindowStart = time.Now()
+					emptyResultCount = 0
+
+					if result.EmptyReason == asr_types.EmptyReasonNoServerResponse ||
+						result.EmptyReason == asr_types.EmptyReasonProviderEmptyFinal {
+						state.Asr.SetPendingRestartOnVoice(true)
+						if state.Asr.Cancel != nil {
+							state.Asr.Cancel()
+						}
+						continue
+					}
+				}
+
 				now := time.Now()
 				if now.Sub(emptyResultWindowStart) > emptyResultProtectWindow {
 					emptyResultWindowStart = now

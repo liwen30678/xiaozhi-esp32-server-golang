@@ -30,9 +30,15 @@ type response struct {
 	Data    struct {
 		Status int `json:"status"`
 		Result struct {
-			Ws []struct {
+			Sn  int    `json:"sn"`
+			Ls  bool   `json:"ls"`
+			Pgs string `json:"pgs"`
+			Rg  []int  `json:"rg"`
+			Ws  []struct {
+				Bg int `json:"bg"`
 				Cw []struct {
-					W string `json:"w"`
+					W  string `json:"w"`
+					Sc int    `json:"sc,omitempty"`
 				} `json:"cw"`
 			} `json:"ws"`
 		} `json:"result"`
@@ -48,4 +54,12 @@ func (r *response) extractText() string {
 		}
 	}
 	return text
+}
+
+func (r *response) candidateCount() int {
+	count := 0
+	for _, ws := range r.Data.Result.Ws {
+		count += len(ws.Cw)
+	}
+	return count
 }
