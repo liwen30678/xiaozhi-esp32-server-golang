@@ -168,7 +168,6 @@ import VADConfigForm from './forms/VADConfigForm.vue'
 import ASRConfigForm from './forms/ASRConfigForm.vue'
 import LLMConfigForm from './forms/LLMConfigForm.vue'
 import TTSConfigForm from './forms/TTSConfigForm.vue'
-import { getProviderFixedType, isProviderBaseURLEditable, resolveLLMProvider } from './forms/llmCatalog'
 
 const currentStep = ref(0)
 const saving = ref(false)
@@ -341,6 +340,19 @@ const llmForm = reactive({
   thinking_clear_thinking: 'default'
 })
 const llmFormRef = ref()
+function getResolvedLLMType(provider, type) {
+  if (type) return type
+  if (provider === 'dify' || provider === 'coze') return provider
+  return 'openai'
+}
+
+function getResolvedLLMProvider(provider, type) {
+  if (provider) return provider
+  const resolvedType = getResolvedLLMType(provider, type)
+  if (resolvedType === 'dify' || resolvedType === 'coze') return resolvedType
+  return 'openai'
+}
+
 const llmFormRules = {
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
   config_id: [{ required: true, message: '请输入配置ID', trigger: 'blur' }],
@@ -351,8 +363,7 @@ const llmFormRules = {
     trigger: 'change'
   }, {
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      const providerType = getProviderFixedType(provider)
+      const providerType = getResolvedLLMType(llmForm.provider, llmForm.type)
       if ((providerType === 'openai' || providerType === 'ollama') && !value) {
         callback(new Error('请输入模型名称'))
         return
@@ -363,8 +374,7 @@ const llmFormRules = {
   }],
   api_key: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      if (getProviderFixedType(provider) !== 'ollama' && !value) {
+      if (getResolvedLLMType(llmForm.provider, llmForm.type) !== 'ollama' && !value) {
         callback(new Error('请输入API密钥'))
         return
       }
@@ -374,8 +384,7 @@ const llmFormRules = {
   }],
   base_url: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      if (isProviderBaseURLEditable(provider) && !value) {
+      if (getResolvedLLMType(llmForm.provider, llmForm.type) !== 'coze' && !value) {
         callback(new Error('请输入基础URL'))
         return
       }
@@ -385,8 +394,7 @@ const llmFormRules = {
   }],
   max_tokens: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      const providerType = getProviderFixedType(provider)
+      const providerType = getResolvedLLMType(llmForm.provider, llmForm.type)
       if ((providerType === 'openai' || providerType === 'ollama') && (!value || Number(value) < 1 || Number(value) > 100000)) {
         callback(new Error('max_tokens必须在1-100000之间'))
         return
@@ -848,9 +856,8 @@ async function loadLlmIfExists() {
     llmForm.name = config.name
     llmForm.config_id = config.config_id
     const data = JSON.parse(config.json_data || '{}')
-    const detectedProvider = resolveLLMProvider(config.provider, data.type)
-    llmForm.provider = detectedProvider
-    llmForm.type = getProviderFixedType(detectedProvider)
+    llmForm.provider = getResolvedLLMProvider(config.provider, data.type)
+    llmForm.type = getResolvedLLMType(config.provider, data.type)
     if (data.model_name !== undefined) llmForm.model_name = data.model_name
     if (data.api_key !== undefined) llmForm.api_key = data.api_key
     if (data.base_url !== undefined) llmForm.base_url = data.base_url
