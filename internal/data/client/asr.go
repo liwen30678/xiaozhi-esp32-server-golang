@@ -10,6 +10,7 @@ import (
 )
 
 const doubaoRetryableResponseCode = "45000081"
+const xunfeiRetryableResponseCode = "10008"
 
 type Asr struct {
 	lock sync.RWMutex
@@ -41,6 +42,20 @@ func (a *Asr) Reset() {
 	a.AsrResult.Reset()
 }
 
+func isXunfeiRetryableError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+
+	errText := err.Error()
+	if strings.Contains(errText, "xunfei asr error code="+xunfeiRetryableResponseCode) ||
+		strings.Contains(strings.ToLower(errText), "service instance invalid") {
+		return asr_types.RetryReasonXunfeiServiceInstanceInvalid, true
+	}
+
+	return "", false
+}
+
 func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, bool, error) {
 	defer func() {
 		a.Reset()
@@ -63,6 +78,15 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, b
 				if a.AsrType == "doubao" && strings.Contains(result.Error.Error(), doubaoRetryableResponseCode) {
 					log.Warnf("doubao ASR 返回可重试错误(%s)，触发重试", doubaoRetryableResponseCode)
 					return emptyResult, true, nil
+				}
+				if a.AsrType == "xunfei" {
+					if retryReason, ok := isXunfeiRetryableError(result.Error); ok {
+						log.Warnf("xunfei ASR 返回可恢复错误(%s)，触发重建: %v", retryReason, result.Error)
+						return asr_types.StreamingResult{
+							Error:       result.Error,
+							RetryReason: retryReason,
+						}, true, nil
+					}
 				}
 				return emptyResult, false, result.Error
 			}

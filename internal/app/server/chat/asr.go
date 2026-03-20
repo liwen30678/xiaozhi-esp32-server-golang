@@ -465,6 +465,20 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 		emptyResultWindowStart := time.Now()
 		emptyResultCount := 0
 
+		// 可恢复错误短时保护：避免上游持续返回实例失效时无限重连
+		const recoverableErrorProtectWindow = 10 * time.Second
+		const maxRecoverableErrorInWindow = 3
+		recoverableErrorWindowStart := time.Now()
+		recoverableErrorCount := 0
+
+		isAllowedToRestart := func() bool {
+			allowed := state.Status == ClientStatusListening || state.Status == ClientStatusListenStop
+			if state.IsRealTime() {
+				allowed = state.Status != ClientStatusInit
+			}
+			return allowed
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -495,10 +509,60 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 			//统计asr耗时
 			log.Debugf("处理asr结果: %s, 耗时: %d ms", text, state.GetAsrDuration())
 
+			if result.RetryReason != "" {
+				now := time.Now()
+				if now.Sub(recoverableErrorWindowStart) > recoverableErrorProtectWindow {
+					recoverableErrorWindowStart = now
+					recoverableErrorCount = 0
+				}
+				recoverableErrorCount++
+				log.Warnf(
+					"ASR可恢复错误: reason=%s, count=%d/%d, status=%s",
+					result.RetryReason,
+					recoverableErrorCount,
+					maxRecoverableErrorInWindow,
+					state.Status,
+				)
+
+				if recoverableErrorCount >= maxRecoverableErrorInWindow {
+					err := fmt.Errorf("ASR短时间内连续触发可恢复错误(%d次/%s)，停止重试并断开连接", recoverableErrorCount, recoverableErrorProtectWindow)
+					log.Errorf(err.Error())
+					if onError != nil {
+						onError(err)
+					}
+					return
+				}
+
+				switch result.RetryReason {
+				case asr_types.RetryReasonXunfeiServiceInstanceInvalid:
+					a.releaseResource()
+					if isAllowedToRestart() {
+						invalidStatusWaitCount = 0
+						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
+							log.Errorf("xunfei ASR实例失效后重启识别失败: %v", restartErr)
+							if onError != nil {
+								onError(restartErr)
+							}
+							return
+						}
+						continue
+					}
+
+					log.Warnf("ASR可恢复错误发生时当前状态不允许立即重启: status=%s, realtime=%v", state.Status, state.IsRealTime())
+					state.Asr.SetPendingRestartOnVoice(true)
+					if state.Asr.Cancel != nil {
+						state.Asr.Cancel()
+					}
+					continue
+				}
+			}
+
 			if text != "" {
 				// 识别成功后重置空结果计数
 				emptyResultWindowStart = time.Now()
 				emptyResultCount = 0
+				recoverableErrorWindowStart = time.Now()
+				recoverableErrorCount = 0
 
 				// 创建用户消息
 				userMsg := &schema.Message{
@@ -623,13 +687,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 				log.Debugf("ready Restart Asr, state.Status: %s", state.Status)
 				// realtime 模式下，即使状态是 LLMStart 或 TTSStart，也应该继续监听（允许重启ASR）
 				// 非 realtime 模式下，只有 Listening 或 ListenStop 状态才允许重启ASR
-				isAllowedToRestart := state.Status == ClientStatusListening || state.Status == ClientStatusListenStop
-				if state.IsRealTime() {
-					// realtime 模式下，除了 Init 状态外，都允许重启（因为需要持续监听）
-					isAllowedToRestart = state.Status != ClientStatusInit
-				}
-
-				if isAllowedToRestart {
+				if isAllowedToRestart() {
 					// 状态允许重启，重置等待计数
 					invalidStatusWaitCount = 0
 					// text 为空，检查是否需要重新启动ASR

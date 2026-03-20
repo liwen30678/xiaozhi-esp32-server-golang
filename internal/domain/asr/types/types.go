@@ -4,6 +4,9 @@ const (
 	EmptyReasonNone               = ""
 	EmptyReasonNoServerResponse   = "no_server_response"
 	EmptyReasonProviderEmptyFinal = "provider_empty_final"
+
+	RetryReasonNone                         = ""
+	RetryReasonXunfeiServiceInstanceInvalid = "xunfei_service_instance_invalid"
 )
 
 // StreamingResult 流式识别结果
@@ -14,4 +17,5 @@ type StreamingResult struct {
 	AsrType     string // asr 类型
 	Mode        string // 模式
 	EmptyReason string // 空结果原因，仅在 Text 为空时用于区分上游空结果/空转
+	RetryReason string // 可恢复错误原因，仅在需要释放当前资源并重试时使用
 }
