@@ -879,8 +879,14 @@ func (l *LLMManager) handleLocalToolResult(toolResult string) (MCPResponse, bool
 func (l *LLMManager) handleToolResult(toolResultStr string) (mcp_go.CallToolResult, bool) {
 	var toolResult mcp_go.CallToolResult
 	if err := json.Unmarshal([]byte(toolResultStr), &toolResult); err != nil {
-		log.Errorf("解析工具结果失败: %v", err)
-		return toolResult, false
+		log.Warnf("工具结果不是标准 MCP JSON，按纯文本处理: %v", err)
+		toolResult.Content = []mcp_go.Content{
+			mcp_go.TextContent{
+				Type: "text",
+				Text: toolResultStr,
+			},
+		}
+		return toolResult, true
 	}
 
 	return toolResult, true
