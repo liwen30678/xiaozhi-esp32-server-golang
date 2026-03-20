@@ -35,6 +35,13 @@ const routes = [
     name: 'Login',
     component: getLoginComponent
   },
+
+  {
+    path: '/openapi-docs',
+    name: 'OpenAPIDocs',
+    component: () => import('../views/OpenAPIDocs.vue'),
+    meta: { title: 'OpenAPI 接口说明' }
+  },
   {
     path: '/',
     name: 'Layout',
@@ -248,6 +255,13 @@ const routes = [
         name: 'AgentHistory',
         component: () => import('../views/user/AgentHistory.vue'),
         meta: { title: '聊天历史记录' }
+      },
+
+      {
+        path: '/user/api-tokens',
+        name: 'UserAPITokens',
+        component: () => import('../views/user/APITokens.vue'),
+        meta: { title: 'API Token 管理' }
       },
       {
         path: '/user/knowledge-bases',

@@ -330,6 +330,11 @@ if mcpResp, ok := l.handleLocalToolResult(fcResult); ok {
 }
 ```
 
+> `handleToolResult` **不再要求工具返回值必须是 JSON**。  
+> - 如果返回的是标准 MCP `CallToolResult` JSON，会按结构化内容解析。  
+> - 如果返回的是普通字符串，会自动包装成 `TextContent` 继续后续流程。  
+> 这样普通文本工具和结构化 MCP 工具都可以被统一处理。
+
 ### 3. 内容类型处理
 ```go
 for _, content := range contentList {
