@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -44,16 +45,10 @@ func TestGlobalMCPManager_StartStop(t *testing.T) {
 }
 
 func TestMCPTool_Info(t *testing.T) {
-	tool := &mcpTool{
-		name:        "test_tool",
-		description: "测试工具",
-		inputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"query": map[string]interface{}{
-					"type": "string",
-				},
-			},
+	tool := &McpTool{
+		info: &schema.ToolInfo{
+			Name: "test_tool",
+			Desc: "测试工具",
 		},
 		serverName: "test_server",
 		client:     nil, // 测试中不需要真实客户端
@@ -67,12 +62,13 @@ func TestMCPTool_Info(t *testing.T) {
 }
 
 func TestMCPTool_InvokableRun(t *testing.T) {
-	tool := &mcpTool{
-		name:        "test_tool",
-		description: "测试工具",
-		inputSchema: map[string]interface{}{},
-		serverName:  "test_server",
-		client:      nil, // 测试中不需要真实客户端
+	tool := &McpTool{
+		info: &schema.ToolInfo{
+			Name: "test_tool",
+			Desc: "测试工具",
+		},
+		serverName: "test_server",
+		client:     nil, // 测试中不需要真实客户端
 	}
 
 	// 这个测试会失败，因为客户端为nil
@@ -179,11 +175,10 @@ func TestMCPGoStructures(t *testing.T) {
 
 // 创建测试工具
 func TestMCPTool_InvokableRun_NewTool(t *testing.T) {
-	testTool := &mcpTool{
-		name:        "test_tool",
-		description: "测试工具",
-		inputSchema: map[string]interface{}{
-			"type": "object",
+	testTool := &McpTool{
+		info: &schema.ToolInfo{
+			Name: "test_tool",
+			Desc: "测试工具",
 		},
 		serverName: "test_server",
 		client:     nil, // 测试中不需要真实客户端
@@ -193,4 +188,20 @@ func TestMCPTool_InvokableRun_NewTool(t *testing.T) {
 	// 但可以验证方法签名和基本逻辑
 	_, err := testTool.InvokableRun(context.Background(), `{"query": "test"}`)
 	assert.Error(t, err) // 预期会有网络错误
+}
+
+func TestFilterMCPToolsByAllowList(t *testing.T) {
+	tools := []mcp.Tool{
+		{Name: "alerts"},
+		{Name: "forecast"},
+		{Name: "history"},
+	}
+
+	filtered := filterMCPToolsByAllowList(tools, []string{"forecast", "alerts"})
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "alerts", filtered[0].Name)
+	assert.Equal(t, "forecast", filtered[1].Name)
+
+	unfiltered := filterMCPToolsByAllowList(tools, nil)
+	require.Len(t, unfiltered, 3)
 }

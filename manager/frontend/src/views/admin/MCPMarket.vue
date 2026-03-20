@@ -172,6 +172,13 @@
             <el-table-column prop="transport" label="传输" width="140" />
             <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
             <el-table-column prop="service_id" label="Service ID" min-width="180" show-overflow-tooltip />
+            <el-table-column label="工具" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.allowed_tools?.length ? 'warning' : 'info'">
+                  {{ row.allowed_tools?.length ? `${row.allowed_tools.length}个已选` : '全部工具' }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="provider_id" label="提供商" width="120">
               <template #default="{ row }">
                 <el-tag size="small">{{ row.provider_id || '-' }}</el-tag>
@@ -264,6 +271,37 @@
         </el-form-item>
         <el-form-item label="服务名称">
           <el-input v-model="importedForm.service_name" placeholder="上游服务名（可选）" />
+        </el-form-item>
+        <el-form-item label="允许工具">
+          <div class="tool-picker">
+            <div class="tool-picker-bar">
+              <el-button size="small" :disabled="!editingImported" :loading="importedToolsLoading" @click="refreshImportedTools">
+                探测工具
+              </el-button>
+              <span class="tool-picker-tip">
+                {{ editingImported ? '留空表示允许该服务全部工具' : '保存后可在已导入服务中探测并选择工具' }}
+              </span>
+            </div>
+            <el-select
+              v-model="importedForm.allowed_tools"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              style="width: 100%"
+              placeholder="不选择则允许全部工具"
+              :loading="importedToolsLoading"
+              :disabled="!editingImported && importedToolOptions.length === 0"
+            >
+              <el-option v-for="tool in importedToolOptions" :key="tool.name" :label="tool.name" :value="tool.name">
+                <div class="tool-option-row">
+                  <span class="tool-option-name">{{ tool.name }}</span>
+                  <span class="tool-option-desc">{{ tool.description || '无描述' }}</span>
+                </div>
+              </el-option>
+            </el-select>
+          </div>
         </el-form-item>
         <el-form-item label="Headers(JSON)">
           <el-input
@@ -378,9 +416,11 @@ const serviceDetail = ref(null)
 const importedLoading = ref(false)
 const importedSaving = ref(false)
 const importedDialogVisible = ref(false)
+const importedToolsLoading = ref(false)
 const editingImported = ref(null)
 const importedFormRef = ref()
 const importedItems = ref([])
+const importedToolOptions = ref([])
 const importedPage = ref(1)
 const importedPageSize = ref(20)
 const importedTotal = ref(0)
@@ -392,6 +432,7 @@ const importedForm = reactive({
   enabled: true,
   transport: 'streamablehttp',
   url: '',
+  allowed_tools: [],
   market_id: null,
   provider_id: '',
   service_id: '',
@@ -684,11 +725,54 @@ const resetImportedForm = () => {
   importedForm.enabled = true
   importedForm.transport = 'streamablehttp'
   importedForm.url = ''
+  importedForm.allowed_tools = []
   importedForm.market_id = null
   importedForm.provider_id = ''
   importedForm.service_id = ''
   importedForm.service_name = ''
   importedHeadersText.value = ''
+  importedToolOptions.value = []
+}
+
+const mergeImportedToolOptions = (tools = [], selected = []) => {
+  const merged = new Map()
+
+  ;(tools || []).forEach((tool) => {
+    if (!tool?.name) return
+    merged.set(tool.name, {
+      name: tool.name,
+      description: tool.description || ''
+    })
+  })
+
+  ;(selected || []).forEach((name) => {
+    if (!name || merged.has(name)) return
+    merged.set(name, {
+      name,
+      description: '当前配置已选择'
+    })
+  })
+
+  importedToolOptions.value = Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const loadImportedToolOptions = async (serviceId) => {
+  if (!serviceId) {
+    mergeImportedToolOptions([], importedForm.allowed_tools)
+    return
+  }
+
+  importedToolsLoading.value = true
+  try {
+    const resp = await api.get(`/admin/mcp-market/imported-services/${serviceId}/tools`)
+    const data = resp.data?.data || {}
+    mergeImportedToolOptions(data.tools || [], importedForm.allowed_tools)
+  } catch (error) {
+    mergeImportedToolOptions([], importedForm.allowed_tools)
+    ElMessage.error(error.response?.data?.error || '加载工具列表失败')
+  } finally {
+    importedToolsLoading.value = false
+  }
 }
 
 const openCreateImportedDialog = () => {
@@ -697,18 +781,29 @@ const openCreateImportedDialog = () => {
   importedDialogVisible.value = true
 }
 
-const openEditImportedDialog = (row) => {
+const openEditImportedDialog = async (row) => {
   editingImported.value = row
   importedForm.name = row.name || ''
   importedForm.enabled = !!row.enabled
   importedForm.transport = row.transport || 'streamablehttp'
   importedForm.url = row.url || ''
+  importedForm.allowed_tools = Array.isArray(row.allowed_tools) ? [...row.allowed_tools] : []
   importedForm.market_id = row.market_id || null
   importedForm.provider_id = row.provider_id || ''
   importedForm.service_id = row.service_id || ''
   importedForm.service_name = row.service_name || ''
   importedHeadersText.value = row.headers ? JSON.stringify(row.headers, null, 2) : ''
+  mergeImportedToolOptions([], importedForm.allowed_tools)
   importedDialogVisible.value = true
+  await loadImportedToolOptions(row.id)
+}
+
+const refreshImportedTools = async () => {
+  if (!editingImported.value?.id) {
+    ElMessage.warning('保存后才能探测工具列表')
+    return
+  }
+  await loadImportedToolOptions(editingImported.value.id)
 }
 
 const saveImportedItem = async () => {
@@ -730,6 +825,7 @@ const saveImportedItem = async () => {
     transport: importedForm.transport,
     url: importedForm.url,
     headers,
+    allowed_tools: importedForm.allowed_tools,
     market_id: importedForm.market_id || null,
     provider_id: importedForm.provider_id,
     service_id: importedForm.service_id,
@@ -761,6 +857,7 @@ const toggleImportedEnabled = async (row) => {
     transport: row.transport,
     url: row.url,
     headers: row.headers || null,
+    allowed_tools: row.allowed_tools || [],
     market_id: row.market_id || null,
     provider_id: row.provider_id || '',
     service_id: row.service_id || '',
@@ -886,6 +983,40 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+.tool-picker {
+  width: 100%;
+}
+
+.tool-picker-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tool-picker-tip {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.tool-option-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.3;
+}
+
+.tool-option-name {
+  color: #111827;
+}
+
+.tool-option-desc {
+  color: #6b7280;
+  font-size: 12px;
+}
+
 @media (max-width: 992px) {
   .detail-grid {
     grid-template-columns: 1fr;
@@ -897,6 +1028,11 @@ onMounted(async () => {
 
   .panel-header {
     flex-wrap: wrap;
+  }
+
+  .tool-picker-bar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

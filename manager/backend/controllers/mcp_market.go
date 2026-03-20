@@ -365,16 +365,17 @@ func (ac *AdminController) ImportMCPMarketService(c *gin.Context) {
 		usedNames[nameCandidate] = struct{}{}
 
 		row := models.MCPMarketService{
-			Name:        nameCandidate,
-			Enabled:     true,
-			Transport:   normalizeImportedTransport(endpoint.Transport),
-			URL:         endpoint.URL,
-			URLHash:     normalizedURLHash(endpoint.URL),
-			HeadersJSON: encodeHeadersJSON(endpoint.Headers),
-			MarketID:    &marketModel.ID,
-			ProviderID:  mcpmarket.NormalizeProviderID(marketCfg.ProviderID),
-			ServiceID:   detail.ServiceID,
-			ServiceName: detail.Name,
+			Name:             nameCandidate,
+			Enabled:          true,
+			Transport:        normalizeImportedTransport(endpoint.Transport),
+			URL:              endpoint.URL,
+			URLHash:          normalizedURLHash(endpoint.URL),
+			HeadersJSON:      encodeHeadersJSON(endpoint.Headers),
+			AllowedToolsJSON: "",
+			MarketID:         &marketModel.ID,
+			ProviderID:       mcpmarket.NormalizeProviderID(marketCfg.ProviderID),
+			ServiceID:        detail.ServiceID,
+			ServiceName:      detail.Name,
 		}
 		if row.Transport != mcpmarket.TransportSSE && row.Transport != mcpmarket.TransportStreamableHTTP {
 			continue
@@ -384,6 +385,7 @@ func (ac *AdminController) ImportMCPMarketService(c *gin.Context) {
 		}
 		if existing, ok := urlHashToExisting[row.URLHash]; ok {
 			row.ID = existing.ID
+			row.AllowedToolsJSON = existing.AllowedToolsJSON
 			if strings.TrimSpace(req.NameOverride) == "" && strings.TrimSpace(existing.Name) != "" {
 				row.Name = strings.TrimSpace(existing.Name)
 			}
@@ -420,16 +422,17 @@ func (ac *AdminController) ImportMCPMarketService(c *gin.Context) {
 			continue
 		}
 		updateMap := map[string]interface{}{
-			"name":         row.Name,
-			"enabled":      row.Enabled,
-			"transport":    row.Transport,
-			"url":          row.URL,
-			"url_hash":     row.URLHash,
-			"headers_json": row.HeadersJSON,
-			"market_id":    row.MarketID,
-			"provider_id":  row.ProviderID,
-			"service_id":   row.ServiceID,
-			"service_name": row.ServiceName,
+			"name":               row.Name,
+			"enabled":            row.Enabled,
+			"transport":          row.Transport,
+			"url":                row.URL,
+			"url_hash":           row.URLHash,
+			"headers_json":       row.HeadersJSON,
+			"allowed_tools_json": row.AllowedToolsJSON,
+			"market_id":          row.MarketID,
+			"provider_id":        row.ProviderID,
+			"service_id":         row.ServiceID,
+			"service_name":       row.ServiceName,
 		}
 		if err := tx.Model(&models.MCPMarketService{}).Where("id = ?", row.ID).Updates(updateMap).Error; err != nil {
 			tx.Rollback()
@@ -659,13 +662,14 @@ func mergeEndpointsIntoMCPConfig(current mcpmarket.MergedMCPConfig, detail *mcpm
 		candidateName = resolveUniqueName(existingNames, candidateName)
 
 		newServer := mcpServerConfig{
-			Name:      candidateName,
-			Type:      endpoint.Transport,
-			Url:       endpoint.URL,
-			Enabled:   true,
-			Provider:  "mcp-market",
-			ServiceID: detail.ServiceID,
-			Headers:   endpoint.Headers,
+			Name:         candidateName,
+			Type:         endpoint.Transport,
+			Url:          endpoint.URL,
+			Enabled:      true,
+			Provider:     "mcp-market",
+			ServiceID:    detail.ServiceID,
+			Headers:      endpoint.Headers,
+			AllowedTools: nil,
 		}
 		if endpoint.Transport == mcpmarket.TransportSSE {
 			newServer.SSEUrl = endpoint.URL
@@ -758,15 +762,16 @@ type marketWithAuth struct {
 }
 
 type mcpServerConfig struct {
-	Name      string            `json:"name"`
-	Type      string            `json:"type"`
-	Url       string            `json:"url"`
-	SSEUrl    string            `json:"sse_url,omitempty"`
-	Enabled   bool              `json:"enabled"`
-	Provider  string            `json:"provider,omitempty"`
-	ServiceID string            `json:"service_id,omitempty"`
-	AuthRef   string            `json:"auth_ref,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	Name         string            `json:"name"`
+	Type         string            `json:"type"`
+	Url          string            `json:"url"`
+	SSEUrl       string            `json:"sse_url,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Provider     string            `json:"provider,omitempty"`
+	ServiceID    string            `json:"service_id,omitempty"`
+	AuthRef      string            `json:"auth_ref,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	AllowedTools []string          `json:"allowed_tools,omitempty"`
 }
 
 func buildStoredMarketConfig(req upsertMCPMarketRequest, existing *mcpmarket.MarketConnection) (mcpmarket.MarketConnection, error) {
@@ -1022,7 +1027,7 @@ func parseJSONMap(raw string) (map[string]interface{}, error) {
 func defaultMCPMap() map[string]interface{} {
 	return map[string]interface{}{
 		"global": map[string]interface{}{
-			"enabled":                false,
+			"enabled":                true,
 			"servers":                []interface{}{},
 			"reconnect_interval":     300,
 			"max_reconnect_attempts": 10,
@@ -1047,7 +1052,7 @@ func ensureMCPGlobalDefaults(m map[string]interface{}) {
 		global = map[string]interface{}{}
 	}
 	if _, ok := global["enabled"]; !ok {
-		global["enabled"] = false
+		global["enabled"] = true
 	}
 	if _, ok := global["servers"]; !ok {
 		global["servers"] = []interface{}{}

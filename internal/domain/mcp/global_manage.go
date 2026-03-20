@@ -22,15 +22,16 @@ import (
 
 // MCPServerConfig MCP服务器配置
 type MCPServerConfig struct {
-	Name      string            `json:"name" mapstructure:"name"`
-	Type      string            `json:"type" mapstructure:"type"`
-	Url       string            `json:"url" mapstructure:"url"`
-	SSEUrl    string            `json:"sse_url" mapstructure:"sse_url"` // 向后兼容 sse_url 字段
-	Enabled   bool              `json:"enabled" mapstructure:"enabled"`
-	Provider  string            `json:"provider,omitempty" mapstructure:"provider"`
-	ServiceID string            `json:"service_id,omitempty" mapstructure:"service_id"`
-	AuthRef   string            `json:"auth_ref,omitempty" mapstructure:"auth_ref"`
-	Headers   map[string]string `json:"headers,omitempty" mapstructure:"headers"`
+	Name         string            `json:"name" mapstructure:"name"`
+	Type         string            `json:"type" mapstructure:"type"`
+	Url          string            `json:"url" mapstructure:"url"`
+	SSEUrl       string            `json:"sse_url" mapstructure:"sse_url"` // 向后兼容 sse_url 字段
+	Enabled      bool              `json:"enabled" mapstructure:"enabled"`
+	Provider     string            `json:"provider,omitempty" mapstructure:"provider"`
+	ServiceID    string            `json:"service_id,omitempty" mapstructure:"service_id"`
+	AuthRef      string            `json:"auth_ref,omitempty" mapstructure:"auth_ref"`
+	Headers      map[string]string `json:"headers,omitempty" mapstructure:"headers"`
+	AllowedTools []string          `json:"allowed_tools,omitempty" mapstructure:"allowed_tools"`
 }
 
 // GlobalMCPManager 全局MCP管理器
@@ -364,6 +365,40 @@ func buildMCPTransport(config MCPServerConfig) (transport.Interface, string, err
 	}
 }
 
+func buildAllowedToolSet(allowedTools []string) map[string]struct{} {
+	if len(allowedTools) == 0 {
+		return nil
+	}
+
+	set := make(map[string]struct{}, len(allowedTools))
+	for _, toolName := range allowedTools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		set[toolName] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func filterMCPToolsByAllowList(tools []mcp.Tool, allowedTools []string) []mcp.Tool {
+	allowedSet := buildAllowedToolSet(allowedTools)
+	if len(allowedSet) == 0 {
+		return tools
+	}
+
+	filtered := make([]mcp.Tool, 0, len(tools))
+	for _, item := range tools {
+		if _, ok := allowedSet[strings.TrimSpace(item.Name)]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
 // refreshTools 刷新工具列表
 func (conn *MCPServerConnection) refreshTools(ctx context.Context) error {
 	// 获取工具列表
@@ -376,7 +411,8 @@ func (conn *MCPServerConnection) refreshTools(ctx context.Context) error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 
-	conn.tools = ConvertMcpToolListToInvokableToolList(toolsResult.Tools, conn.config.Name, conn.client)
+	tools := filterMCPToolsByAllowList(toolsResult.Tools, conn.config.AllowedTools)
+	conn.tools = ConvertMcpToolListToInvokableToolList(tools, conn.config.Name, conn.client)
 
 	// 更新全局工具列表
 	globalManager.updateGlobalTools(conn.config.Name, conn.tools)

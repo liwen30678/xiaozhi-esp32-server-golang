@@ -291,6 +291,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 				admin.GET("/mcp-configs", adminController.GetMCPConfigs)
 				admin.POST("/mcp-configs", adminController.CreateMCPConfig)
+				admin.POST("/mcp-configs/discover-tools", adminController.DiscoverMCPConfigTools)
 				admin.PUT("/mcp-configs/:id", adminController.UpdateMCPConfig)
 				admin.DELETE("/mcp-configs/:id", adminController.DeleteMCPConfig)
 				admin.GET("/mcp-markets", adminController.GetMCPMarkets)
@@ -304,6 +305,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				admin.POST("/mcp-market/import", adminController.ImportMCPMarketService)
 				admin.GET("/mcp-market/imported-services", adminController.GetMCPMarketImportedServices)
 				admin.POST("/mcp-market/imported-services", adminController.CreateMCPMarketImportedService)
+				admin.GET("/mcp-market/imported-services/:id/tools", adminController.GetMCPMarketImportedServiceTools)
 				admin.PUT("/mcp-market/imported-services/:id", adminController.UpdateMCPMarketImportedService)
 				admin.DELETE("/mcp-market/imported-services/:id", adminController.DeleteMCPMarketImportedService)
 
