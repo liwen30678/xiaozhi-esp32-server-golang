@@ -11,6 +11,7 @@ import (
 	chathooks "xiaozhi-esp32-server-golang/internal/domain/chat/hooks"
 	llm_common "xiaozhi-esp32-server-golang/internal/domain/llm/common"
 	"xiaozhi-esp32-server-golang/internal/domain/tts"
+	ttsstream "xiaozhi-esp32-server-golang/internal/domain/tts/streaming"
 	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -37,6 +38,11 @@ type AudioQueueElem struct {
 	OnEnd      func(error)
 }
 
+type delayedSentenceTask struct {
+	Elem      AudioQueueElem
+	ExecuteAt time.Time
+}
+
 // SessionAudioQueueCap 会话级音频队列容量，足够大以吸收预取并避免阻塞
 const SessionAudioQueueCap = 150
 
@@ -56,28 +62,37 @@ type TTSQueueItem struct {
 type TTSManagerOption func(*TTSManager)
 
 type TTSManager struct {
-	clientState       *ClientState
-	session           *ChatSession
-	serverTransport   *ServerTransport
-	ttsQueue          *util.Queue[TTSQueueItem]
-	sessionAudioQueue chan AudioQueueElem // 会话级全局音频队列，兼容帧与控制消息
-	interruptCh       chan struct{}       // 打断信号：收到后 runSenderLoop 清空 sessionAudioQueue 并继续
-	audioGeneration   atomic.Uint64       // 会话级音频代际：打断时递增，旧代际元素会被发送协程丢弃
+	clientState               *ClientState
+	session                   *ChatSession
+	serverTransport           *ServerTransport
+	ttsQueue                  *util.Queue[TTSQueueItem]
+	sessionAudioQueue         chan AudioQueueElem // 会话级全局音频队列，兼容帧与控制消息
+	delayedSentenceQueue      chan delayedSentenceTask
+	delayedSentenceReadyQueue chan AudioQueueElem
+	interruptCh               chan struct{} // 打断信号：收到后 runSenderLoop 清空 sessionAudioQueue 并继续
+	audioGeneration           atomic.Uint64 // 会话级音频代际：打断时递增，旧代际元素会被发送协程丢弃
 
 	// 聊天历史音频缓存：持续累积多段TTS音频（Opus帧数组）
 	audioHistoryBuffer [][]byte
 	audioMutex         sync.Mutex
+
+	// 双流式 TTS 内部 StreamChan：由 handleTextResponse 在 IsStart 时创建，IsEnd 时关闭
+	dualStreamChan chan llm_common.LLMResponseStruct
+	dualStreamDone chan struct{} // 双流式 isSync 等待用：StreamChan 对应的 onEndFunc 信号
+	dualStreamMu   sync.Mutex
 }
 
 // NewTTSManager 只接受WithClientState
 func NewTTSManager(clientState *ClientState, serverTransport *ServerTransport, session *ChatSession, opts ...TTSManagerOption) *TTSManager {
 	t := &TTSManager{
-		clientState:       clientState,
-		session:           session,
-		serverTransport:   serverTransport,
-		ttsQueue:          util.NewQueue[TTSQueueItem](10),
-		sessionAudioQueue: make(chan AudioQueueElem, SessionAudioQueueCap),
-		interruptCh:       make(chan struct{}, 1),
+		clientState:               clientState,
+		session:                   session,
+		serverTransport:           serverTransport,
+		ttsQueue:                  util.NewQueue[TTSQueueItem](10),
+		sessionAudioQueue:         make(chan AudioQueueElem, SessionAudioQueueCap),
+		delayedSentenceQueue:      make(chan delayedSentenceTask, SessionAudioQueueCap),
+		delayedSentenceReadyQueue: make(chan AudioQueueElem, SessionAudioQueueCap),
+		interruptCh:               make(chan struct{}, 1),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -88,6 +103,7 @@ func NewTTSManager(clientState *ClientState, serverTransport *ServerTransport, s
 
 // 启动TTS队列消费协程与统一发送协程（会话级全局音频队列）
 func (t *TTSManager) Start(ctx context.Context) {
+	go t.runDelayedSentenceLoop(ctx)
 	go t.runSenderLoop(ctx)
 	t.processTTSQueue(ctx)
 }
@@ -101,20 +117,65 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 	currentSentenceFrames := 0
 	playbackTail := time.Time{}
 
+	handleDelayedSentence := func(elem AudioQueueElem) {
+		if elem.Generation != t.currentAudioGeneration() {
+			return
+		}
+		switch elem.Kind {
+		case AudioQueueKindSentenceStart:
+			if elem.OnStart != nil {
+				elem.OnStart()
+			}
+			if elem.Text != "" {
+				if err := t.serverTransport.SendSentenceStart(elem.Text); err != nil {
+					log.Errorf("发送 TTS 文本失败: %s, %v", elem.Text, err)
+					if elem.OnEnd != nil {
+						elem.OnEnd(err)
+					}
+				}
+			}
+		case AudioQueueKindSentenceEnd:
+			if elem.Text != "" {
+				if err := t.serverTransport.SendSentenceEnd(elem.Text); err != nil {
+					log.Errorf("发送 TTS 文本失败: %s, %v", elem.Text, err)
+				}
+			}
+			currentSentenceFrames = 0
+			if elem.OnEnd != nil {
+				elem.OnEnd(elem.Err)
+			}
+		}
+	}
+
+	handleInterrupt := func() {
+		t.drainSessionAudioQueue()
+		t.drainDelayedSentenceReadyQueue()
+		totalFrames = 0
+		needReportFirstFrame = false
+		currentSentenceFrames = 0
+		playbackTail = time.Time{}
+		log.Debugf("runSenderLoop interrupt, drained queue and continue")
+	}
+
 	for {
+		select {
+		case elem := <-t.delayedSentenceReadyQueue:
+			handleDelayedSentence(elem)
+			continue
+		default:
+		}
+
 		select {
 		case <-ctx.Done():
 			t.drainSessionAudioQueue()
+			t.drainDelayedSentenceReadyQueue()
 			log.Debugf("runSenderLoop ctx done, drained queue and exit")
 			return
 		case <-t.interruptCh:
-			t.drainSessionAudioQueue()
-			totalFrames = 0
-			needReportFirstFrame = false
-			currentSentenceFrames = 0
-			playbackTail = time.Time{}
-			log.Debugf("runSenderLoop interrupt, drained queue and continue")
+			handleInterrupt()
 			continue
+		case elem := <-t.delayedSentenceReadyQueue:
+			handleDelayedSentence(elem)
 		case elem, ok := <-t.sessionAudioQueue:
 			if !ok {
 				return
@@ -128,17 +189,8 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				if elem.IsStart {
 					needReportFirstFrame = true
 				}
-				if elem.OnStart != nil {
-					elem.OnStart()
-				}
-				if elem.Text != "" {
-					if err := t.serverTransport.SendSentenceStart(elem.Text); err != nil {
-						log.Errorf("发送 TTS 文本失败: %s, %v", elem.Text, err)
-						if elem.OnEnd != nil {
-							elem.OnEnd(err)
-						}
-						continue
-					}
+				if !t.enqueueDelayedSentenceTask(ctx, elem) && elem.OnEnd != nil {
+					elem.OnEnd(ctx.Err())
 				}
 			case AudioQueueKindFrame:
 				now := time.Now()
@@ -148,13 +200,16 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				allowedAhead := time.Duration(cacheFrameCount) * frameDuration
 				sendAt := playbackTail.Add(-allowedAhead)
 				if now.Before(sendAt) {
-					sleepDuration := sendAt.Sub(now)
-					select {
-					case <-ctx.Done():
+					waitResult := t.waitUntilSenderDeadline(ctx, sendAt, handleDelayedSentence)
+					switch waitResult {
+					case senderWaitContextDone:
 						_ = t.serverTransport.SendTtsStop()
 						t.drainSessionAudioQueue()
+						t.drainDelayedSentenceReadyQueue()
 						return
-					case <-time.After(sleepDuration):
+					case senderWaitInterrupted:
+						handleInterrupt()
+						continue
 					}
 					now = time.Now()
 					if now.After(playbackTail) {
@@ -182,14 +237,8 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 					needReportFirstFrame = false
 				}
 			case AudioQueueKindSentenceEnd:
-				if elem.Text != "" {
-					if err := t.serverTransport.SendSentenceEnd(elem.Text); err != nil {
-						log.Errorf("发送 TTS 文本失败: %s, %v", elem.Text, err)
-					}
-				}
-				currentSentenceFrames = 0
-				if elem.OnEnd != nil {
-					elem.OnEnd(elem.Err)
+				if !t.enqueueDelayedSentenceTask(ctx, elem) && elem.OnEnd != nil {
+					elem.OnEnd(ctx.Err())
 				}
 			case AudioQueueKindTtsStart:
 				if t.session != nil {
@@ -216,19 +265,30 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 			case AudioQueueKindTtsStop:
 				// 等待当前播放尾指针走到最后一帧结束再发 TtsStop
 				if !playbackTail.IsZero() {
-					if now := time.Now(); now.Before(playbackTail) {
-						sleepDuration := playbackTail.Sub(now)
-						select {
-						case <-ctx.Done():
-							_ = t.serverTransport.SendTtsStop()
-							t.drainSessionAudioQueue()
-							return
-						case <-time.After(sleepDuration):
-						}
+					waitResult := t.waitUntilSenderDeadline(ctx, playbackTail, handleDelayedSentence)
+					switch waitResult {
+					case senderWaitContextDone:
+						_ = t.serverTransport.SendTtsStop()
+						t.drainSessionAudioQueue()
+						t.drainDelayedSentenceReadyQueue()
+						return
+					case senderWaitInterrupted:
+						handleInterrupt()
+						continue
 					}
 				}
 				// 固定150ms等待，确保客户端播放完成
-				time.Sleep(150 * time.Millisecond)
+				waitResult := t.waitUntilSenderDeadline(ctx, time.Now().Add(150*time.Millisecond), handleDelayedSentence)
+				switch waitResult {
+				case senderWaitContextDone:
+					_ = t.serverTransport.SendTtsStop()
+					t.drainSessionAudioQueue()
+					t.drainDelayedSentenceReadyQueue()
+					return
+				case senderWaitInterrupted:
+					handleInterrupt()
+					continue
+				}
 				var stopErr error
 				if err := t.serverTransport.SendTtsStop(); err != nil {
 					stopErr = err
@@ -266,6 +326,16 @@ func (t *TTSManager) drainSessionAudioQueue() {
 	}
 }
 
+func (t *TTSManager) drainDelayedSentenceReadyQueue() {
+	for {
+		select {
+		case <-t.delayedSentenceReadyQueue:
+		default:
+			return
+		}
+	}
+}
+
 // ClearSessionAudioQueue 清空会话级音频队列（可由外部在 ctx 取消时调用）
 func (t *TTSManager) ClearSessionAudioQueue() {
 	t.drainSessionAudioQueue()
@@ -277,6 +347,137 @@ func (t *TTSManager) currentAudioGeneration() uint64 {
 
 func (t *TTSManager) nextAudioGeneration() uint64 {
 	return t.audioGeneration.Add(1)
+}
+
+func (t *TTSManager) sentenceControlDelay() time.Duration {
+	frameDurationMs := t.clientState.OutputAudioFormat.FrameDuration
+	if frameDurationMs <= 0 {
+		return 0
+	}
+	cacheFrameCount := 120 / frameDurationMs
+	return time.Duration(cacheFrameCount*frameDurationMs) * time.Millisecond
+}
+
+func insertDelayedSentenceTask(tasks []delayedSentenceTask, task delayedSentenceTask) []delayedSentenceTask {
+	insertAt := len(tasks)
+	for insertAt > 0 && task.ExecuteAt.Before(tasks[insertAt-1].ExecuteAt) {
+		insertAt--
+	}
+	tasks = append(tasks, delayedSentenceTask{})
+	copy(tasks[insertAt+1:], tasks[insertAt:])
+	tasks[insertAt] = task
+	return tasks
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func (t *TTSManager) enqueueDelayedSentenceTask(ctx context.Context, elem AudioQueueElem) bool {
+	task := delayedSentenceTask{
+		Elem:      elem,
+		ExecuteAt: time.Now().Add(t.sentenceControlDelay()),
+	}
+	if ctx == nil {
+		t.delayedSentenceQueue <- task
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case t.delayedSentenceQueue <- task:
+		return true
+	}
+}
+
+func (t *TTSManager) runDelayedSentenceLoop(ctx context.Context) {
+	var (
+		pending []delayedSentenceTask
+		timer   *time.Timer
+		timerCh <-chan time.Time
+	)
+
+	resetTimer := func() {
+		stopTimer(timer)
+		timer = nil
+		timerCh = nil
+		if len(pending) == 0 {
+			return
+		}
+		waitDuration := time.Until(pending[0].ExecuteAt)
+		if waitDuration < 0 {
+			waitDuration = 0
+		}
+		timer = time.NewTimer(waitDuration)
+		timerCh = timer.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return
+		case task := <-t.delayedSentenceQueue:
+			pending = insertDelayedSentenceTask(pending, task)
+			resetTimer()
+		case <-timerCh:
+			timer = nil
+			timerCh = nil
+			if len(pending) == 0 {
+				continue
+			}
+			task := pending[0]
+			pending = pending[1:]
+			if task.Elem.Generation == t.currentAudioGeneration() {
+				select {
+				case <-ctx.Done():
+					return
+				case t.delayedSentenceReadyQueue <- task.Elem:
+				}
+			}
+			resetTimer()
+		}
+	}
+}
+
+type senderWaitResult int
+
+const (
+	senderWaitReached senderWaitResult = iota
+	senderWaitContextDone
+	senderWaitInterrupted
+)
+
+func (t *TTSManager) waitUntilSenderDeadline(ctx context.Context, deadline time.Time, handleDelayed func(AudioQueueElem)) senderWaitResult {
+	for {
+		now := time.Now()
+		if !now.Before(deadline) {
+			return senderWaitReached
+		}
+
+		timer := time.NewTimer(deadline.Sub(now))
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return senderWaitContextDone
+		case <-t.interruptCh:
+			stopTimer(timer)
+			return senderWaitInterrupted
+		case elem := <-t.delayedSentenceReadyQueue:
+			stopTimer(timer)
+			handleDelayed(elem)
+		case <-timer.C:
+			return senderWaitReached
+		}
+	}
 }
 
 func (t *TTSManager) enqueueSessionElem(ctx context.Context, generation uint64, elem AudioQueueElem) bool {
@@ -418,12 +619,40 @@ func (t *TTSManager) handleTts(ctx context.Context, generation uint64, llmRespon
 	}
 }
 
-// 处理文本内容响应（异步 TTS 入队）
+const ttsSyncWaitTimeout = 30 * time.Second
+
+// signalDone 向已缓冲的 done 发送一次完成信号，多次调用仅首次生效
+func signalDone(done chan<- struct{}) {
+	select {
+	case done <- struct{}{}:
+	default:
+	}
+}
+
+// waitForSync 同步等待完成信号，支持 ctx 取消与超时
+func (t *TTSManager) waitForSync(ctx context.Context, done <-chan struct{}) error {
+	timer := time.NewTimer(ttsSyncWaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("TTS 处理上下文已取消")
+	case <-timer.C:
+		return fmt.Errorf("TTS 处理超时")
+	}
+}
+
+// handleTextResponse 处理文本响应（异步 TTS 入队）。调用方按句多次调用，内部根据 SupportsDualStream() 自动决定：
+//   - 不支持双流式：每次 Push 一个单条 TTSQueueItem（与原逻辑一致）。
+//   - 支持双流式：IsStart 时创建内部 StreamChan 并 Push 一个流式 item，后续调用写入该 channel，IsEnd 时 close。
 func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_common.LLMResponseStruct, isSync bool) error {
-	if strings.TrimSpace(llmResponse.Text) == "" {
+	hasText := strings.TrimSpace(llmResponse.Text) != ""
+	if !hasText && !llmResponse.IsEnd && !llmResponse.IsStart {
 		return nil
 	}
 
+	// TTS_INPUT hook
 	if t.session != nil {
 		payload, stop, hookErr := t.session.hookHub.EmitTTSInput(t.session.hookContext(ctx), chathooks.TTSInputData{Text: llmResponse.Text, IsStart: llmResponse.IsStart, IsEnd: llmResponse.IsEnd})
 		if hookErr != nil {
@@ -438,31 +667,108 @@ func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_com
 		}
 	}
 
-	ttsQueueItem := TTSQueueItem{ctx: ctx, llmResponse: llmResponse, generation: t.currentAudioGeneration()}
-	endChan := make(chan bool, 1)
-	ttsQueueItem.onEndFunc = func(err error) {
-		select {
-		case endChan <- true:
-		default:
+	// 重新检查 hasText，因为 hook 可能修改了文本
+	hasText = strings.TrimSpace(llmResponse.Text) != ""
+
+	if !t.SupportsDualStream() {
+		if !hasText {
+			return nil
 		}
+		gen := t.currentAudioGeneration()
+		done := make(chan struct{}, 1)
+		t.ttsQueue.Push(TTSQueueItem{
+			ctx:         ctx,
+			llmResponse: llmResponse,
+			generation:  gen,
+			onEndFunc:   func(error) { signalDone(done) },
+		})
+		if isSync {
+			return t.waitForSync(ctx, done)
+		}
+		return nil
 	}
 
-	t.ttsQueue.Push(ttsQueueItem)
+	// 双流式模式
+	t.dualStreamMu.Lock()
+	defer t.dualStreamMu.Unlock()
 
-	if isSync {
-		timer := time.NewTimer(30 * time.Second)
-		defer timer.Stop()
+	if llmResponse.IsStart {
+		// 容错：关闭残留的旧 channel
+		if t.dualStreamChan != nil {
+			close(t.dualStreamChan)
+			t.dualStreamChan = nil
+			t.dualStreamDone = nil
+		}
+		t.dualStreamChan = make(chan llm_common.LLMResponseStruct, 16)
+		done := make(chan struct{}, 1)
+		t.dualStreamDone = done
+		t.ttsQueue.Push(TTSQueueItem{
+			ctx:        ctx,
+			StreamChan: t.dualStreamChan,
+			generation: t.currentAudioGeneration(),
+			onEndFunc:  func(error) { signalDone(done) },
+		})
+		log.Debugf("handleTextResponse: dual stream, created StreamChan and pushed item")
+	}
+
+	if t.dualStreamChan != nil && hasText {
 		select {
-		case <-endChan:
-			return nil
+		case t.dualStreamChan <- llmResponse:
 		case <-ctx.Done():
 			return fmt.Errorf("TTS 处理上下文已取消")
-		case <-timer.C:
-			return fmt.Errorf("TTS 处理超时")
+		}
+	} else if t.dualStreamChan == nil && hasText {
+		// 降级：未收到 IsStart 就来了数据，按单条入队
+		gen := t.currentAudioGeneration()
+		t.ttsQueue.Push(TTSQueueItem{ctx: ctx, llmResponse: llmResponse, generation: gen})
+		log.Debugf("handleTextResponse: dual stream fallback, no active stream, pushed single item")
+	}
+
+	if llmResponse.IsEnd && t.dualStreamChan != nil {
+		close(t.dualStreamChan)
+		done := t.dualStreamDone
+		t.dualStreamChan = nil
+		t.dualStreamDone = nil
+		if isSync && done != nil {
+			t.dualStreamMu.Unlock()
+			err := t.waitForSync(ctx, done)
+			t.dualStreamMu.Lock()
+			return err
 		}
 	}
 
 	return nil
+}
+
+// getEffectiveTTSConfig 返回当前生效的 TTS 配置：有声纹则用声纹配置，否则用设备默认 TTS 配置（与 getTTSProviderInstance 一致）
+func (t *TTSManager) getEffectiveTTSConfig() map[string]interface{} {
+	if t.clientState.SpeakerTTSConfig != nil && len(t.clientState.SpeakerTTSConfig) > 0 {
+		config := make(map[string]interface{})
+		for k, v := range t.clientState.SpeakerTTSConfig {
+			config[k] = v
+		}
+		return config
+	}
+	return t.clientState.DeviceConfig.Tts.Config
+}
+
+// SupportsDualStream 判断当前 TTS 是否支持双流式：TTS 输入与输出均为流式（边收文本边合成输出），与 LLM 无关；由配置 double_stream 与 TTS provider 绑定。
+func (t *TTSManager) SupportsDualStream() bool {
+	config := t.getEffectiveTTSConfig()
+	if config == nil {
+		return false
+	}
+	v, ok := config["double_stream"]
+	if !ok {
+		return false
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	if s, ok := v.(string); ok {
+		return s == "true" || s == "1"
+	}
+	return false
 }
 
 // getTTSProviderInstance 获取TTS Provider实例（使用provider+音色作为资源池唯一key）
@@ -553,8 +859,118 @@ func (t *TTSManager) generateTtsOnly(ctx context.Context, llmResponse llm_common
 	return ch, func() { pool.Release(ttsWrapper) }, nil
 }
 
+// handleDualStreamTts 真正的双流式 TTS：将 StreamChan 里的文本流式输入给 TTS provider，同时流式输出音频。
+// 返回 true 表示已处理（成功或出错），false 表示 provider 不支持双流式需要降级。
+func (t *TTSManager) handleDualStreamTts(item TTSQueueItem) bool {
+	ttsWrapper, err := t.getTTSProviderInstance()
+	if err != nil {
+		log.Errorf("双流式 TTS 获取 provider 失败: %v", err)
+		return false
+	}
+	defer pool.Release(ttsWrapper)
+
+	provider := ttsWrapper.GetProvider()
+	adapter, ok := provider.(*tts.ContextTTSAdapter)
+	if !ok {
+		return false
+	}
+	dp, ok := adapter.Provider.(tts.DualStreamProvider)
+	if !ok {
+		return false
+	}
+
+	textChan := make(chan string, 16)
+	eventChan, err := dp.StreamingSynthesize(item.ctx, textChan,
+		t.clientState.OutputAudioFormat.SampleRate,
+		t.clientState.OutputAudioFormat.Channels,
+		t.clientState.OutputAudioFormat.FrameDuration)
+	if err != nil {
+		close(textChan)
+		log.Errorf("双流式 TTS StreamingSynthesize 失败: %v", err)
+		return false
+	}
+
+	// 从 StreamChan 读 LLM 响应文本并喂给 TTS provider。
+	go func() {
+		defer close(textChan)
+		for {
+			select {
+			case <-item.ctx.Done():
+				return
+			case resp, ok := <-item.StreamChan:
+				if !ok {
+					return
+				}
+				text := strings.TrimSpace(resp.Text)
+				if text == "" {
+					continue
+				}
+				select {
+				case textChan <- text:
+				case <-item.ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	firstSentence := true
+	for event := range eventChan {
+		for _, signal := range event.SentenceSignals {
+			switch signal.Type {
+			case ttsstream.SentenceSignalEnd:
+				if !t.enqueueSessionElem(item.ctx, item.generation, AudioQueueElem{
+					Kind: AudioQueueKindSentenceEnd,
+					Text: signal.Text,
+				}) {
+					if item.onEndFunc != nil {
+						item.onEndFunc(item.ctx.Err())
+					}
+					return true
+				}
+			case ttsstream.SentenceSignalStart:
+				startElem := AudioQueueElem{
+					Kind:    AudioQueueKindSentenceStart,
+					Text:    signal.Text,
+					IsStart: firstSentence,
+				}
+				if firstSentence {
+					startElem.OnStart = item.onStartFunc
+					firstSentence = false
+				}
+				if !t.enqueueSessionElem(item.ctx, item.generation, startElem) {
+					if item.onEndFunc != nil {
+						item.onEndFunc(item.ctx.Err())
+					}
+					return true
+				}
+			}
+		}
+
+		if len(event.Audio) > 0 {
+			frameCopy := make([]byte, len(event.Audio))
+			copy(frameCopy, event.Audio)
+			if !t.enqueueSessionElem(item.ctx, item.generation, AudioQueueElem{Kind: AudioQueueKindFrame, Data: frameCopy}) {
+				if item.onEndFunc != nil {
+					item.onEndFunc(item.ctx.Err())
+				}
+				return true
+			}
+		}
+	}
+
+	if !t.enqueueSessionElem(item.ctx, item.generation, AudioQueueElem{Kind: AudioQueueKindSentenceEnd, OnEnd: item.onEndFunc}) && item.onEndFunc != nil {
+		item.onEndFunc(nil)
+	}
+	return true
+}
+
 // handleStreamTts 流式 TTS：从 item.StreamChan 读并逐条 generateTtsOnly，向 sessionAudioQueue 推送 SentenceStart → Frame… → SentenceEnd
 func (t *TTSManager) handleStreamTts(item TTSQueueItem) {
+	if t.SupportsDualStream() && t.handleDualStreamTts(item) {
+		return
+	}
+
 	firstSegment := true
 	for {
 		select {

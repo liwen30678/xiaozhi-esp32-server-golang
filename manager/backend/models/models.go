@@ -18,6 +18,20 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// APIToken 对外OpenAPI访问令牌（仅保存哈希，不保存明文）
+type APIToken struct {
+	ID          uint       `json:"id" gorm:"primarykey"`
+	UserID      uint       `json:"user_id" gorm:"not null;index"`
+	Name        string     `json:"name" gorm:"type:varchar(100);not null"`
+	TokenPrefix string     `json:"token_prefix" gorm:"type:varchar(20);index"`
+	TokenHash   string     `json:"-" gorm:"type:char(64);uniqueIndex;not null"`
+	IsActive    bool       `json:"is_active" gorm:"default:true;index"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	ExpiresAt   *time.Time `json:"expires_at" gorm:"index"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
 // 设备模型
 type Device struct {
 	ID           uint       `json:"id" gorm:"primarykey"`
@@ -113,13 +127,14 @@ type Config struct {
 // MCPMarketService 市场导入的MCP服务配置
 // 人工配置仍存放在 Config(type=mcp).json_data 中，市场配置拆分到独立表。
 type MCPMarketService struct {
-	ID          uint   `json:"id" gorm:"primarykey"`
-	Name        string `json:"name" gorm:"type:varchar(150);not null"`
-	Enabled     bool   `json:"enabled" gorm:"default:true;index"`
-	Transport   string `json:"transport" gorm:"type:varchar(32);not null"` // sse / streamablehttp
-	URL         string `json:"url" gorm:"type:text;not null"`
-	URLHash     string `json:"url_hash" gorm:"type:varchar(512);not null;uniqueIndex:idx_mcp_market_services_url_hash"`
-	HeadersJSON string `json:"headers_json" gorm:"type:text"`
+	ID               uint   `json:"id" gorm:"primarykey"`
+	Name             string `json:"name" gorm:"type:varchar(150);not null"`
+	Enabled          bool   `json:"enabled" gorm:"default:true;index"`
+	Transport        string `json:"transport" gorm:"type:varchar(32);not null"` // sse / streamablehttp
+	URL              string `json:"url" gorm:"type:text;not null"`
+	URLHash          string `json:"url_hash" gorm:"type:char(64);not null;uniqueIndex:idx_mcp_market_services_url_hash"` // sha256(url) hex
+	HeadersJSON      string `json:"headers_json" gorm:"type:text"`
+	AllowedToolsJSON string `json:"allowed_tools_json" gorm:"type:text"`
 
 	MarketID    *uint  `json:"market_id" gorm:"index"` // 关联 configs(type=mcp_market).id
 	ProviderID  string `json:"provider_id" gorm:"type:varchar(50);index"`

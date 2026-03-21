@@ -11,6 +11,7 @@ const (
 	AsrTypeDoubao       = "doubao"
 	AsrTypeAliyunFunASR = "aliyun_funasr"
 	AsrTypeAliyunQwen3  = "aliyun_qwen3"
+	AsrTypeXunfei       = "xunfei"
 )
 
 const (
@@ -29,6 +30,8 @@ const (
 	TtsTypeEdge         = "edge"
 	TtsTypeEdgeOffline  = "edge_offline"
 	TtsTypeXiaozhi      = "xiaozhi"
+	TtsTypeXunfei       = "xunfei"
+	TtsTypeXunfeiSuper  = "xunfei_super_tts"
 	TtsTypeOpenAI       = "openai"
 	TtsTypeZhipu        = "zhipu"
 	TtsTypeMinimax      = "minimax"

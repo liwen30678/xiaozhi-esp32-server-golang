@@ -1,9 +1,9 @@
 package hooks
 
 import (
-	"sync"
 	"time"
 
+	cmap "github.com/orcaman/concurrent-map/v2"
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
@@ -22,11 +22,14 @@ type turnMetric struct {
 }
 
 type statisticPlugin struct {
-	mu sync.Mutex
+	// 使用 concurrent-map 替代 sync.Map，性能更好
+	currentTurn cmap.ConcurrentMap[string, int64]
+	turns       cmap.ConcurrentMap[string, *turnMetric]
+	lastSeen    cmap.ConcurrentMap[string, int64]
 
-	currentTurn map[string]int64
-	turns       map[string]*turnMetric
-	lastSeen    map[string]int64
+	// 计数器，用于控制清理频率
+	cleanupCounter   int64
+	cleanupThreshold int64 // 每 N 次调用执行一次全量清理
 }
 
 func RegisterBuiltinPlugins(hub *Hub) {
@@ -35,9 +38,10 @@ func RegisterBuiltinPlugins(hub *Hub) {
 	}
 
 	plugin := &statisticPlugin{
-		currentTurn: make(map[string]int64),
-		turns:       make(map[string]*turnMetric),
-		lastSeen:    make(map[string]int64),
+		currentTurn:      cmap.New[int64](),
+		turns:            cmap.New[*turnMetric](),
+		lastSeen:         cmap.New[int64](),
+		cleanupThreshold: 100, // 每 100 次调用执行一次清理
 	}
 	hub.RegisterAsync(EventChatMetric, "statistic_plugin", 100, plugin.onMetric)
 }
@@ -48,12 +52,13 @@ func (p *statisticPlugin) onMetric(ctx Context, payload any) {
 		return
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	nowTs := time.Now().UnixMilli()
-	p.lastSeen[ctx.SessionID] = nowTs
-	p.cleanupStale(nowTs)
+	p.lastSeen.Set(ctx.SessionID, nowTs)
+
+	// 减少清理频率：每 N 次调用才执行一次全量清理
+	if p.cleanupCounter++; p.cleanupCounter%p.cleanupThreshold == 0 {
+		p.cleanupStale(nowTs)
+	}
 
 	tm := p.getOrCreateTurn(ctx.SessionID, data.Stage)
 	switch data.Stage {
@@ -76,28 +81,39 @@ func (p *statisticPlugin) onMetric(ctx Context, payload any) {
 	case MetricTtsStop:
 		tm.ttsStopTs = data.Ts
 		p.logTurnMetric(ctx.SessionID, tm)
-		delete(p.turns, ctx.SessionID)
+		p.turns.Remove(ctx.SessionID)
 	}
 }
 
 func (p *statisticPlugin) getOrCreateTurn(sessionID string, stage MetricStage) *turnMetric {
 	if stage == MetricTurnStart {
-		p.currentTurn[sessionID]++
-		tm := &turnMetric{turnID: p.currentTurn[sessionID]}
-		p.turns[sessionID] = tm
+		// currentTurn + 1
+		var newTurnID int64 = 1
+		if val, ok := p.currentTurn.Get(sessionID); ok {
+			newTurnID = val + 1
+		}
+		p.currentTurn.Set(sessionID, newTurnID)
+
+		tm := &turnMetric{turnID: newTurnID}
+		p.turns.Set(sessionID, tm)
 		return tm
 	}
 
-	if tm, ok := p.turns[sessionID]; ok {
-		return tm
+	// 尝试获取 existing turn
+	if val, ok := p.turns.Get(sessionID); ok {
+		return val
 	}
 
-	if p.currentTurn[sessionID] == 0 {
-		p.currentTurn[sessionID] = 1
+	// 获取或创建 currentTurn
+	var turnID int64 = 1
+	if val, ok := p.currentTurn.Get(sessionID); ok {
+		turnID = val
+	} else {
+		p.currentTurn.Set(sessionID, turnID)
 	}
 
-	tm := &turnMetric{turnID: p.currentTurn[sessionID]}
-	p.turns[sessionID] = tm
+	tm := &turnMetric{turnID: turnID}
+	p.turns.Set(sessionID, tm)
 	return tm
 }
 
@@ -126,11 +142,18 @@ func (p *statisticPlugin) logTurnMetric(sessionID string, tm *turnMetric) {
 
 func (p *statisticPlugin) cleanupStale(nowTs int64) {
 	const ttl = int64(2 * 60 * 1000)
-	for sessionID, last := range p.lastSeen {
-		if nowTs-last > ttl {
-			delete(p.lastSeen, sessionID)
-			delete(p.turns, sessionID)
-			delete(p.currentTurn, sessionID)
+
+	// 遍历 lastSeen，清理过期项
+	keysToDelete := make([]string, 0)
+	p.lastSeen.IterCb(func(key string, value int64) {
+		if nowTs-value > ttl {
+			keysToDelete = append(keysToDelete, key)
 		}
+	})
+
+	for _, key := range keysToDelete {
+		p.lastSeen.Remove(key)
+		p.turns.Remove(key)
+		p.currentTurn.Remove(key)
 	}
 }

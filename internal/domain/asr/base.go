@@ -57,7 +57,16 @@ func NewAsrProvider(asrType string, config map[string]interface{}) (AsrProvider,
 			log.Info("阿里云 Qwen3 ASR 适配器创建成功")
 		}
 		return provider, err
+	case constants.AsrTypeXunfei:
+		log.Info("使用 讯飞 ASR 提供者")
+		provider, err := NewXunfeiAdapter(config)
+		if err != nil {
+			log.Errorf("讯飞 ASR 适配器创建失败: %v", err)
+		} else {
+			log.Info("讯飞 ASR 适配器创建成功")
+		}
+		return provider, err
 	default:
-		return nil, fmt.Errorf("不支持的ASR引擎类型: %s，目前仅支持 'funasr', 'aliyun_funasr', 'doubao', 'aliyun_qwen3'", asrType)
+		return nil, fmt.Errorf("不支持的ASR引擎类型: %s，目前仅支持 'funasr', 'aliyun_funasr', 'doubao', 'aliyun_qwen3', 'xunfei'", asrType)
 	}
 }

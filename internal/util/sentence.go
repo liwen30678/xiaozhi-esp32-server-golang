@@ -184,6 +184,27 @@ func trimSpaceRunes(text []rune) []rune {
 	return text[start : end+1]
 }
 
+func isDigitAdjacentColon(text []rune, pos int) bool {
+	if pos < 0 || pos >= len(text) {
+		return false
+	}
+
+	colon := text[pos]
+	if colon != ':' && colon != '：' {
+		return false
+	}
+
+	if pos == 0 || !unicode.IsDigit(text[pos-1]) {
+		return false
+	}
+
+	if pos == len(text)-1 {
+		return true
+	}
+
+	return unicode.IsDigit(text[pos+1])
+}
+
 // findLastPunctuation 从后向前查找最后一个标点
 func findLastPunctuation(text []rune, separatorMap map[rune]bool) int {
 	lastPos := -1
@@ -192,6 +213,9 @@ func findLastPunctuation(text []rune, separatorMap map[rune]bool) int {
 		if separatorMap[text[i]] {
 			// 如果是点号，检查是否是序号的一部分
 			if text[i] == '.' && isNumberPrefix(text, i) {
+				continue
+			}
+			if isDigitAdjacentColon(text, i) {
 				continue
 			}
 			return i
@@ -226,6 +250,9 @@ func findNextSplitPoint(text []rune, startPos int, maxLen int, separatorMap map[
 
 		// 使用map检查是否是标点符号
 		if separatorMap[text[i]] {
+			if isDigitAdjacentColon(text, i) {
+				continue
+			}
 			return i
 		}
 	}
@@ -233,7 +260,13 @@ func findNextSplitPoint(text []rune, startPos int, maxLen int, separatorMap map[
 	// 如果在maxLen范围内没找到，尝试在更大范围内查找
 	if endPos < len(text) {
 		for i := endPos; i < len(text); i++ {
-			if text[i] == '\n' || separatorMap[text[i]] {
+			if text[i] == '\n' {
+				return i
+			}
+			if separatorMap[text[i]] {
+				if isDigitAdjacentColon(text, i) {
+					continue
+				}
 				return i
 			}
 		}
@@ -323,16 +356,21 @@ func ExtractSmartSentences(text string, minLen, maxLen int, isFirst bool) (sente
 
 // ContainsSentenceSeparator 判断字符串中是否包含分隔符（句子结束或暂停标点符号）
 func ContainsSentenceSeparator(s string, isFirst bool) bool {
-	for _, r := range s {
-		if isFirst {
-			if firstPunctuation[r] {
-				return true
-			}
-		} else {
-			if punctuationMap[r] {
-				return true
-			}
-		}
+	separatorMap := punctuationMap
+	if isFirst {
+		separatorMap = firstPunctuation
 	}
+
+	runes := []rune(s)
+	for i, r := range runes {
+		if !separatorMap[r] {
+			continue
+		}
+		if isDigitAdjacentColon(runes, i) {
+			continue
+		}
+		return true
+	}
+
 	return false
 }

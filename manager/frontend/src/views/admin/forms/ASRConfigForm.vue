@@ -6,6 +6,7 @@
         <el-option label="Aliyun FunASR" value="aliyun_funasr" />
         <el-option label="豆包" value="doubao" />
         <el-option label="Aliyun Qwen3" value="aliyun_qwen3" />
+        <el-option label="讯飞" value="xunfei" />
       </el-select>
     </el-form-item>
     <el-form-item label="配置名称" prop="name">
@@ -135,6 +136,40 @@
         <el-input-number v-model="model.doubao.timeout" :min="1" style="width: 100%" />
       </el-form-item>
     </div>
+    <div v-if="model.provider === 'xunfei'">
+      <el-form-item label="应用ID" prop="xunfei.appid">
+        <el-input v-model="model.xunfei.appid" placeholder="请输入讯飞应用ID" />
+      </el-form-item>
+      <el-form-item label="API Key" prop="xunfei.api_key">
+        <el-input v-model="model.xunfei.api_key" type="password" show-password placeholder="请输入讯飞API Key" />
+      </el-form-item>
+      <el-form-item label="API Secret" prop="xunfei.api_secret">
+        <el-input v-model="model.xunfei.api_secret" type="password" show-password placeholder="请输入讯飞API Secret" />
+      </el-form-item>
+      <el-form-item label="Host" prop="xunfei.host">
+        <el-input v-model="model.xunfei.host" placeholder="iat-api.xfyun.cn" />
+      </el-form-item>
+      <el-form-item label="Path" prop="xunfei.path">
+        <el-input v-model="model.xunfei.path" placeholder="/v2/iat" />
+      </el-form-item>
+      <el-form-item label="业务领域" prop="xunfei.domain">
+        <el-input v-model="model.xunfei.domain" placeholder="iat" />
+      </el-form-item>
+      <el-form-item label="语言" prop="xunfei.language">
+        <el-input v-model="model.xunfei.language" placeholder="zh_cn" />
+      </el-form-item>
+      <el-form-item label="方言" prop="xunfei.accent">
+        <el-input v-model="model.xunfei.accent" placeholder="mandarin" />
+      </el-form-item>
+      <el-form-item label="采样率" prop="xunfei.sample_rate">
+        <el-select v-model="model.xunfei.sample_rate" placeholder="请选择采样率" style="width: 100%">
+          <el-option label="16000" :value="16000" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="超时时间(秒)" prop="xunfei.timeout">
+        <el-input-number v-model="model.xunfei.timeout" :min="1" style="width: 100%" />
+      </el-form-item>
+    </div>
     <div v-if="model.provider === 'aliyun_qwen3'">
       <el-form-item label="API Key" prop="aliyun_qwen3.api_key">
         <el-input v-model="model.aliyun_qwen3.api_key" type="password" show-password placeholder="可以为空，读取DASHSCOPE_API_KEY" />
@@ -217,6 +252,7 @@ function getJsonData() {
   if (m.provider === 'aliyun_funasr') return JSON.stringify(m.aliyun_funasr || {})
   if (m.provider === 'doubao') return JSON.stringify(m.doubao || {})
   if (m.provider === 'aliyun_qwen3') return JSON.stringify(m.aliyun_qwen3 || {})
+  if (m.provider === 'xunfei') return JSON.stringify(m.xunfei || {})
   return '{}'
 }
 

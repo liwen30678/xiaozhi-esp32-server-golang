@@ -9,6 +9,9 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
+const doubaoRetryableResponseCode = "45000081"
+const xunfeiRetryableResponseCode = "10008"
+
 type Asr struct {
 	lock sync.RWMutex
 	// ASR 上下文和通道
@@ -30,13 +33,30 @@ type Asr struct {
 
 	// 聊天历史音频缓存：持续累积发送到ASR的音频数据
 	HistoryAudioBuffer []float32
+
+	// 等待下一次检测到真实语音时再重启ASR，避免空转时持续重连上游
+	PendingRestartOnVoice bool
 }
 
 func (a *Asr) Reset() {
 	a.AsrResult.Reset()
 }
 
-func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
+func isXunfeiRetryableError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+
+	errText := err.Error()
+	if strings.Contains(errText, "xunfei asr error code="+xunfeiRetryableResponseCode) ||
+		strings.Contains(strings.ToLower(errText), "service instance invalid") {
+		return asr_types.RetryReasonXunfeiServiceInstanceInvalid, true
+	}
+
+	return "", false
+}
+
+func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, bool, error) {
 	defer func() {
 		a.Reset()
 	}()
@@ -46,15 +66,29 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 	// 使用局部变量跟踪是否已发送首次字符事件
 	firstTextSent := false
 	lastAliyunText := ""
+	var emptyResult asr_types.StreamingResult
 
 	for {
 		select {
 		case <-ctx.Done():
-			return "", false, nil
+			return emptyResult, false, nil
 		case result, ok := <-a.AsrResultChannel:
-			log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, error: %+v", result.Text, ok, result.IsFinal, result.Error)
+			log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, emptyReason: %s, error: %+v", result.Text, ok, result.IsFinal, result.EmptyReason, result.Error)
 			if result.Error != nil {
-				return "", false, result.Error
+				if a.AsrType == "doubao" && strings.Contains(result.Error.Error(), doubaoRetryableResponseCode) {
+					log.Warnf("doubao ASR 返回可重试错误(%s)，触发重试", doubaoRetryableResponseCode)
+					return emptyResult, true, nil
+				}
+				if a.AsrType == "xunfei" {
+					if retryReason, ok := isXunfeiRetryableError(result.Error); ok {
+						log.Warnf("xunfei ASR 返回可恢复错误(%s)，触发重建: %v", retryReason, result.Error)
+						return asr_types.StreamingResult{
+							Error:       result.Error,
+							RetryReason: retryReason,
+						}, true, nil
+					}
+				}
+				return emptyResult, false, result.Error
 			}
 
 			// 检测首次返回字符（文本不为空且未发送过）
@@ -75,11 +109,11 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 					}
 				}
 				if a.Mode == "offline" {
-					return result.Text, true, nil
+					return asr_types.StreamingResult{Text: result.Text, IsFinal: true}, true, nil
 				}
 
 				if a.AutoEnd || result.IsFinal {
-					return result.Text, true, nil
+					return result, true, nil
 				}
 			} else if a.AsrType == "aliyun_funasr" {
 				if result.Text != "" {
@@ -92,23 +126,48 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (string, bool, error) {
 					lastAliyunText = result.Text
 				}
 				if a.AutoEnd || result.IsFinal {
-					return a.AsrResult.String(), true, nil
+					result.Text = a.AsrResult.String()
+					return result, true, nil
+				}
+			} else if a.AsrType == "xunfei" {
+				if result.IsFinal {
+					if result.Text == "" {
+						log.Debugf("xunfei ASR returned empty final result to client layer, emptyReason=%s", result.EmptyReason)
+					}
+					return result, true, nil
+				}
+				if a.AutoEnd {
+					a.AsrResult.WriteString(result.Text)
+					result.Text = a.AsrResult.String()
+					return result, true, nil
 				}
 			} else {
 				// 其他情况按原有逻辑执行
 				a.AsrResult.WriteString(result.Text)
 				if a.AutoEnd || result.IsFinal {
-					text := a.AsrResult.String()
-					return text, true, nil
+					result.Text = a.AsrResult.String()
+					return result, true, nil
 				}
 			}
 
 			if !ok {
 				log.Debugf("asr result channel closed")
-				return "", true, nil
+				return emptyResult, true, nil
 			}
 		}
 	}
+}
+
+func (a *Asr) SetPendingRestartOnVoice(v bool) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.PendingRestartOnVoice = v
+}
+
+func (a *Asr) ShouldRestartOnVoice() bool {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+	return a.PendingRestartOnVoice
 }
 
 func (a *Asr) Stop() {

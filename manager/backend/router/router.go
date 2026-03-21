@@ -19,7 +19,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	// CORS配置
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowAllOrigins = true
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-API-Token"}
 	corsConfig.AllowCredentials = true
 	r.Use(cors.New(corsConfig))
 
@@ -103,6 +103,11 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				user.PUT("/roles/:id", adminController.UpdateRoleNew)
 				user.DELETE("/roles/:id", adminController.DeleteRoleNew)
 				user.PATCH("/roles/:id/toggle", adminController.ToggleRoleStatus)
+
+				// API Token（供OpenAPI调用）
+				user.GET("/api-tokens", userController.ListAPITokens)
+				user.POST("/api-tokens", userController.CreateAPIToken)
+				user.DELETE("/api-tokens/:id", userController.RevokeAPIToken)
 
 				// 设备管理
 				user.GET("/devices", userController.GetMyDevices)
@@ -194,6 +199,25 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				user.GET("/history/messages/:id/audio", chatHistoryController.GetAudioFile)
 			}
 
+			// 外部OpenAPI路由（支持JWT或API Token）
+			openV1 := api.Group("/open/v1")
+			openV1.Use(middleware.OpenAPIAuth(db))
+			{
+				openV1.GET("/profile", authController.GetProfile)
+				openV1.GET("/devices", userController.GetMyDevices)
+				openV1.POST("/devices", userController.CreateDevice)
+				openV1.GET("/agents", userController.GetAgents)
+				openV1.POST("/agents", userController.CreateAgent)
+				openV1.GET("/agents/:id", userController.GetAgent)
+				openV1.PUT("/agents/:id", userController.UpdateAgent)
+				openV1.DELETE("/agents/:id", userController.DeleteAgent)
+				openV1.GET("/history/messages", chatHistoryController.GetMessages)
+				openV1.GET("/history/export", chatHistoryController.ExportMessages)
+				openV1.POST("/devices/inject-message", userController.InjectMessage)
+				openV1.GET("/agents/:id/mcp-tools", userController.GetAgentMcpTools)
+				openV1.POST("/agents/:id/mcp-call", userController.CallAgentMcpTool)
+			}
+
 			// 管理员路由
 			admin := auth.Group("/admin")
 			admin.Use(middleware.AdminAuth())
@@ -267,6 +291,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 
 				admin.GET("/mcp-configs", adminController.GetMCPConfigs)
 				admin.POST("/mcp-configs", adminController.CreateMCPConfig)
+				admin.POST("/mcp-configs/discover-tools", adminController.DiscoverMCPConfigTools)
 				admin.PUT("/mcp-configs/:id", adminController.UpdateMCPConfig)
 				admin.DELETE("/mcp-configs/:id", adminController.DeleteMCPConfig)
 				admin.GET("/mcp-markets", adminController.GetMCPMarkets)
@@ -280,6 +305,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				admin.POST("/mcp-market/import", adminController.ImportMCPMarketService)
 				admin.GET("/mcp-market/imported-services", adminController.GetMCPMarketImportedServices)
 				admin.POST("/mcp-market/imported-services", adminController.CreateMCPMarketImportedService)
+				admin.GET("/mcp-market/imported-services/:id/tools", adminController.GetMCPMarketImportedServiceTools)
 				admin.PUT("/mcp-market/imported-services/:id", adminController.UpdateMCPMarketImportedService)
 				admin.DELETE("/mcp-market/imported-services/:id", adminController.DeleteMCPMarketImportedService)
 

@@ -123,7 +123,7 @@ vad:
 
 # 自动语音识别（ASR）配置
 asr:
-  provider: "funasr"  # ASR provider: funasr / aliyun_funasr / doubao
+  provider: "funasr"  # ASR provider: funasr / aliyun_funasr / doubao / aliyun_qwen3 / xunfei
   # FunASR配置
   funasr:
     host: "127.0.0.1"          # FunASR服务器地址
@@ -158,9 +158,22 @@ asr:
     enable_ddc: false               # 启用数字检测修正
     timeout: 30                     # 超时时间（秒）
 
+  # Xunfei ASR config
+  xunfei:
+    appid: ""                      # 讯飞 AppID
+    api_key: ""                    # 讯飞 APIKey
+    api_secret: ""                 # 讯飞 APISecret
+    host: "iat-api.xfyun.cn"       # WebSocket 域名
+    path: "/v2/iat"                # WebSocket 路径
+    domain: "iat"                  # 业务领域
+    language: "zh_cn"              # 语言
+    accent: "mandarin"             # 方言
+    sample_rate: 16000              # 采样率
+    timeout: 30                     # 超时时间（秒）
+
 # 文本转语音（TTS）配置
 tts:
-  provider: "doubao_ws"  # TTS提供商：xiaozhi/doubao/doubao_ws/cosyvoice/edge/edge_offline
+  provider: "doubao_ws"  # TTS提供商：xiaozhi/doubao/doubao_ws/cosyvoice/edge/edge_offline/xunfei/xunfei_super_tts
   openai:  #openai兼容格式的tts服务, 这里使用硅基流动服务
     api_key: "xxxx" #apikey
     api_url: "https://api.siliconflow.cn/v1/audio/speech"
@@ -214,6 +227,47 @@ tts:
     device_id: "ba:8f:17:de:94:94"                      # 设备ID
     client_id: "e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d"  # 客户端ID
     token: "test-token"                                 # 访问令牌
+  # 讯飞在线TTS配置
+  xunfei:
+    app_id: ""
+    api_key: ""
+    api_secret: ""
+    ws_url: "wss://tts-api.xfyun.cn/v2/tts"
+    voice: "xiaoyan"
+    audio_encoding: "raw"   # raw / opus
+    sample_rate: 16000      # 8000 / 16000
+    speed: 50               # 0-100
+    volume: 50              # 0-100
+    pitch: 50               # 0-100
+    tte: "UTF8"
+    reg: 0
+    rdn: 0
+    frame_duration: 60
+    connect_timeout: 10
+    read_timeout: 30
+  # 讯飞超拟人TTS配置
+  xunfei_super_tts:
+    app_id: ""
+    api_key: ""
+    api_secret: ""
+    ws_url: "wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6"
+    voice: "x6_lingxiaoxue_pro"
+    audio_encoding: "raw"   # raw / opus
+    sample_rate: 24000      # 8000 / 16000 / 24000
+    speed: 50
+    volume: 50
+    pitch: 50
+    bgs: 0
+    reg: 0
+    rdn: 0
+    rhy: 0
+    oral_level: "mid"
+    spark_assist: 1
+    stop_split: 0
+    remain: 0
+    frame_duration: 60
+    connect_timeout: 10
+    read_timeout: 30
 
 # 大语言模型（LLM）配置
 llm:

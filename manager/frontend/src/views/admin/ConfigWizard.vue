@@ -168,7 +168,6 @@ import VADConfigForm from './forms/VADConfigForm.vue'
 import ASRConfigForm from './forms/ASRConfigForm.vue'
 import LLMConfigForm from './forms/LLMConfigForm.vue'
 import TTSConfigForm from './forms/TTSConfigForm.vue'
-import { getProviderFixedType, isProviderBaseURLEditable, resolveLLMProvider } from './forms/llmCatalog'
 
 const currentStep = ref(0)
 const saving = ref(false)
@@ -341,6 +340,19 @@ const llmForm = reactive({
   thinking_clear_thinking: 'default'
 })
 const llmFormRef = ref()
+function getResolvedLLMType(provider, type) {
+  if (type) return type
+  if (provider === 'dify' || provider === 'coze') return provider
+  return 'openai'
+}
+
+function getResolvedLLMProvider(provider, type) {
+  if (provider) return provider
+  const resolvedType = getResolvedLLMType(provider, type)
+  if (resolvedType === 'dify' || resolvedType === 'coze') return resolvedType
+  return 'openai'
+}
+
 const llmFormRules = {
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
   config_id: [{ required: true, message: '请输入配置ID', trigger: 'blur' }],
@@ -351,8 +363,7 @@ const llmFormRules = {
     trigger: 'change'
   }, {
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      const providerType = getProviderFixedType(provider)
+      const providerType = getResolvedLLMType(llmForm.provider, llmForm.type)
       if ((providerType === 'openai' || providerType === 'ollama') && !value) {
         callback(new Error('请输入模型名称'))
         return
@@ -363,8 +374,7 @@ const llmFormRules = {
   }],
   api_key: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      if (getProviderFixedType(provider) !== 'ollama' && !value) {
+      if (getResolvedLLMType(llmForm.provider, llmForm.type) !== 'ollama' && !value) {
         callback(new Error('请输入API密钥'))
         return
       }
@@ -374,8 +384,7 @@ const llmFormRules = {
   }],
   base_url: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      if (isProviderBaseURLEditable(provider) && !value) {
+      if (getResolvedLLMType(llmForm.provider, llmForm.type) !== 'coze' && !value) {
         callback(new Error('请输入基础URL'))
         return
       }
@@ -385,8 +394,7 @@ const llmFormRules = {
   }],
   max_tokens: [{
     validator: (_, value, callback) => {
-      const provider = resolveLLMProvider(llmForm.provider, llmForm.type)
-      const providerType = getProviderFixedType(provider)
+      const providerType = getResolvedLLMType(llmForm.provider, llmForm.type)
       if ((providerType === 'openai' || providerType === 'ollama') && (!value || Number(value) < 1 || Number(value) > 100000)) {
         callback(new Error('max_tokens必须在1-100000之间'))
         return
@@ -401,6 +409,7 @@ const ttsForm = reactive({
   name: '默认TTS',
   config_id: 'minimax_default',
   provider: 'minimax',
+  double_stream: false,
   qwen_tts: {
     api_key: '',
     api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
@@ -444,6 +453,47 @@ const ttsForm = reactive({
     stream: true,
     frame_duration: 60
   },
+  xunfei: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://tts-api.xfyun.cn/v2/tts',
+    voice: 'xiaoyan',
+    audio_encoding: 'raw',
+    sample_rate: 16000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    tte: 'UTF8',
+    reg: 0,
+    rdn: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
+  },
+  xunfei_super_tts: {
+    app_id: '',
+    api_key: '',
+    api_secret: '',
+    ws_url: 'wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6',
+    voice: 'x6_lingxiaoxue_pro',
+    audio_encoding: 'raw',
+    sample_rate: 24000,
+    speed: 50,
+    volume: 50,
+    pitch: 50,
+    bgs: 0,
+    reg: 0,
+    rdn: 0,
+    rhy: 0,
+    oral_level: 'mid',
+    spark_assist: 1,
+    stop_split: 0,
+    remain: 0,
+    frame_duration: 60,
+    connect_timeout: 10,
+    read_timeout: 30
+  },
   zhipu: {
     api_key: '',
     api_url: 'https://open.bigmodel.cn/api/paas/v4/audio/speech',
@@ -479,6 +529,16 @@ const ttsFormRules = {
   'doubao_ws.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
   'doubao_ws.access_token': [{ required: true, message: '请输入访问令牌', trigger: 'blur' }],
   'doubao_ws.ws_host': [{ required: true, message: '请输入WebSocket主机', trigger: 'blur' }],
+  'xunfei.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
+  'xunfei_super_tts.app_id': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+  'xunfei_super_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  'xunfei_super_tts.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+  'xunfei_super_tts.ws_url': [{ required: true, message: '请输入WebSocket URL', trigger: 'blur' }],
+  'xunfei_super_tts.voice': [{ required: true, message: '请输入音色', trigger: 'blur' }],
   'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
 }
@@ -848,9 +908,8 @@ async function loadLlmIfExists() {
     llmForm.name = config.name
     llmForm.config_id = config.config_id
     const data = JSON.parse(config.json_data || '{}')
-    const detectedProvider = resolveLLMProvider(config.provider, data.type)
-    llmForm.provider = detectedProvider
-    llmForm.type = getProviderFixedType(detectedProvider)
+    llmForm.provider = getResolvedLLMProvider(config.provider, data.type)
+    llmForm.type = getResolvedLLMType(config.provider, data.type)
     if (data.model_name !== undefined) llmForm.model_name = data.model_name
     if (data.api_key !== undefined) llmForm.api_key = data.api_key
     if (data.base_url !== undefined) llmForm.base_url = data.base_url
@@ -885,6 +944,8 @@ async function loadTtsIfExists() {
     else if (p === 'edge_offline') Object.assign(ttsForm.edge_offline, data)
     else if (p === 'aliyun_qwen') Object.assign(ttsForm.qwen_tts, data)
     else if (p === 'openai') Object.assign(ttsForm.openai, data)
+    else if (p === 'xunfei') Object.assign(ttsForm.xunfei, data)
+    else if (p === 'xunfei_super_tts') Object.assign(ttsForm.xunfei_super_tts, data)
     else if (p === 'zhipu') Object.assign(ttsForm.zhipu, data)
     else if (p === 'minimax') Object.assign(ttsForm.minimax, data)
   } catch (_) {}
@@ -1173,7 +1234,7 @@ async function loadTtsVoiceOptions(provider) {
     voiceOptions.value = []
     return
   }
-  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai']
+  const providersWithVoices = ['minimax', 'edge', 'doubao', 'doubao_ws', 'zhipu', 'openai', 'xunfei_super_tts']
   if (!providersWithVoices.includes(provider)) {
     voiceOptions.value = []
     return

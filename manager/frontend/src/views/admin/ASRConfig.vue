@@ -190,6 +190,18 @@ const form = reactive({
     vad_threshold: 0.0,
     vad_silence_ms: 400,
     timeout: 30
+  },
+  xunfei: {
+    appid: '',
+    api_key: '',
+    api_secret: '',
+    host: 'iat-api.xfyun.cn',
+    path: '/v2/iat',
+    domain: 'iat',
+    language: 'zh_cn',
+    accent: 'mandarin',
+    sample_rate: 16000,
+    timeout: 30
   }
 })
 
@@ -249,6 +261,18 @@ const rules = computed(() => {
       'aliyun_qwen3.sample_rate': [{ required: true, message: '请选择采样率', trigger: 'change' }],
       'aliyun_qwen3.language': [{ required: true, message: '请输入语言', trigger: 'blur' }],
       'aliyun_qwen3.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
+    }
+  }
+  if (form.provider === 'xunfei') {
+    return {
+      ...base,
+      'xunfei.appid': [{ required: true, message: '请输入应用ID', trigger: 'blur' }],
+      'xunfei.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+      'xunfei.api_secret': [{ required: true, message: '请输入API Secret', trigger: 'blur' }],
+      'xunfei.host': [{ required: true, message: '请输入Host', trigger: 'blur' }],
+      'xunfei.path': [{ required: true, message: '请输入Path', trigger: 'blur' }],
+      'xunfei.sample_rate': [{ required: true, message: '请输入采样率', trigger: 'change' }],
+      'xunfei.timeout': [{ required: true, message: '请输入超时时间', trigger: 'blur' }]
     }
   }
   return base
@@ -317,6 +341,10 @@ const editConfig = (config) => {
     } else if (config.provider === 'aliyun_qwen3' && (configObj.ws_url || configObj.model || configObj.api_key)) {
       // 新格式：直接包含配置内容
       form.aliyun_qwen3 = { ...form.aliyun_qwen3, ...configObj }
+    } else if (configObj.xunfei) {
+      form.xunfei = { ...form.xunfei, ...configObj.xunfei }
+    } else if (config.provider === 'xunfei' && (configObj.appid || configObj.api_key || configObj.api_secret)) {
+      form.xunfei = { ...form.xunfei, ...configObj }
     }
   } catch (error) {
     console.error('解析配置JSON失败:', error)
@@ -570,6 +598,18 @@ const resetForm = () => {
     auto_end: true,
     vad_threshold: 0.0,
     vad_silence_ms: 400,
+    timeout: 30
+  }
+  form.xunfei = {
+    appid: '',
+    api_key: '',
+    api_secret: '',
+    host: 'iat-api.xfyun.cn',
+    path: '/v2/iat',
+    domain: 'iat',
+    language: 'zh_cn',
+    accent: 'mandarin',
+    sample_rate: 16000,
     timeout: 30
   }
 }

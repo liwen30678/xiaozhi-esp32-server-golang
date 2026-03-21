@@ -62,7 +62,7 @@ func ValidateServerConfigs(serverConfigs []MCPServerConfig) error {
 		return fmt.Errorf("没有启用的MCP服务器")
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf(strings.Join(errs, "; "))
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
 }

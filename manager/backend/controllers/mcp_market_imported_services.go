@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,39 +10,50 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"xiaozhi/manager/backend/models"
 	mcpmarket "xiaozhi/manager/backend/services/mcp_market"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 	"gorm.io/gorm"
 )
 
 type upsertMCPMarketImportedServiceRequest struct {
-	Name        string            `json:"name"`
-	Enabled     *bool             `json:"enabled"`
-	Transport   string            `json:"transport" binding:"required"`
-	URL         string            `json:"url" binding:"required"`
-	Headers     map[string]string `json:"headers"`
-	MarketID    *uint             `json:"market_id"`
-	ProviderID  string            `json:"provider_id"`
-	ServiceID   string            `json:"service_id"`
-	ServiceName string            `json:"service_name"`
+	Name         string            `json:"name"`
+	Enabled      *bool             `json:"enabled"`
+	Transport    string            `json:"transport" binding:"required"`
+	URL          string            `json:"url" binding:"required"`
+	Headers      map[string]string `json:"headers"`
+	AllowedTools []string          `json:"allowed_tools"`
+	MarketID     *uint             `json:"market_id"`
+	ProviderID   string            `json:"provider_id"`
+	ServiceID    string            `json:"service_id"`
+	ServiceName  string            `json:"service_name"`
 }
 
 type mcpMarketImportedServiceView struct {
-	ID          uint              `json:"id"`
-	Name        string            `json:"name"`
-	Enabled     bool              `json:"enabled"`
-	Transport   string            `json:"transport"`
-	URL         string            `json:"url"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	MarketID    *uint             `json:"market_id,omitempty"`
-	ProviderID  string            `json:"provider_id,omitempty"`
-	ServiceID   string            `json:"service_id,omitempty"`
-	ServiceName string            `json:"service_name,omitempty"`
-	CreatedAt   string            `json:"created_at"`
-	UpdatedAt   string            `json:"updated_at"`
+	ID           uint              `json:"id"`
+	Name         string            `json:"name"`
+	Enabled      bool              `json:"enabled"`
+	Transport    string            `json:"transport"`
+	URL          string            `json:"url"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	AllowedTools []string          `json:"allowed_tools,omitempty"`
+	MarketID     *uint             `json:"market_id,omitempty"`
+	ProviderID   string            `json:"provider_id,omitempty"`
+	ServiceID    string            `json:"service_id,omitempty"`
+	ServiceName  string            `json:"service_name,omitempty"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
+}
+
+type mcpMarketImportedToolView struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 func (ac *AdminController) GetMCPMarketImportedServices(c *gin.Context) {
@@ -146,16 +158,17 @@ func (ac *AdminController) UpdateMCPMarketImportedService(c *gin.Context) {
 	}
 
 	updateMap := map[string]interface{}{
-		"name":         updated.Name,
-		"enabled":      updated.Enabled,
-		"transport":    updated.Transport,
-		"url":          updated.URL,
-		"url_hash":     updated.URLHash,
-		"headers_json": updated.HeadersJSON,
-		"market_id":    updated.MarketID,
-		"provider_id":  updated.ProviderID,
-		"service_id":   updated.ServiceID,
-		"service_name": updated.ServiceName,
+		"name":               updated.Name,
+		"enabled":            updated.Enabled,
+		"transport":          updated.Transport,
+		"url":                updated.URL,
+		"url_hash":           updated.URLHash,
+		"headers_json":       updated.HeadersJSON,
+		"allowed_tools_json": updated.AllowedToolsJSON,
+		"market_id":          updated.MarketID,
+		"provider_id":        updated.ProviderID,
+		"service_id":         updated.ServiceID,
+		"service_name":       updated.ServiceName,
 	}
 	if err := ac.DB.Model(&existing).Updates(updateMap).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新导入服务失败"})
@@ -186,6 +199,30 @@ func (ac *AdminController) DeleteMCPMarketImportedService(c *gin.Context) {
 
 	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+}
+
+func (ac *AdminController) GetMCPMarketImportedServiceTools(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+
+	var existing models.MCPMarketService
+	if err := ac.DB.First(&existing, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "导入服务不存在"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+
+	tools, err := listImportedServiceTools(ctx, existing)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"service": toMCPMarketImportedServiceView(existing),
+		"tools":   tools,
+	}})
 }
 
 func (ac *AdminController) listMCPMarketServices(enabledOnly bool) ([]models.MCPMarketService, error) {
@@ -241,13 +278,14 @@ func mergeManualAndMarketServers(manualMCP map[string]interface{}, marketService
 		}
 
 		server := mcpServerConfig{
-			Name:      service.Name,
-			Type:      transport,
-			Url:       service.URL,
-			Enabled:   service.Enabled,
-			Provider:  "mcp-market",
-			ServiceID: service.ServiceID,
-			Headers:   decodeHeadersJSON(service.HeadersJSON),
+			Name:         service.Name,
+			Type:         transport,
+			Url:          service.URL,
+			Enabled:      service.Enabled,
+			Provider:     "mcp-market",
+			ServiceID:    service.ServiceID,
+			Headers:      decodeHeadersJSON(service.HeadersJSON),
+			AllowedTools: decodeAllowedToolsJSON(service.AllowedToolsJSON),
 		}
 		if transport == mcpmarket.TransportSSE {
 			server.SSEUrl = service.URL
@@ -444,6 +482,55 @@ func decodeHeadersJSON(raw string) map[string]string {
 	return cleanHeaders(headers)
 }
 
+func cleanAllowedTools(tools []string) []string {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(tools))
+	cleaned := make([]string, 0, len(tools))
+	for _, toolName := range tools {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		if _, exists := seen[toolName]; exists {
+			continue
+		}
+		seen[toolName] = struct{}{}
+		cleaned = append(cleaned, toolName)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	sort.Strings(cleaned)
+	return cleaned
+}
+
+func encodeAllowedToolsJSON(tools []string) string {
+	tools = cleanAllowedTools(tools)
+	if len(tools) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(tools)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeAllowedToolsJSON(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var tools []string
+	if err := json.Unmarshal([]byte(raw), &tools); err != nil {
+		return nil
+	}
+	return cleanAllowedTools(tools)
+}
+
 func buildImportedServiceModelFromRequest(req upsertMCPMarketImportedServiceRequest, existing *models.MCPMarketService) (models.MCPMarketService, error) {
 	row := models.MCPMarketService{}
 	if existing != nil {
@@ -485,6 +572,11 @@ func buildImportedServiceModelFromRequest(req upsertMCPMarketImportedServiceRequ
 	row.URLHash = urlHash
 	row.Name = normalizeImportedServiceName(req.Name, req.ServiceName, req.ServiceID, rawURL)
 	row.HeadersJSON = encodeHeadersJSON(req.Headers)
+	if existing != nil && req.AllowedTools == nil {
+		row.AllowedToolsJSON = existing.AllowedToolsJSON
+	} else {
+		row.AllowedToolsJSON = encodeAllowedToolsJSON(req.AllowedTools)
+	}
 	row.MarketID = req.MarketID
 	row.ProviderID = mcpmarket.NormalizeProviderID(req.ProviderID)
 	row.ServiceID = strings.TrimSpace(req.ServiceID)
@@ -495,17 +587,106 @@ func buildImportedServiceModelFromRequest(req upsertMCPMarketImportedServiceRequ
 
 func toMCPMarketImportedServiceView(row models.MCPMarketService) mcpMarketImportedServiceView {
 	return mcpMarketImportedServiceView{
-		ID:          row.ID,
-		Name:        row.Name,
-		Enabled:     row.Enabled,
-		Transport:   normalizeImportedTransport(row.Transport),
-		URL:         row.URL,
-		Headers:     decodeHeadersJSON(row.HeadersJSON),
-		MarketID:    row.MarketID,
-		ProviderID:  row.ProviderID,
-		ServiceID:   row.ServiceID,
-		ServiceName: row.ServiceName,
-		CreatedAt:   row.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:   row.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:           row.ID,
+		Name:         row.Name,
+		Enabled:      row.Enabled,
+		Transport:    normalizeImportedTransport(row.Transport),
+		URL:          row.URL,
+		Headers:      decodeHeadersJSON(row.HeadersJSON),
+		AllowedTools: decodeAllowedToolsJSON(row.AllowedToolsJSON),
+		MarketID:     row.MarketID,
+		ProviderID:   row.ProviderID,
+		ServiceID:    row.ServiceID,
+		ServiceName:  row.ServiceName,
+		CreatedAt:    row.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:    row.UpdatedAt.Format("2006-01-02 15:04:05"),
+	}
+}
+
+func listImportedServiceTools(ctx context.Context, service models.MCPMarketService) ([]mcpMarketImportedToolView, error) {
+	transportType := normalizeImportedTransport(service.Transport)
+	if transportType != mcpmarket.TransportSSE && transportType != mcpmarket.TransportStreamableHTTP {
+		return nil, fmt.Errorf("transport 仅支持 sse/streamablehttp")
+	}
+
+	headers := decodeHeadersJSON(service.HeadersJSON)
+	transportInstance, err := buildImportedServiceTransport(transportType, strings.TrimSpace(service.URL), headers)
+	if err != nil {
+		return nil, err
+	}
+
+	mcpClient := client.NewClient(transportInstance)
+	defer mcpClient.Close()
+
+	if err := mcpClient.Start(ctx); err != nil {
+		return nil, fmt.Errorf("启动MCP客户端失败: %v", err)
+	}
+
+	initRequest := mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+			ClientInfo: mcp.Implementation{
+				Name:    "xiaozhi-manager-backend",
+				Version: "1.0.0",
+			},
+			Capabilities: mcp.ClientCapabilities{
+				Experimental: make(map[string]any),
+			},
+		},
+	}
+	if _, err := mcpClient.Initialize(ctx, initRequest); err != nil {
+		return nil, fmt.Errorf("初始化MCP服务失败: %v", err)
+	}
+
+	toolsResult, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("获取工具列表失败: %v", err)
+	}
+
+	tools := make([]mcpMarketImportedToolView, 0, len(toolsResult.Tools))
+	for _, item := range toolsResult.Tools {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		tools = append(tools, mcpMarketImportedToolView{
+			Name:        name,
+			Description: strings.TrimSpace(item.Description),
+		})
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name < tools[j].Name
+	})
+	return tools, nil
+}
+
+func buildImportedServiceTransport(transportType, endpoint string, headers map[string]string) (transport.Interface, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, fmt.Errorf("url 不能为空")
+	}
+
+	switch transportType {
+	case mcpmarket.TransportSSE:
+		opts := make([]transport.ClientOption, 0)
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHeaders(headers))
+		}
+		sseTransport, err := transport.NewSSE(endpoint, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("创建SSE传输失败: %v", err)
+		}
+		return sseTransport, nil
+	case mcpmarket.TransportStreamableHTTP:
+		opts := make([]transport.StreamableHTTPCOption, 0)
+		if len(headers) > 0 {
+			opts = append(opts, transport.WithHTTPHeaders(headers))
+		}
+		httpTransport, err := transport.NewStreamableHTTP(endpoint, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("创建StreamableHTTP传输失败: %v", err)
+		}
+		return httpTransport, nil
+	default:
+		return nil, fmt.Errorf("不支持的 transport: %s", transportType)
 	}
 }

@@ -499,18 +499,21 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 					toolCalls = append(toolCalls, llmResponse.ToolCalls...)
 				}
 
-				if strings.TrimSpace(llmResponse.Text) != "" {
-					if !llmFirstTokenMarked {
+				hasText := strings.TrimSpace(llmResponse.Text) != ""
+				if hasText || llmResponse.IsStart || llmResponse.IsEnd {
+					// 双流式收尾依赖空文本的 IsEnd 信号，不能只在有文本时才传给 TTS。
+					if !llmFirstTokenMarked && hasText {
 						state.MarkLlmFirstToken()
 						if l.session != nil {
 							l.session.TraceLlmFirstToken(ctx, state.Statistic.LlmFirstTokenTs)
 						}
 						llmFirstTokenMarked = true
 					}
-					// 处理文本内容响应
 					if err := l.ttsManager.handleTextResponse(ctx, llmResponse, true); err != nil {
 						return true, err
 					}
+				}
+				if hasText {
 					fullText.WriteString(llmResponse.Text)
 				}
 
@@ -932,8 +935,14 @@ func (l *LLMManager) handleLocalToolResult(toolResult string) (MCPResponse, bool
 func (l *LLMManager) handleToolResult(toolResultStr string) (mcp_go.CallToolResult, bool) {
 	var toolResult mcp_go.CallToolResult
 	if err := json.Unmarshal([]byte(toolResultStr), &toolResult); err != nil {
-		log.Errorf("解析工具结果失败: %v", err)
-		return toolResult, false
+		log.Warnf("工具结果不是标准 MCP JSON，按纯文本处理: %v", err)
+		toolResult.Content = []mcp_go.Content{
+			mcp_go.TextContent{
+				Type: "text",
+				Text: toolResultStr,
+			},
+		}
+		return toolResult, true
 	}
 
 	return toolResult, true

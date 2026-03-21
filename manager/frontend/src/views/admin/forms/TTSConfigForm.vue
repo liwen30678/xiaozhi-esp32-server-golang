@@ -274,6 +274,120 @@
       </el-form-item>
     </template>
 
+    <template v-if="model.provider === 'xunfei'">
+      <XunfeiCommonConfig :model-value="model" prefix="xunfei" default-ws-url="wss://tts-api.xfyun.cn/v2/tts" />
+      <el-form-item label="音色" prop="xunfei.voice">
+        <el-input v-model="model.xunfei.voice" placeholder="请输入音色，例如 xiaoyan" />
+      </el-form-item>
+      <el-form-item label="音频编码" prop="xunfei.audio_encoding">
+        <el-select v-model="model.xunfei.audio_encoding" placeholder="请选择音频编码" style="width: 100%">
+          <el-option label="RAW" value="raw" />
+          <el-option label="Opus" value="opus" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="采样率" prop="xunfei.sample_rate">
+        <el-select v-model="model.xunfei.sample_rate" placeholder="请选择采样率" style="width: 100%">
+          <el-option label="8000" :value="8000" />
+          <el-option label="16000" :value="16000" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="语速" prop="xunfei.speed">
+        <el-input-number v-model="model.xunfei.speed" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="音量" prop="xunfei.volume">
+        <el-input-number v-model="model.xunfei.volume" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="音调" prop="xunfei.pitch">
+        <el-input-number v-model="model.xunfei.pitch" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="文本编码" prop="xunfei.tte">
+        <el-select v-model="model.xunfei.tte" placeholder="请选择文本编码" style="width: 100%">
+          <el-option label="UTF8" value="UTF8" />
+          <el-option label="UNICODE" value="UNICODE" />
+          <el-option label="GB2312" value="GB2312" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="数字发音" prop="xunfei.reg">
+        <el-input-number v-model="model.xunfei.reg" :min="0" :max="2" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="数字读法" prop="xunfei.rdn">
+        <el-input-number v-model="model.xunfei.rdn" :min="0" :max="2" style="width: 100%" />
+      </el-form-item>
+    </template>
+
+    <template v-if="model.provider === 'xunfei_super_tts'">
+      <XunfeiCommonConfig :model-value="model" prefix="xunfei_super_tts" default-ws-url="wss://cbm01.cn-huabei-1.xf-yun.com/v1/private/mcd9m97e6" />
+      <el-form-item label="音色" prop="xunfei_super_tts.voice">
+        <el-select
+          v-model="model.xunfei_super_tts.voice"
+          placeholder="请选择或输入音色"
+          style="width: 100%"
+          filterable
+          :loading="voiceLoading"
+          :disabled="voiceLoading"
+          allow-create
+          default-first-option
+        >
+          <el-option v-for="option in voiceOptionsList" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="音频编码" prop="xunfei_super_tts.audio_encoding">
+        <el-select v-model="model.xunfei_super_tts.audio_encoding" placeholder="请选择音频编码" style="width: 100%">
+          <el-option label="RAW" value="raw" />
+          <el-option label="Opus" value="opus" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="采样率" prop="xunfei_super_tts.sample_rate">
+        <el-select v-model="model.xunfei_super_tts.sample_rate" placeholder="请选择采样率" style="width: 100%">
+          <el-option label="8000" :value="8000" />
+          <el-option label="16000" :value="16000" />
+          <el-option label="24000" :value="24000" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="语速" prop="xunfei_super_tts.speed">
+        <el-input-number v-model="model.xunfei_super_tts.speed" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="音量" prop="xunfei_super_tts.volume">
+        <el-input-number v-model="model.xunfei_super_tts.volume" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="音调" prop="xunfei_super_tts.pitch">
+        <el-input-number v-model="model.xunfei_super_tts.pitch" :min="0" :max="100" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="背景音" prop="xunfei_super_tts.bgs">
+        <el-input-number v-model="model.xunfei_super_tts.bgs" :min="0" :max="10" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="数字发音" prop="xunfei_super_tts.reg">
+        <el-input-number v-model="model.xunfei_super_tts.reg" :min="0" :max="2" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="数字读法" prop="xunfei_super_tts.rdn">
+        <el-input-number v-model="model.xunfei_super_tts.rdn" :min="0" :max="2" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="韵律增强" prop="xunfei_super_tts.rhy">
+        <el-input-number v-model="model.xunfei_super_tts.rhy" :min="0" :max="1" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="口语级别" prop="xunfei_super_tts.oral_level">
+        <el-select v-model="model.xunfei_super_tts.oral_level" placeholder="请选择口语级别" style="width: 100%">
+          <el-option label="low" value="low" />
+          <el-option label="mid" value="mid" />
+          <el-option label="high" value="high" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="Spark Assist" prop="xunfei_super_tts.spark_assist">
+        <el-input-number v-model="model.xunfei_super_tts.spark_assist" :min="0" :max="1" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="停顿切分" prop="xunfei_super_tts.stop_split">
+        <el-input-number v-model="model.xunfei_super_tts.stop_split" :min="0" :max="1" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label="保留口语化" prop="xunfei_super_tts.remain">
+        <el-input-number v-model="model.xunfei_super_tts.remain" :min="0" :max="1" style="width: 100%" />
+      </el-form-item>
+      <el-form-item label-width="0">
+        <div class="indextts-help">
+          <div class="indextts-help-subtitle">x4 系列支持口语化参数，x5/x6 建议主要调整音色、语速和采样率。</div>
+        </div>
+      </el-form-item>
+    </template>
+
 
 
     <template v-if="model.provider === 'indextts_vllm'">
@@ -354,6 +468,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { TTS_PROVIDER_OPTIONS } from './ttsProviderOptions'
+import XunfeiCommonConfig from './XunfeiCommonConfig.vue'
 
 const props = defineProps({
   model: { type: Object, required: true },
@@ -430,6 +545,50 @@ function getJsonData() {
       config.speed = form.openai?.speed
       config.stream = form.openai?.stream
       config.frame_duration = form.openai?.frame_duration
+      break
+    case 'xunfei':
+      config.provider = 'xunfei'
+      config.app_id = form.xunfei?.app_id
+      config.api_key = form.xunfei?.api_key
+      config.api_secret = form.xunfei?.api_secret
+      config.ws_url = form.xunfei?.ws_url
+      config.voice = form.xunfei?.voice
+      config.audio_encoding = form.xunfei?.audio_encoding || 'raw'
+      config.sample_rate = form.xunfei?.sample_rate || 16000
+      config.speed = form.xunfei?.speed ?? 50
+      config.volume = form.xunfei?.volume ?? 50
+      config.pitch = form.xunfei?.pitch ?? 50
+      config.tte = form.xunfei?.tte || 'UTF8'
+      config.reg = form.xunfei?.reg ?? 0
+      config.rdn = form.xunfei?.rdn ?? 0
+      config.frame_duration = form.xunfei?.frame_duration || 60
+      config.connect_timeout = form.xunfei?.connect_timeout || 10
+      config.read_timeout = form.xunfei?.read_timeout || 30
+      break
+    case 'xunfei_super_tts':
+      config.provider = 'xunfei_super_tts'
+      config.double_stream = true
+      config.app_id = form.xunfei_super_tts?.app_id
+      config.api_key = form.xunfei_super_tts?.api_key
+      config.api_secret = form.xunfei_super_tts?.api_secret
+      config.ws_url = form.xunfei_super_tts?.ws_url
+      config.voice = form.xunfei_super_tts?.voice
+      config.audio_encoding = form.xunfei_super_tts?.audio_encoding || 'raw'
+      config.sample_rate = form.xunfei_super_tts?.sample_rate || 24000
+      config.speed = form.xunfei_super_tts?.speed ?? 50
+      config.volume = form.xunfei_super_tts?.volume ?? 50
+      config.pitch = form.xunfei_super_tts?.pitch ?? 50
+      config.bgs = form.xunfei_super_tts?.bgs ?? 0
+      config.reg = form.xunfei_super_tts?.reg ?? 0
+      config.rdn = form.xunfei_super_tts?.rdn ?? 0
+      config.rhy = form.xunfei_super_tts?.rhy ?? 0
+      config.oral_level = form.xunfei_super_tts?.oral_level || 'mid'
+      config.spark_assist = form.xunfei_super_tts?.spark_assist ?? 1
+      config.stop_split = form.xunfei_super_tts?.stop_split ?? 0
+      config.remain = form.xunfei_super_tts?.remain ?? 0
+      config.frame_duration = form.xunfei_super_tts?.frame_duration || 60
+      config.connect_timeout = form.xunfei_super_tts?.connect_timeout || 10
+      config.read_timeout = form.xunfei_super_tts?.read_timeout || 30
       break
     case 'indextts_vllm':
       config.provider = 'indextts_vllm'
@@ -528,5 +687,11 @@ defineExpose({ validate, getJsonData, resetFields })
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.form-item-tip {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #909399;
 }
 </style>

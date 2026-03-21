@@ -33,6 +33,12 @@
           <span>我的角色</span>
         </el-menu-item>
 
+
+        <el-menu-item v-if="!authStore.isAdmin" index="/user/api-tokens">
+          <el-icon><Key /></el-icon>
+          <span>API Token</span>
+        </el-menu-item>
+
         <el-menu-item v-if="!authStore.isAdmin" index="/speakers">
           <el-icon><Microphone /></el-icon>
           <span>声纹管理</span>
@@ -178,6 +184,7 @@ import {
   Monitor,
   Setting,
   User,
+  Key,
   ArrowDown,
   Tools,
   Cpu,

@@ -55,6 +55,7 @@ func Init(cfg config.DatabaseConfig) *gorm.DB {
 	log.Println("开始自动迁移数据库表结构...")
 	err = db.AutoMigrate(
 		&models.User{},
+		&models.APIToken{},
 		&models.Device{},
 		&models.Agent{},
 		&models.KnowledgeBase{},

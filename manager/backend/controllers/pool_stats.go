@@ -35,7 +35,7 @@ func (c *PoolStatsController) ReportPoolStats(ctx *gin.Context) {
 	c.storage.AddStats(request.Stats)
 
 	ctx.JSON(http.StatusOK, gin.H{
-		"message": "统计数据上报成功",
+		"message":   "统计数据上报成功",
 		"timestamp": time.Now().Unix(),
 	})
 }
@@ -51,7 +51,7 @@ func (c *PoolStatsController) GetPoolStats(ctx *gin.Context) {
 		latest := c.storage.GetLatestStats()
 		if latest == nil {
 			ctx.JSON(http.StatusOK, gin.H{
-				"data": nil,
+				"data":    nil,
 				"message": "暂无统计数据",
 			})
 			return
@@ -64,7 +64,7 @@ func (c *PoolStatsController) GetPoolStats(ctx *gin.Context) {
 		// 获取所有数据（最近24小时）
 		allStats := c.storage.GetAllStats()
 		ctx.JSON(http.StatusOK, gin.H{
-			"data": allStats,
+			"data":  allStats,
 			"count": len(allStats),
 		})
 
@@ -92,7 +92,7 @@ func (c *PoolStatsController) GetPoolStats(ctx *gin.Context) {
 
 		stats := c.storage.GetStatsByTimeRange(start, end)
 		ctx.JSON(http.StatusOK, gin.H{
-			"data": stats,
+			"data":  stats,
 			"count": len(stats),
 		})
 
@@ -104,9 +104,9 @@ func (c *PoolStatsController) GetPoolStats(ctx *gin.Context) {
 // GetPoolStatsSummary 获取统计摘要信息
 func (c *PoolStatsController) GetPoolStatsSummary(ctx *gin.Context) {
 	latest := c.storage.GetLatestStats()
-	
+
 	summary := gin.H{
-		"total_records": 0,
+		"total_records":    0,
 		"storage_duration": "仅保存最新数据",
 		"oldest_timestamp": nil,
 		"newest_timestamp": nil,

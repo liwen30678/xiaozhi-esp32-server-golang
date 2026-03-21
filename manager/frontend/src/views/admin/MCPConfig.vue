@@ -53,10 +53,20 @@
             
             <div v-for="(server, index) in form.mcp.global.servers" :key="index" class="server-item">
               <div class="server-item-header">
-                <span>服务器 {{ index + 1 }}</span>
-                <el-button type="danger" size="small" @click="removeGlobalServer(index)">
-                  <el-icon><Delete /></el-icon>删除
-                </el-button>
+                <div class="server-title-row">
+                  <span>服务器 {{ index + 1 }}</span>
+                  <el-tag size="small" :type="server.allowed_tools?.length ? 'warning' : 'info'">
+                    {{ server.allowed_tools?.length ? `${server.allowed_tools.length}个工具` : '全部工具' }}
+                  </el-tag>
+                </div>
+                <div class="server-actions">
+                  <el-button size="small" :loading="server._tools_loading" @click="discoverGlobalServerTools(server)">
+                    探测工具
+                  </el-button>
+                  <el-button type="danger" size="small" @click="removeGlobalServer(index)">
+                    <el-icon><Delete /></el-icon>删除
+                  </el-button>
+                </div>
               </div>
               
               <div class="server-form-grid">
@@ -79,6 +89,32 @@
                   <el-switch v-model="server.enabled" />
                 </el-form-item>
               </div>
+
+              <el-form-item :label="'允许工具'" class="form-item tool-form-item">
+                <div class="tool-picker">
+                  <div class="tool-picker-tip">
+                    留空表示允许该服务器全部工具。探测工具时会使用当前填写的类型、URL 和 Headers。
+                  </div>
+                  <el-select
+                    v-model="server.allowed_tools"
+                    multiple
+                    filterable
+                    clearable
+                    collapse-tags
+                    collapse-tags-tooltip
+                    style="width: 100%"
+                    placeholder="不选择则允许全部工具"
+                    :loading="server._tools_loading"
+                  >
+                    <el-option v-for="tool in server._tool_options" :key="tool.name" :label="tool.name" :value="tool.name">
+                      <div class="tool-option-row">
+                        <span class="tool-option-name">{{ tool.name }}</span>
+                        <span class="tool-option-desc">{{ tool.description || '无描述' }}</span>
+                      </div>
+                    </el-option>
+                  </el-select>
+                </div>
+              </el-form-item>
             </div>
           </div>
         </el-card>
@@ -119,7 +155,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Connection, Setting, HomeFilled, Plus, Delete, Check, Monitor } from '@element-plus/icons-vue'
+import { Connection, Setting, HomeFilled, Plus, Delete, Check } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 
 const loading = ref(false)
@@ -158,24 +194,103 @@ const rules = {
   'local_mcp.play_music': [{ required: true, message: '请选择是否播放音乐', trigger: 'change' }]
 }
 
-const addGlobalServer = () => {
-  form.mcp.global.servers.push({
-    name: '',
-    type: 'streamablehttp',
-    url: '',
-    enabled: true
+const createGlobalServer = () => ({
+  name: '',
+  type: 'streamablehttp',
+  url: '',
+  enabled: true,
+  allowed_tools: [],
+  _tool_options: [],
+  _tools_loading: false
+})
+
+const mergeServerToolOptions = (server, tools = []) => {
+  const merged = new Map()
+
+  ;(tools || []).forEach((tool) => {
+    if (!tool?.name) return
+    merged.set(tool.name, {
+      name: tool.name,
+      description: tool.description || ''
+    })
   })
+
+  ;(server.allowed_tools || []).forEach((name) => {
+    if (!name || merged.has(name)) return
+    merged.set(name, {
+      name,
+      description: '当前已选择'
+    })
+  })
+
+  server._tool_options = Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const normalizeGlobalServer = (server = {}) => {
+  const normalized = {
+    ...server,
+    name: server.name || '',
+    type: server.type || 'streamablehttp',
+    url: server.url || '',
+    enabled: server.enabled !== false,
+    allowed_tools: Array.isArray(server.allowed_tools) ? [...server.allowed_tools] : [],
+    _tool_options: [],
+    _tools_loading: false
+  }
+  mergeServerToolOptions(normalized)
+  return normalized
+}
+
+const addGlobalServer = () => {
+  form.mcp.global.servers.push(createGlobalServer())
 }
 
 const removeGlobalServer = (index) => {
   form.mcp.global.servers.splice(index, 1)
 }
 
+const sanitizeGlobalServers = () => {
+  return form.mcp.global.servers.map((server) => {
+    const sanitized = { ...server }
+    delete sanitized._tool_options
+    delete sanitized._tools_loading
+    return sanitized
+  })
+}
+
 const generateConfig = () => {
   return JSON.stringify({
-    mcp: form.mcp,
+    mcp: {
+      global: {
+        ...form.mcp.global,
+        servers: sanitizeGlobalServers()
+      }
+    },
     local_mcp: form.local_mcp
   }, null, 2)
+}
+
+const discoverGlobalServerTools = async (server) => {
+  if (!server?.url) {
+    ElMessage.warning('请先填写服务器URL')
+    return
+  }
+
+  server._tools_loading = true
+  try {
+    const response = await api.post('/admin/mcp-configs/discover-tools', {
+      transport: server.type,
+      url: server.url,
+      headers: server.headers || null
+    })
+    mergeServerToolOptions(server, response.data?.data?.tools || [])
+    ElMessage.success(`探测到 ${server._tool_options.length} 个工具`)
+  } catch (error) {
+    mergeServerToolOptions(server)
+    ElMessage.error(error.response?.data?.error || '探测工具失败')
+  } finally {
+    server._tools_loading = false
+  }
 }
 
 const loadConfig = async () => {
@@ -192,9 +307,22 @@ const loadConfig = async () => {
            const configData = JSON.parse(config.json_data)
            // 兼容旧格式：如果存在global配置，则转换为新格式
            if (configData.global && !configData.mcp) {
-             form.mcp.global = configData.global
+             form.mcp.global = {
+               ...form.mcp.global,
+               ...configData.global,
+               servers: Array.isArray(configData.global?.servers)
+                 ? configData.global.servers.map(normalizeGlobalServer)
+                 : []
+             }
            } else if (configData.mcp) {
-             form.mcp.global = configData.mcp.global || form.mcp.global
+             const globalConfig = configData.mcp.global || {}
+             form.mcp.global = {
+               ...form.mcp.global,
+               ...globalConfig,
+               servers: Array.isArray(globalConfig.servers)
+                 ? globalConfig.servers.map(normalizeGlobalServer)
+                 : []
+             }
            }
            if (configData.local_mcp) Object.assign(form.local_mcp, configData.local_mcp)
          } catch (error) {
@@ -202,12 +330,12 @@ const loadConfig = async () => {
           ElMessage.warning('Config format error, reset to default values')
         }
     } else {
-      form.mcp.global.servers.push({
+      form.mcp.global.servers.push(normalizeGlobalServer({
         name: '默认MCP服务器',
         type: 'streamablehttp',
         url: 'http://192.168.208.214:3001/mcp',
         enabled: true
-      })
+      }))
     }
   } catch (error) {
     console.error('加载配置失败:', error)
@@ -402,10 +530,53 @@ onMounted(() => {
   color: #374151;
 }
 
+.server-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .server-form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 16px;
+}
+
+.tool-form-item {
+  margin-top: 16px;
+}
+
+.tool-picker {
+  width: 100%;
+}
+
+.tool-picker-tip {
+  margin-bottom: 8px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tool-option-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.35;
+}
+
+.tool-option-name {
+  color: #111827;
+}
+
+.tool-option-desc {
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .action-section {
@@ -493,6 +664,12 @@ onMounted(() => {
   
   .server-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .server-item-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
   }
 }
 

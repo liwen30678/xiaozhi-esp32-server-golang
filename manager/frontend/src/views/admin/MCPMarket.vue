@@ -172,6 +172,13 @@
             <el-table-column prop="transport" label="传输" width="140" />
             <el-table-column prop="url" label="URL" min-width="320" show-overflow-tooltip />
             <el-table-column prop="service_id" label="Service ID" min-width="180" show-overflow-tooltip />
+            <el-table-column label="工具" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.allowed_tools?.length ? 'warning' : 'info'">
+                  {{ row.allowed_tools?.length ? `${row.allowed_tools.length}个已选` : '全部工具' }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="provider_id" label="提供商" width="120">
               <template #default="{ row }">
                 <el-tag size="small">{{ row.provider_id || '-' }}</el-tag>
@@ -185,9 +192,10 @@
               </template>
             </el-table-column>
             <el-table-column prop="updated_at" label="更新时间" width="180" />
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="280" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openEditImportedDialog(row)">编辑</el-button>
+                <el-button link type="primary" @click="openImportedToolsDialog(row)">工具选择</el-button>
                 <el-button link :type="row.enabled ? 'warning' : 'success'" @click="toggleImportedEnabled(row)">
                   {{ row.enabled ? '禁用' : '启用' }}
                 </el-button>
@@ -278,6 +286,63 @@
       <template #footer>
         <el-button @click="importedDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="importedSaving" @click="saveImportedItem">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="importedToolsDialogVisible" :title="toolDialogTitle" width="760px">
+      <div class="tool-selector-card">
+        <div class="tool-selector-header">
+          <div class="tool-selector-meta">
+            <span class="tool-selector-title">工具访问策略</span>
+            <span class="tool-selector-tip">空列表表示允许该服务全部工具。</span>
+          </div>
+          <div class="tool-selector-actions">
+            <el-tag size="small" :type="importedToolMode === 'all' ? 'info' : 'warning'">
+              {{ importedToolMode === 'all' ? '全部工具' : `已选 ${importedSelectedTools.length} 项` }}
+            </el-tag>
+            <el-button size="small" :loading="importedToolsLoading" @click="refreshImportedTools">
+              探测工具
+            </el-button>
+          </div>
+        </div>
+
+        <el-radio-group v-model="importedToolMode" size="small" class="tool-mode-group" @change="handleImportedToolModeChange">
+          <el-radio-button label="all">全部工具</el-radio-button>
+          <el-radio-button label="selected">指定工具</el-radio-button>
+        </el-radio-group>
+
+        <template v-if="importedToolMode === 'selected'">
+          <div class="tool-picker-search">
+            <el-input v-model="importedToolQuery" clearable placeholder="搜索工具名或描述">
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+          </div>
+
+          <div v-if="filteredImportedToolOptions.length === 0" class="tool-picker-empty">
+            {{ importedToolOptions.length === 0 ? '还没有探测到工具，请先点击“探测工具”。' : '未匹配到可选工具。' }}
+          </div>
+          <el-checkbox-group v-else v-model="importedSelectedTools" class="tool-grid">
+            <el-checkbox
+              v-for="tool in filteredImportedToolOptions"
+              :key="tool.name"
+              :label="tool.name"
+              border
+              class="tool-tile"
+            >
+              <div class="tool-tile-body">
+                <span class="tool-tile-name">{{ tool.name }}</span>
+                <span class="tool-tile-desc">{{ tool.description || '无描述' }}</span>
+              </div>
+            </el-checkbox>
+          </el-checkbox-group>
+        </template>
+      </div>
+
+      <template #footer>
+        <el-button @click="importedToolsDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="importedSaving" @click="saveImportedToolSelection">保存</el-button>
       </template>
     </el-dialog>
 
@@ -378,20 +443,28 @@ const serviceDetail = ref(null)
 const importedLoading = ref(false)
 const importedSaving = ref(false)
 const importedDialogVisible = ref(false)
+const importedToolsDialogVisible = ref(false)
+const importedToolsLoading = ref(false)
 const editingImported = ref(null)
+const importedToolTarget = ref(null)
 const importedFormRef = ref()
 const importedItems = ref([])
+const importedToolOptions = ref([])
 const importedPage = ref(1)
 const importedPageSize = ref(20)
 const importedTotal = ref(0)
 const importedQuery = ref('')
 const importedHeadersText = ref('')
+const importedToolMode = ref('all')
+const importedToolQuery = ref('')
+const importedSelectedTools = ref([])
 
 const importedForm = reactive({
   name: '',
   enabled: true,
   transport: 'streamablehttp',
   url: '',
+  allowed_tools: [],
   market_id: null,
   provider_id: '',
   service_id: '',
@@ -403,6 +476,18 @@ const importedRules = {
   transport: [{ required: true, message: '请选择传输类型', trigger: 'change' }],
   url: [{ required: true, message: '请输入URL', trigger: 'blur' }]
 }
+
+const toolDialogTitle = computed(() => {
+  return importedToolTarget.value ? `工具选择 · ${importedToolTarget.value.name}` : '工具选择'
+})
+
+const filteredImportedToolOptions = computed(() => {
+  const query = importedToolQuery.value.trim().toLowerCase()
+  if (!query) return importedToolOptions.value
+  return importedToolOptions.value.filter((tool) => {
+    return tool.name.toLowerCase().includes(query) || (tool.description || '').toLowerCase().includes(query)
+  })
+})
 
 const getDefaultProviderId = () => {
   if (selectableProviderOptions.value.length === 0) return 'modelscope'
@@ -691,6 +776,47 @@ const resetImportedForm = () => {
   importedHeadersText.value = ''
 }
 
+const mergeImportedToolOptions = (tools = [], selected = []) => {
+  const merged = new Map()
+
+  ;(tools || []).forEach((tool) => {
+    if (!tool?.name) return
+    merged.set(tool.name, {
+      name: tool.name,
+      description: tool.description || ''
+    })
+  })
+
+  ;(selected || []).forEach((name) => {
+    if (!name || merged.has(name)) return
+    merged.set(name, {
+      name,
+      description: '当前配置已选择'
+    })
+  })
+
+  importedToolOptions.value = Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const loadImportedToolOptions = async (serviceId) => {
+  if (!serviceId) {
+    mergeImportedToolOptions([], importedSelectedTools.value)
+    return
+  }
+
+  importedToolsLoading.value = true
+  try {
+    const resp = await api.get(`/admin/mcp-market/imported-services/${serviceId}/tools`)
+    const data = resp.data?.data || {}
+    mergeImportedToolOptions(data.tools || [], importedSelectedTools.value)
+  } catch (error) {
+    mergeImportedToolOptions([], importedSelectedTools.value)
+    ElMessage.error(error.response?.data?.error || '加载工具列表失败')
+  } finally {
+    importedToolsLoading.value = false
+  }
+}
+
 const openCreateImportedDialog = () => {
   editingImported.value = null
   resetImportedForm()
@@ -709,6 +835,35 @@ const openEditImportedDialog = (row) => {
   importedForm.service_name = row.service_name || ''
   importedHeadersText.value = row.headers ? JSON.stringify(row.headers, null, 2) : ''
   importedDialogVisible.value = true
+}
+
+const syncImportedToolMode = (selected = importedSelectedTools.value) => {
+  importedToolMode.value = selected.length > 0 ? 'selected' : 'all'
+}
+
+const handleImportedToolModeChange = (mode) => {
+  importedToolQuery.value = ''
+  if (mode === 'all') {
+    importedSelectedTools.value = []
+  }
+}
+
+const openImportedToolsDialog = async (row) => {
+  importedToolTarget.value = row
+  importedSelectedTools.value = Array.isArray(row.allowed_tools) ? [...row.allowed_tools] : []
+  importedToolQuery.value = ''
+  syncImportedToolMode(importedSelectedTools.value)
+  mergeImportedToolOptions([], importedSelectedTools.value)
+  importedToolsDialogVisible.value = true
+  await loadImportedToolOptions(row.id)
+}
+
+const refreshImportedTools = async () => {
+  if (!importedToolTarget.value?.id) {
+    ElMessage.warning('请先选择一个已导入服务')
+    return
+  }
+  await loadImportedToolOptions(importedToolTarget.value.id)
 }
 
 const saveImportedItem = async () => {
@@ -730,6 +885,7 @@ const saveImportedItem = async () => {
     transport: importedForm.transport,
     url: importedForm.url,
     headers,
+    allowed_tools: editingImported.value?.allowed_tools || [],
     market_id: importedForm.market_id || null,
     provider_id: importedForm.provider_id,
     service_id: importedForm.service_id,
@@ -754,6 +910,42 @@ const saveImportedItem = async () => {
   }
 }
 
+const saveImportedToolSelection = async () => {
+  if (!importedToolTarget.value) return
+  if (importedToolMode.value === 'selected' && importedSelectedTools.value.length === 0) {
+    ElMessage.warning('请至少选择一个工具，或切换为“全部工具”')
+    return
+  }
+
+  const row = importedToolTarget.value
+  const payload = {
+    name: row.name,
+    enabled: row.enabled,
+    transport: row.transport,
+    url: row.url,
+    headers: row.headers || null,
+    allowed_tools: importedToolMode.value === 'all' ? [] : importedSelectedTools.value,
+    market_id: row.market_id || null,
+    provider_id: row.provider_id || '',
+    service_id: row.service_id || '',
+    service_name: row.service_name || ''
+  }
+
+  importedSaving.value = true
+  try {
+    await api.put(`/admin/mcp-market/imported-services/${row.id}`, payload)
+    ElMessage.success('工具策略已更新')
+    importedToolsDialogVisible.value = false
+    importedToolTarget.value = null
+    importedToolQuery.value = ''
+    await loadImportedItems(importedPage.value)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '保存失败')
+  } finally {
+    importedSaving.value = false
+  }
+}
+
 const toggleImportedEnabled = async (row) => {
   const payload = {
     name: row.name,
@@ -761,6 +953,7 @@ const toggleImportedEnabled = async (row) => {
     transport: row.transport,
     url: row.url,
     headers: row.headers || null,
+    allowed_tools: row.allowed_tools || [],
     market_id: row.market_id || null,
     provider_id: row.provider_id || '',
     service_id: row.service_id || '',
@@ -886,6 +1079,135 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+.tool-selector-card {
+  border: 1px solid #e5edf5;
+  border-radius: 16px;
+  padding: 16px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f4f8fc 100%);
+}
+
+.tool-selector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tool-selector-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-selector-title {
+  color: #172033;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tool-selector-tip {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tool-selector-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tool-mode-group {
+  margin-top: 14px;
+}
+
+.tool-picker-search {
+  margin-top: 14px;
+  max-width: 320px;
+}
+
+.tool-picker-empty {
+  margin-top: 14px;
+  border: 1px dashed #d6deeb;
+  border-radius: 12px;
+  padding: 18px 16px;
+  color: #667085;
+  font-size: 13px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.tool-tile {
+  margin-right: 0;
+  min-width: 0;
+}
+
+.tool-tile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tool-tile-name {
+  display: -webkit-box;
+  color: #182230;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tool-tile-desc {
+  display: -webkit-box;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+:deep(.tool-grid .el-checkbox.is-bordered) {
+  width: 100%;
+  height: auto;
+  margin-right: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  align-items: flex-start;
+  background: rgba(255, 255, 255, 0.9);
+  border-color: #d7e1ec;
+}
+
+:deep(.tool-grid .el-checkbox__label) {
+  padding-left: 10px;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+:deep(.tool-grid .el-checkbox.is-bordered.is-checked) {
+  background: #eff7ff;
+  border-color: #7ab8ff;
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.08);
+}
+
 @media (max-width: 992px) {
   .detail-grid {
     grid-template-columns: 1fr;
@@ -897,6 +1219,23 @@ onMounted(async () => {
 
   .panel-header {
     flex-wrap: wrap;
+  }
+
+  .tool-selector-header {
+    flex-direction: column;
+  }
+
+  .tool-selector-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .tool-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tool-picker-search {
+    max-width: none;
   }
 }
 </style>
