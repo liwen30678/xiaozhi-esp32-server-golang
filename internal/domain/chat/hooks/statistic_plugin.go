@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"context"
 	"time"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -22,28 +23,44 @@ type turnMetric struct {
 }
 
 type statisticPlugin struct {
-	// 使用 concurrent-map 替代 sync.Map，性能更好
 	currentTurn cmap.ConcurrentMap[string, int64]
 	turns       cmap.ConcurrentMap[string, *turnMetric]
 	lastSeen    cmap.ConcurrentMap[string, int64]
 
-	// 计数器，用于控制清理频率
 	cleanupCounter   int64
-	cleanupThreshold int64 // 每 N 次调用执行一次全量清理
+	cleanupThreshold int64
 }
 
-func RegisterBuiltinPlugins(hub *Hub) {
-	if hub == nil {
-		return
-	}
-
-	plugin := &statisticPlugin{
+func newStatisticPlugin() *statisticPlugin {
+	return &statisticPlugin{
 		currentTurn:      cmap.New[int64](),
 		turns:            cmap.New[*turnMetric](),
 		lastSeen:         cmap.New[int64](),
-		cleanupThreshold: 100, // 每 100 次调用执行一次清理
+		cleanupThreshold: 100,
 	}
-	hub.RegisterAsync(EventChatMetric, "statistic_plugin", 100, plugin.onMetric)
+}
+
+func (p *statisticPlugin) Init(context.Context) error { return nil }
+func (p *statisticPlugin) Close() error               { return nil }
+
+func BuiltinRegistrations() []Registration {
+	plugin := newStatisticPlugin()
+	meta := PluginMeta{
+		Name:        "statistic_plugin",
+		Version:     "v1",
+		Description: "Aggregate turn metrics and log a summary on TTS stop",
+		Priority:    100,
+		Enabled:     true,
+		Kind:        PluginKindObserver,
+		Stage:       EventChatMetric,
+	}
+	return []Registration{{
+		Meta:      meta,
+		Lifecycle: plugin,
+		Register: func(hub *Hub, meta PluginMeta) error {
+			return hub.RegisterObserver(EventChatMetric, meta, plugin.onMetric)
+		},
+	}}
 }
 
 func (p *statisticPlugin) onMetric(ctx Context, payload any) {
@@ -54,8 +71,6 @@ func (p *statisticPlugin) onMetric(ctx Context, payload any) {
 
 	nowTs := time.Now().UnixMilli()
 	p.lastSeen.Set(ctx.SessionID, nowTs)
-
-	// 减少清理频率：每 N 次调用才执行一次全量清理
 	if p.cleanupCounter++; p.cleanupCounter%p.cleanupThreshold == 0 {
 		p.cleanupStale(nowTs)
 	}
@@ -87,7 +102,6 @@ func (p *statisticPlugin) onMetric(ctx Context, payload any) {
 
 func (p *statisticPlugin) getOrCreateTurn(sessionID string, stage MetricStage) *turnMetric {
 	if stage == MetricTurnStart {
-		// currentTurn + 1
 		var newTurnID int64 = 1
 		if val, ok := p.currentTurn.Get(sessionID); ok {
 			newTurnID = val + 1
@@ -98,20 +112,15 @@ func (p *statisticPlugin) getOrCreateTurn(sessionID string, stage MetricStage) *
 		p.turns.Set(sessionID, tm)
 		return tm
 	}
-
-	// 尝试获取 existing turn
 	if val, ok := p.turns.Get(sessionID); ok {
 		return val
 	}
-
-	// 获取或创建 currentTurn
 	var turnID int64 = 1
 	if val, ok := p.currentTurn.Get(sessionID); ok {
 		turnID = val
 	} else {
 		p.currentTurn.Set(sessionID, turnID)
 	}
-
 	tm := &turnMetric{turnID: turnID}
 	p.turns.Set(sessionID, tm)
 	return tm
@@ -142,15 +151,12 @@ func (p *statisticPlugin) logTurnMetric(sessionID string, tm *turnMetric) {
 
 func (p *statisticPlugin) cleanupStale(nowTs int64) {
 	const ttl = int64(2 * 60 * 1000)
-
-	// 遍历 lastSeen，清理过期项
 	keysToDelete := make([]string, 0)
 	p.lastSeen.IterCb(func(key string, value int64) {
 		if nowTs-value > ttl {
 			keysToDelete = append(keysToDelete, key)
 		}
 	})
-
 	for _, key := range keysToDelete {
 		p.lastSeen.Remove(key)
 		p.turns.Remove(key)

@@ -15,6 +15,18 @@ chat:
   chat_max_silence_duration: 400   # 句子结束静音阈值（毫秒），默认 400
   realtime_mode: 4 # 1: vad打断模式 2: asr打断模式 3: asr时识别到声纹时进行打断 4. asr出结果打断(兼容流式或离线)
 
+chat_hooks:
+  enabled: true
+  async:
+    queue_size: 1024
+    worker_count: 1
+    drop_when_full: false
+    timeout_ms: 200
+  plugins:
+    statistic_plugin:
+      enabled: true
+      priority: 100
+
 config_provider:          #对应domain/config/中的provider
   type: "manager"         #现在可以是 manager, redis
   enable_periodic_update: true  #是否启用周期性配置更新

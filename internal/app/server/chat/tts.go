@@ -242,14 +242,9 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 				}
 			case AudioQueueKindTtsStart:
 				if t.session != nil {
-					stop, hookErr := t.session.hookHub.EmitTTSOutputStart(t.session.hookContext(ctx))
+					hookErr := t.session.hookHub.EmitTTSOutputStart(t.session.hookContext(ctx))
 					if hookErr != nil {
 						log.Warnf("TTS_OUTPUT_START hook 执行失败: %v", hookErr)
-					}
-					if stop {
-						log.Infof("TTS_OUTPUT_START hook 请求停止当前流程")
-						t.InterruptAndClearQueue()
-						continue
 					}
 				}
 				t.clientState.SetStartTtsTs()
@@ -299,7 +294,7 @@ func (t *TTSManager) runSenderLoop(ctx context.Context) {
 					t.session.TraceTtsStop(ctx, t.clientState.Statistic.TtsStopTs, stopErr)
 				}
 				if t.session != nil {
-					_, hookErr := t.session.hookHub.EmitTTSOutputStop(t.session.hookContext(ctx), chathooks.TTSOutputStopData{Err: stopErr})
+					hookErr := t.session.hookHub.EmitTTSOutputStop(t.session.hookContext(ctx), chathooks.TTSOutputStopData{Err: stopErr})
 					if hookErr != nil {
 						log.Warnf("TTS_OUTPUT_STOP hook 执行失败: %v", hookErr)
 					}

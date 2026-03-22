@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cloudwego/eino/schema"
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
@@ -13,6 +14,73 @@ type Context struct {
 	DeviceID  string
 }
 
+type PluginKind string
+
+type EventKind string
+
+const (
+	PluginKindInterceptor PluginKind = "interceptor"
+	PluginKindObserver    PluginKind = "observer"
+)
+
+const (
+	EventKindInterceptor EventKind = "interceptor"
+	EventKindObserver    EventKind = "observer"
+)
+
+type PluginMeta struct {
+	Name        string
+	Version     string
+	Description string
+	Priority    int
+	Enabled     bool
+	Kind        PluginKind
+	Stage       string
+}
+
+type Lifecycle interface {
+	Init(context.Context) error
+	Close() error
+}
+
+type Registration struct {
+	Meta      PluginMeta
+	Register  func(*Hub, PluginMeta) error
+	Lifecycle Lifecycle
+}
+
+type Registry interface {
+	Add(Registration)
+	List() []Registration
+}
+
+type InMemoryRegistry struct {
+	regs []Registration
+}
+
+func NewRegistry() *InMemoryRegistry { return &InMemoryRegistry{} }
+
+func (r *InMemoryRegistry) Add(reg Registration) {
+	if r == nil {
+		return
+	}
+	r.regs = append(r.regs, reg)
+}
+
+func (r *InMemoryRegistry) List() []Registration {
+	if r == nil {
+		return nil
+	}
+	out := make([]Registration, len(r.regs))
+	copy(out, r.regs)
+	return out
+}
+
+type BuiltinPluginConfig struct {
+	Enabled  *bool
+	Priority int
+}
+
 const (
 	EventChatASROutput      = "chat.asr.output"
 	EventChatLLMInput       = "chat.llm.input"
@@ -22,6 +90,27 @@ const (
 	EventChatTTSOutputStop  = "chat.tts.output.stop"
 	EventChatMetric         = "chat.metric"
 )
+
+var eventKinds = map[string]EventKind{
+	EventChatASROutput:      EventKindInterceptor,
+	EventChatLLMInput:       EventKindInterceptor,
+	EventChatLLMOutput:      EventKindInterceptor,
+	EventChatTTSInput:       EventKindInterceptor,
+	EventChatTTSOutputStart: EventKindObserver,
+	EventChatTTSOutputStop:  EventKindObserver,
+	EventChatMetric:         EventKindObserver,
+}
+
+func ValidateEventKind(event string, kind PluginKind) error {
+	expected, ok := eventKinds[event]
+	if !ok {
+		return fmt.Errorf("unknown hook event: %s", event)
+	}
+	if PluginKind(expected) != kind {
+		return fmt.Errorf("hook event %s requires %s registration, got %s", event, expected, kind)
+	}
+	return nil
+}
 
 type ASROutputData struct {
 	Text          string

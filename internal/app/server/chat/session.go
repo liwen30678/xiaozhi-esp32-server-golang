@@ -1543,10 +1543,7 @@ func (s *ChatSession) emitMetricStage(ctx context.Context, stage chathooks.Metri
 		return
 	}
 
-	stop, hookErr := s.hookHub.EmitMetric(s.hookContext(ctx), chathooks.MetricData{Stage: stage, Ts: ts, Err: err})
-	if stop {
-		log.Debugf("METRIC hook returned stop (ignored): stage=%s", stage)
-	}
+	hookErr := s.hookHub.EmitMetric(s.hookContext(ctx), chathooks.MetricData{Stage: stage, Ts: ts, Err: err})
 	if hookErr != nil {
 		log.Warnf("METRIC hook 执行失败: stage=%s err=%v", stage, hookErr)
 	}
