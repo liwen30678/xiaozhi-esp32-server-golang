@@ -9,10 +9,12 @@ import (
 	"github.com/spf13/viper"
 
 	"xiaozhi-esp32-server-golang/constants"
+	"xiaozhi-esp32-server-golang/internal/app/server/chat/plugins"
 	types_conn "xiaozhi-esp32-server-golang/internal/app/server/types"
 	types_audio "xiaozhi-esp32-server-golang/internal/data/audio"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	chathooks "xiaozhi-esp32-server-golang/internal/domain/chat/hooks"
+	"xiaozhi-esp32-server-golang/internal/domain/chat/streamtransform"
 	userconfig "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/openclaw"
@@ -122,11 +124,14 @@ func NewChatManager(deviceID string, transport types_conn.IConn, options ...Chat
 		}
 		log.Infof("已加载 chat hook plugins: %+v", hookHub.PluginMetas())
 	}
+	transformRegistry := streamtransform.NewRegistry()
+	plugins.Init(transformRegistry)
 
 	cm.session = NewChatSession(
 		clientState,
 		serverTransport,
 		hookHub,
+		transformRegistry,
 	)
 
 	return cm, nil

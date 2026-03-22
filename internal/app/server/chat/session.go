@@ -19,6 +19,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/data/history"
 	. "xiaozhi-esp32-server-golang/internal/data/msg"
 	chathooks "xiaozhi-esp32-server-golang/internal/domain/chat/hooks"
+	"xiaozhi-esp32-server-golang/internal/domain/chat/streamtransform"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	"xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
@@ -82,7 +83,7 @@ type ChatSession struct {
 
 type ChatSessionOption func(*ChatSession)
 
-func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, hookHub *chathooks.Hub, opts ...ChatSessionOption) *ChatSession {
+func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, hookHub *chathooks.Hub, transformRegistry *streamtransform.Registry, opts ...ChatSessionOption) *ChatSession {
 	s := &ChatSession{
 		clientState:        clientState,
 		serverTransport:    serverTransport,
@@ -98,7 +99,7 @@ func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, 
 	s.asrManager = NewASRManager(clientState, serverTransport)
 	s.asrManager.session = s // 设置 session 引用
 	s.ttsManager = NewTTSManager(clientState, serverTransport, s)
-	s.llmManager = NewLLMManager(clientState, serverTransport, s.ttsManager, s)
+	s.llmManager = NewLLMManager(clientState, serverTransport, s.ttsManager, s, transformRegistry)
 
 	// 如果启用声纹识别，创建声纹管理器
 	if clientState.IsSpeakerEnabled() {
@@ -922,7 +923,7 @@ func (s *ChatSession) InjectOpenClawResponse(event openclaw.ResponseDelivery) er
 
 // InterruptAndClearTTSQueue 触发 TTS 打断并清空发送队列（供 realtime 模式 VAD 打断等场景调用）
 func (s *ChatSession) InterruptAndClearTTSQueue() {
-	s.ttsManager.InterruptAndClearQueue()
+	s.ttsManager.InterruptAndStop(s.clientState.Ctx, true, context.Canceled)
 }
 
 // handleAbortMessage 处理中止消息

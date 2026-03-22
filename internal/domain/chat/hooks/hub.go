@@ -84,8 +84,8 @@ func (h *Hub) EmitLLMInput(ctx Context, data LLMInputData) (LLMInputData, bool, 
 	return EmitTyped(h, EventChatLLMInput, ctx, data)
 }
 
-func (h *Hub) EmitLLMOutput(ctx Context, data LLMOutputData) (LLMOutputData, bool, error) {
-	return EmitTyped(h, EventChatLLMOutput, ctx, data)
+func (h *Hub) EmitLLMOutputRaw(ctx Context, data LLMOutputRawData) (LLMOutputRawData, bool, error) {
+	return EmitTyped(h, EventChatLLMOutputRaw, ctx, data)
 }
 
 func (h *Hub) EmitTTSInput(ctx Context, data TTSInputData) (TTSInputData, bool, error) {

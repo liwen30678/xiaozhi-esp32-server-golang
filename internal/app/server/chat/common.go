@@ -1,5 +1,7 @@
 package chat
 
+import "context"
+
 func (s *ChatSession) StopSpeaking(isSendTtsStop bool) {
 	s.clientState.SessionCtx.Cancel()
 	s.clientState.AfterAsrSessionCtx.Cancel()
@@ -7,11 +9,7 @@ func (s *ChatSession) StopSpeaking(isSendTtsStop bool) {
 	s.ClearChatTextQueue()
 	s.llmManager.ClearLLMResponseQueue()
 	s.ttsManager.ClearTTSQueue()
-	s.ttsManager.InterruptAndClearQueue()
-
-	if isSendTtsStop {
-		s.serverTransport.SendTtsStop()
-	}
+	s.ttsManager.InterruptAndStop(s.clientState.Ctx, isSendTtsStop, context.Canceled)
 
 }
 

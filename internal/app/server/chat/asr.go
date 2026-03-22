@@ -424,6 +424,8 @@ func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 
 	state.AsrResultChannel = asrResultChannel
 	state.Asr.SetPendingRestartOnVoice(false)
+	// 重置统计时间，用于计算本轮对话的整体耗时
+	state.MarkTurnStart()
 	log.Debugf("重启ASR识别成功")
 	return nil
 }

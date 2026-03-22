@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -23,6 +24,8 @@ type turnMetric struct {
 }
 
 type statisticPlugin struct {
+	mu sync.Mutex
+
 	currentTurn cmap.ConcurrentMap[string, int64]
 	turns       cmap.ConcurrentMap[string, *turnMetric]
 	lastSeen    cmap.ConcurrentMap[string, int64]
@@ -69,59 +72,78 @@ func (p *statisticPlugin) onMetric(ctx Context, payload any) {
 		return
 	}
 
+	p.mu.Lock()
 	nowTs := time.Now().UnixMilli()
 	p.lastSeen.Set(ctx.SessionID, nowTs)
 	if p.cleanupCounter++; p.cleanupCounter%p.cleanupThreshold == 0 {
 		p.cleanupStale(nowTs)
 	}
 
-	tm := p.getOrCreateTurn(ctx.SessionID, data.Stage)
+	tm := p.getOrCreateTurnLocked(ctx.SessionID)
 	switch data.Stage {
 	case MetricTurnStart:
-		tm.turnStartTs = data.Ts
+		if tm.turnStartTs == 0 {
+			tm.turnStartTs = data.Ts
+		}
 	case MetricAsrFirstText:
-		tm.asrFirstTextTs = data.Ts
+		if tm.asrFirstTextTs == 0 {
+			tm.asrFirstTextTs = data.Ts
+		}
 	case MetricAsrFinalText:
-		tm.asrFinalTextTs = data.Ts
+		if tm.asrFinalTextTs == 0 {
+			tm.asrFinalTextTs = data.Ts
+		}
 	case MetricLlmStart:
-		tm.llmStartTs = data.Ts
+		if tm.llmStartTs == 0 {
+			tm.llmStartTs = data.Ts
+		}
 	case MetricLlmFirstToken:
-		tm.llmFirstTokenTs = data.Ts
+		if tm.llmFirstTokenTs == 0 {
+			tm.llmFirstTokenTs = data.Ts
+		}
 	case MetricLlmEnd:
-		tm.llmEndTs = data.Ts
+		if tm.llmEndTs == 0 {
+			tm.llmEndTs = data.Ts
+		}
 	case MetricTtsStart:
-		tm.ttsStartTs = data.Ts
+		if tm.ttsStartTs == 0 {
+			tm.ttsStartTs = data.Ts
+		}
 	case MetricTtsFirstFrame:
-		tm.ttsFirstFrameTs = data.Ts
+		if tm.ttsFirstFrameTs == 0 {
+			tm.ttsFirstFrameTs = data.Ts
+		}
 	case MetricTtsStop:
-		tm.ttsStopTs = data.Ts
-		p.logTurnMetric(ctx.SessionID, tm)
+		if tm.ttsStopTs == 0 {
+			tm.ttsStopTs = data.Ts
+		}
+	}
+
+	var completed *turnMetric
+	if data.Stage == MetricTtsStop {
+		snapshot := *tm
+		completed = &snapshot
 		p.turns.Remove(ctx.SessionID)
+	}
+	p.mu.Unlock()
+
+	if completed != nil {
+		p.logTurnMetric(ctx.SessionID, completed)
 	}
 }
 
-func (p *statisticPlugin) getOrCreateTurn(sessionID string, stage MetricStage) *turnMetric {
-	if stage == MetricTurnStart {
-		var newTurnID int64 = 1
-		if val, ok := p.currentTurn.Get(sessionID); ok {
-			newTurnID = val + 1
-		}
-		p.currentTurn.Set(sessionID, newTurnID)
-
-		tm := &turnMetric{turnID: newTurnID}
-		p.turns.Set(sessionID, tm)
+func (p *statisticPlugin) getOrCreateTurnLocked(sessionID string) *turnMetric {
+	if tm, ok := p.turns.Get(sessionID); ok {
 		return tm
 	}
-	if val, ok := p.turns.Get(sessionID); ok {
-		return val
-	}
-	var turnID int64 = 1
+
+	newTurnID := int64(1)
 	if val, ok := p.currentTurn.Get(sessionID); ok {
-		turnID = val
-	} else {
-		p.currentTurn.Set(sessionID, turnID)
+		newTurnID = val + 1
 	}
-	tm := &turnMetric{turnID: turnID}
+	p.currentTurn.Set(sessionID, newTurnID)
+
+	tm := &turnMetric{turnID: newTurnID}
 	p.turns.Set(sessionID, tm)
 	return tm
 }

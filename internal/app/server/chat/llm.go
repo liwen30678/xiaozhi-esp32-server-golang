@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
@@ -15,6 +14,7 @@ import (
 
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	chathooks "xiaozhi-esp32-server-golang/internal/domain/chat/hooks"
+	"xiaozhi-esp32-server-golang/internal/domain/chat/streamtransform"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
 	"xiaozhi-esp32-server-golang/internal/domain/eventbus"
 	"xiaozhi-esp32-server-golang/internal/domain/llm"
@@ -76,10 +76,11 @@ type llmResponseChannelOptions struct {
 }
 
 type LLMManager struct {
-	clientState     *ClientState
-	session         *ChatSession
-	serverTransport *ServerTransport
-	ttsManager      *TTSManager
+	clientState       *ClientState
+	session           *ChatSession
+	serverTransport   *ServerTransport
+	ttsManager        *TTSManager
+	transformRegistry *streamtransform.Registry
 
 	einoTools []*schema.ToolInfo
 
@@ -91,15 +92,43 @@ type LLMManager struct {
 	lastMessageIDMu sync.RWMutex // 保护 lastMessageID 的并发访问
 }
 
-func NewLLMManager(clientState *ClientState, serverTransport *ServerTransport, ttsManager *TTSManager, session *ChatSession) *LLMManager {
+func NewLLMManager(clientState *ClientState, serverTransport *ServerTransport, ttsManager *TTSManager, session *ChatSession, transformRegistry *streamtransform.Registry) *LLMManager {
 	return &LLMManager{
-		clientState:      clientState,
-		session:          session,
-		serverTransport:  serverTransport,
-		ttsManager:       ttsManager,
-		llmResponseQueue: util.NewQueue[LLMResponseChannelItem](10),
-		lastMessageID:    make(map[string]string),
+		clientState:       clientState,
+		session:           session,
+		serverTransport:   serverTransport,
+		ttsManager:        ttsManager,
+		transformRegistry: transformRegistry,
+		llmResponseQueue:  util.NewQueue[LLMResponseChannelItem](10),
+		lastMessageID:     make(map[string]string),
 	}
+}
+
+func (l *LLMManager) openOutputPipeline(ctx context.Context) (*streamtransform.Pipeline, error) {
+	if l == nil || l.transformRegistry == nil {
+		return &streamtransform.Pipeline{}, nil
+	}
+
+	sessionID := ""
+	deviceID := ""
+	if l.clientState != nil {
+		sessionID = l.clientState.SessionID
+		deviceID = l.clientState.DeviceID
+	}
+
+	return l.transformRegistry.Open(streamtransform.Context{
+		Ctx:       ctx,
+		SessionID: sessionID,
+		DeviceID:  deviceID,
+		RequestID: fmt.Sprintf("%s-%d", sessionID, time.Now().UnixNano()),
+	})
+}
+
+func (l *LLMManager) emitLLMOutputRaw(ctx context.Context, data chathooks.LLMOutputRawData) (chathooks.LLMOutputRawData, bool, error) {
+	if l == nil || l.session == nil || l.session.hookHub == nil {
+		return data, false, nil
+	}
+	return l.session.hookHub.EmitLLMOutputRaw(l.session.hookContext(ctx), data)
 }
 
 func (l *LLMManager) Start(ctx context.Context) {
@@ -248,21 +277,6 @@ func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMess
 				l.session.TraceLlmEnd(ctx, time.Now().UnixMilli(), err)
 			}
 			strFullText := fullText.String()
-			if l.session != nil {
-				payload, stop, hookErr := l.session.hookHub.EmitLLMOutput(l.session.hookContext(ctx), chathooks.LLMOutputData{FullText: strFullText, Err: err})
-				if hookErr != nil {
-					log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
-				}
-				strFullText = payload.FullText
-				err = payload.Err
-				if stop {
-					log.Infof("LLM_OUTPUT hook 请求停止当前流程")
-					if needSendTtsCmd && !l.clientState.IsRealTime() {
-						l.ttsManager.EnqueueTtsStop(ctx)
-					}
-					return
-				}
-			}
 
 			// 非 realtime 模式下，由 runSenderLoop 统一发送 TtsStop
 			if !l.clientState.IsRealTime() {
@@ -364,23 +378,6 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 		l.session.TraceLlmEnd(ctx, time.Now().UnixMilli(), err)
 	}
 	strFullText := fullText.String()
-	if l.session != nil {
-		payload, stop, hookErr := l.session.hookHub.EmitLLMOutput(l.session.hookContext(ctx), chathooks.LLMOutputData{FullText: strFullText, Err: err})
-		if hookErr != nil {
-			log.Warnf("LLM_OUTPUT hook 执行失败: %v", hookErr)
-		}
-		strFullText = payload.FullText
-		err = payload.Err
-		if stop {
-			log.Infof("LLM_OUTPUT hook 请求停止当前流程")
-			if needSendTtsCmd && !l.clientState.IsRealTime() {
-				l.ttsManager.EnqueueTtsStop(ctx)
-			}
-			return ok, err
-		}
-	}
-	fullText.Reset()
-	fullText.WriteString(strFullText)
 
 	if needSendTtsCmd {
 		if !l.clientState.IsRealTime() {
@@ -441,7 +438,6 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 	// toolCalls 使用局部变量（内部工具调用逻辑，不涉及聊天历史）
 	var toolCalls []schema.ToolCall
 	assistantSaved := false
-	llmFirstTokenMarked := false
 
 	saveInterruptedAssistant := func() {
 		if assistantSaved {
@@ -502,13 +498,6 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 				hasText := strings.TrimSpace(llmResponse.Text) != ""
 				if hasText || llmResponse.IsStart || llmResponse.IsEnd {
 					// 双流式收尾依赖空文本的 IsEnd 信号，不能只在有文本时才传给 TTS。
-					if !llmFirstTokenMarked && hasText {
-						state.MarkLlmFirstToken()
-						if l.session != nil {
-							l.session.TraceLlmFirstToken(ctx, time.Now().UnixMilli())
-						}
-						llmFirstTokenMarked = true
-					}
 					if err := l.ttsManager.handleTextResponse(ctx, llmResponse, true); err != nil {
 						return true, err
 					}
@@ -560,7 +549,6 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 							return true, fmt.Errorf("处理工具调用响应失败: %v", err)
 						}
 						if !invokeToolSuccess && strings.TrimSpace(llmResponse.Text) != "" {
-							//工具调用失败
 							if err := l.ttsManager.handleTextResponse(ctx, llmResponse, false); err != nil {
 								return true, err
 							}
@@ -971,23 +959,131 @@ func (l *LLMManager) handleLLMWithContextAndTools(
 	// 调用 LLM provider
 	msgChan := llmProvider.ResponseWithContext(ctx, l.clientState.SessionID, dialogue, tools)
 
+	pipeline, err := l.openOutputPipeline(ctx)
+	if err != nil {
+		pool.Release(llmWrapper)
+		return nil, fmt.Errorf("创建LLM输出流变换管线失败: %w", err)
+	}
+
 	// 创建响应 channel
-	sentenceChannel := make(chan llm_common.LLMResponseStruct, 2)
+	responseChannel := make(chan llm_common.LLMResponseStruct, 2)
 	startTs := time.Now().UnixMilli()
-	var firstFrame bool
-	fullText := ""
-	var buffer bytes.Buffer // 用于累积接收到的内容
-	isFirst := true
+	var firstSegment bool
+	var rawFullText strings.Builder
 
 	// 启动 goroutine 处理响应
 	go func() {
 		defer func() {
-			log.Debugf("full Response with %d tools, fullText: %s", len(tools), fullText)
-			close(sentenceChannel)
+			log.Debugf("full Response with %d tools, fullText: %s", len(tools), rawFullText.String())
+			close(responseChannel)
+			if closeErr := pipeline.Close(); closeErr != nil {
+				log.Warnf("关闭 LLM 输出流变换管线失败: %v", closeErr)
+			}
 			// 释放资源
 			pool.Release(llmWrapper)
 			log.Debugf("LLM资源已释放")
 		}()
+
+		isFirstOutput := true
+		llmFirstTokenMarked := false
+
+		emitResponse := func(item streamtransform.Item) bool {
+			response := llm_common.LLMResponseStruct{
+				IsEnd: item.IsEnd,
+			}
+
+			switch item.Kind {
+			case streamtransform.ItemKindToolCalls:
+				response.ToolCalls = item.ToolCalls
+				if len(item.ToolCalls) > 0 {
+					response.IsStart = isFirstOutput
+				}
+			case streamtransform.ItemKindTextDelta, streamtransform.ItemKindTextSegment:
+				response.Text = item.Text
+				if strings.TrimSpace(item.Text) != "" {
+					response.IsStart = isFirstOutput
+					if !firstSegment {
+						firstSegment = true
+						log.Infof("耗时统计: llm工具首句: %d ms", time.Now().UnixMilli()-startTs)
+					}
+					if isFirstOutput {
+						isFirstOutput = false
+					}
+				}
+			default:
+				return true
+			}
+
+			if strings.TrimSpace(response.Text) == "" && len(response.ToolCalls) == 0 && !response.IsEnd {
+				return true
+			}
+
+			select {
+			case <-ctx.Done():
+				log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+				return false
+			case responseChannel <- response:
+				return true
+			}
+		}
+
+		pushToPipeline := func(item streamtransform.Item) (bool, error) {
+			items, stop, err := pipeline.Push(item)
+			if err != nil {
+				return false, err
+			}
+			for _, out := range items {
+				if !emitResponse(out) {
+					return true, nil
+				}
+			}
+			return stop, nil
+		}
+
+		pushRawText := func(delta string, isEnd bool, errVal error) (bool, error) {
+			payload, stop, hookErr := l.emitLLMOutputRaw(ctx, chathooks.LLMOutputRawData{
+				Delta:    delta,
+				FullText: rawFullText.String(),
+				IsEnd:    isEnd,
+				Err:      errVal,
+			})
+			if hookErr != nil {
+				log.Warnf("LLM_OUTPUT_RAW hook 执行失败: %v", hookErr)
+			}
+			if stop {
+				log.Infof("LLM_OUTPUT_RAW hook 请求停止当前流程")
+				return true, nil
+			}
+			if payload.Delta != "" {
+				rawFullText.WriteString(payload.Delta)
+			}
+			return pushToPipeline(streamtransform.Item{
+				Kind:  streamtransform.ItemKindTextDelta,
+				Text:  payload.Delta,
+				IsEnd: payload.IsEnd,
+			})
+		}
+
+		pushRawToolCalls := func(toolCalls []schema.ToolCall) (bool, error) {
+			payload, stop, hookErr := l.emitLLMOutputRaw(ctx, chathooks.LLMOutputRawData{
+				FullText:  rawFullText.String(),
+				ToolCalls: toolCalls,
+			})
+			if hookErr != nil {
+				log.Warnf("LLM_OUTPUT_RAW hook 执行失败: %v", hookErr)
+			}
+			if stop {
+				log.Infof("LLM_OUTPUT_RAW hook 请求停止当前流程")
+				return true, nil
+			}
+			if len(payload.ToolCalls) == 0 {
+				return false, nil
+			}
+			return pushToPipeline(streamtransform.Item{
+				Kind:      streamtransform.ItemKindToolCalls,
+				ToolCalls: payload.ToolCalls,
+			})
+		}
 
 		for {
 			select {
@@ -996,104 +1092,63 @@ func (l *LLMManager) handleLLMWithContextAndTools(
 				return
 			case message, ok := <-msgChan:
 				if !ok {
-					remaining := buffer.String()
-					if remaining != "" {
-						log.Infof("处理剩余内容: %s", remaining)
-						fullText += remaining
-						select {
-						case <-ctx.Done():
-							log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
-							return
-						case sentenceChannel <- llm_common.LLMResponseStruct{
-							Text:  remaining,
-							IsEnd: true,
-						}:
-						}
-					} else {
-						select {
-						case <-ctx.Done():
-							log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
-							return
-						case sentenceChannel <- llm_common.LLMResponseStruct{
-							Text:  "",
-							IsEnd: true,
-						}:
-						}
+					stop, pushErr := pushRawText("", true, nil)
+					if pushErr != nil {
+						log.Errorf("处理 LLM 结束流失败: %v", pushErr)
+					}
+					if stop || pushErr != nil {
+						return
 					}
 					return
 				}
 				if message == nil {
-					break
+					continue
 				}
 				if llm.IsLLMErrorMessage(message) {
 					errMsg := llm.LLMErrorMessage(message)
 					log.Warnf("LLM 返回错误: %s", errMsg)
-					select {
-					case <-ctx.Done():
+					stop, pushErr := pushRawText(errMsg, true, nil)
+					if pushErr != nil {
+						log.Errorf("处理 LLM 错误输出失败: %v", pushErr)
+					}
+					if stop || pushErr != nil {
 						return
-					case sentenceChannel <- llm_common.LLMResponseStruct{
-						Text:  errMsg,
-						IsEnd: true,
-					}:
 					}
 					return
 				}
 				if message.Content != "" {
-					fullText += message.Content
-					buffer.WriteString(message.Content)
-					if util.ContainsSentenceSeparator(message.Content, isFirst) {
-						sentences, remaining := util.ExtractSmartSentences(buffer.String(), 2, 100, isFirst)
-						if len(sentences) > 0 {
-							for _, sentence := range sentences {
-								if sentence != "" {
-									if !firstFrame {
-										firstFrame = true
-										log.Infof("耗时统计: llm工具首句: %d ms", time.Now().UnixMilli()-startTs)
-									}
-									log.Infof("处理完整句子: %s", sentence)
-									select {
-									case <-ctx.Done():
-										log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
-										return
-									case sentenceChannel <- llm_common.LLMResponseStruct{
-										Text:    sentence,
-										IsStart: isFirst,
-										IsEnd:   false,
-									}:
-									}
-
-									if isFirst {
-										isFirst = false
-									}
-								}
-							}
+					if !llmFirstTokenMarked {
+						l.clientState.MarkLlmFirstToken()
+						if l.session != nil {
+							l.session.TraceLlmFirstToken(ctx, l.clientState.Statistic.LlmFirstTokenTs)
 						}
-						buffer.Reset()
-						buffer.WriteString(remaining)
-						if isFirst {
-							isFirst = false
-						}
+						llmFirstTokenMarked = true
+					}
+					stop, pushErr := pushRawText(message.Content, false, nil)
+					if pushErr != nil {
+						log.Errorf("处理 LLM 文本流失败: %v", pushErr)
+						return
+					}
+					if stop {
+						return
 					}
 				}
-				// 工具调用响应（假设 ToolCalls 字段）
 				if len(message.ToolCalls) > 0 {
 					log.Infof("处理工具调用: %+v", message.ToolCalls)
-					select {
-					case <-ctx.Done():
-						log.Infof("上下文已取消，停止LLM响应处理: %v, context done, exit", ctx.Err())
+					stop, pushErr := pushRawToolCalls(message.ToolCalls)
+					if pushErr != nil {
+						log.Errorf("处理 LLM 工具流失败: %v", pushErr)
 						return
-					case sentenceChannel <- llm_common.LLMResponseStruct{
-						ToolCalls: message.ToolCalls,
-						IsStart:   isFirst,
-						IsEnd:     false,
-					}:
+					}
+					if stop {
+						return
 					}
 				}
 			}
 		}
 	}()
 
-	return sentenceChannel, nil
+	return responseChannel, nil
 }
 
 func (l *LLMManager) DoLLmRequest(ctx context.Context, userMessage *schema.Message, einoTools []*schema.ToolInfo, isSync bool, speakerResult *speaker.IdentifyResult) error {

@@ -84,7 +84,7 @@ type BuiltinPluginConfig struct {
 const (
 	EventChatASROutput      = "chat.asr.output"
 	EventChatLLMInput       = "chat.llm.input"
-	EventChatLLMOutput      = "chat.llm.output"
+	EventChatLLMOutputRaw   = "chat.llm.output.raw"
 	EventChatTTSInput       = "chat.tts.input"
 	EventChatTTSOutputStart = "chat.tts.output.start"
 	EventChatTTSOutputStop  = "chat.tts.output.stop"
@@ -94,7 +94,7 @@ const (
 var eventKinds = map[string]EventKind{
 	EventChatASROutput:      EventKindInterceptor,
 	EventChatLLMInput:       EventKindInterceptor,
-	EventChatLLMOutput:      EventKindInterceptor,
+	EventChatLLMOutputRaw:   EventKindInterceptor,
 	EventChatTTSInput:       EventKindInterceptor,
 	EventChatTTSOutputStart: EventKindObserver,
 	EventChatTTSOutputStop:  EventKindObserver,
@@ -123,9 +123,12 @@ type LLMInputData struct {
 	Tools           []*schema.ToolInfo
 }
 
-type LLMOutputData struct {
-	FullText string
-	Err      error
+type LLMOutputRawData struct {
+	Delta     string
+	FullText  string
+	ToolCalls []schema.ToolCall
+	IsEnd     bool
+	Err       error
 }
 
 type TTSInputData struct {
