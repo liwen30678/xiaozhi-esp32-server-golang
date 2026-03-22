@@ -406,7 +406,7 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 			}
 
 			// 发布事件：第二阶段（更新音频）
-			assistantMsg := schema.AssistantMessage(fullText.String(), nil)
+			assistantMsg := schema.AssistantMessage(strFullText, nil)
 			eventbus.Get().Publish(eventbus.TopicAddMessage, &eventbus.AddMessageEvent{
 				ClientState: l.clientState,
 				Msg:         *assistantMsg,
