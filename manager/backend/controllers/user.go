@@ -776,6 +776,27 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 				result = append(result, opt)
 			}
 		}
+		var sharedClones []models.VoiceClone
+		if err := uc.DB.Table("voice_clones").
+			Select("voice_clones.*").
+			Joins("JOIN users ON users.id = voice_clones.user_id").
+			Where("voice_clones.user_id <> ? AND voice_clones.provider = ? AND voice_clones.tts_config_id = ? AND voice_clones.status = ? AND voice_clones.shared_to_all = ? AND users.role = ?",
+				userID, provider, configID, "active", true, "admin").
+			Order("voice_clones.created_at DESC").
+			Scan(&sharedClones).Error; err == nil {
+			for _, clone := range sharedClones {
+				opt := VoiceOption{
+					Value: clone.ProviderVoiceID,
+					Label: fmt.Sprintf("[管理员共享] %s (%s)", clone.Name, clone.ProviderVoiceID),
+				}
+				key := strings.TrimSpace(opt.Value)
+				if key == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				result = append(result, opt)
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": result})

@@ -226,6 +226,7 @@ type VoiceClone struct {
 	Provider           string    `json:"provider" gorm:"type:varchar(50);not null;index"`
 	ProviderVoiceID    string    `json:"provider_voice_id" gorm:"type:varchar(200);not null;index"`
 	TTSConfigID        string    `json:"tts_config_id" gorm:"type:varchar(100);not null;index"`
+	SharedToAll        bool      `json:"shared_to_all" gorm:"default:false;index"`
 	Status             string    `json:"status" gorm:"type:varchar(20);default:'active';index"`
 	TranscriptRequired bool      `json:"transcript_required" gorm:"default:false"`
 	MetaJSON           string    `json:"meta_json" gorm:"type:json"`

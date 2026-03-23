@@ -206,7 +206,7 @@ func (vcc *VoiceCloneController) finishVoiceCloneTaskSuccess(task *models.VoiceC
 	taskMetaJSON, _ := json.Marshal(taskMeta)
 
 	return vcc.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.VoiceClone{}).Where("id = ? AND user_id = ?", clone.ID, clone.UserID).Updates(map[string]any{
+		if err := tx.Model(&models.VoiceClone{}).Where("id = ? AND user_id = ? AND status != ?", clone.ID, clone.UserID, "deleted").Updates(map[string]any{
 			"provider_voice_id": result.VoiceID,
 			"status":            voiceCloneStatusActive,
 			"meta_json":         cloneMetaJSON,
@@ -257,7 +257,7 @@ func (vcc *VoiceCloneController) finishVoiceCloneTaskFailed(task *models.VoiceCl
 			cloneUpdates["meta_json"] = cloneMetaJSON
 		}
 		if err := tx.Model(&models.VoiceClone{}).
-			Where("id = ? AND user_id = ?", task.VoiceCloneID, task.UserID).
+			Where("id = ? AND user_id = ? AND status != ?", task.VoiceCloneID, task.UserID, "deleted").
 			Updates(cloneUpdates).Error; err != nil {
 			return err
 		}

@@ -15,6 +15,15 @@
         <template #default="{ row }">{{ `${row.tts_config_name || '-'} (${row.tts_config_id || '-'})` }}</template>
       </el-table-column>
       <el-table-column prop="provider_voice_id" label="复刻音色ID" min-width="160" show-overflow-tooltip />
+      <el-table-column v-if="authStore.isAdmin" label="共享给所有人" width="140" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :model-value="!!row.shared_to_all"
+            :disabled="normalizeCloneStatus(row) !== 'active' || shareSubmittingID === row.id"
+            @change="(val) => toggleSharedToAll(row, val)"
+          />
+        </template>
+      </el-table-column>
       <el-table-column label="任务状态" width="100">
         <template #default="{ row }">
           <el-tag :type="getCloneStatusTagType(row)" size="small">{{ formatCloneStatus(row) }}</el-tag>
@@ -69,6 +78,15 @@
               @click="openAppendAudioDialog(row)"
             >
               追加参考音频
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :loading="deleteSubmittingID === row.id"
+              @click="deleteClone(row)"
+            >
+              删除
             </el-button>
           </div>
         </template>
@@ -221,7 +239,9 @@
 import { computed, nextTick, ref, onBeforeUnmount, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../../utils/api'
+import { useAuthStore } from '../../stores/auth'
 
+const authStore = useAuthStore()
 const loading = ref(false)
 const submitting = ref(false)
 const createDialogVisible = ref(false)
@@ -240,6 +260,8 @@ const retrySubmittingID = ref(null)
 const previewUploadSubmittingID = ref(null)
 const previewClonedSubmittingID = ref(null)
 const appendAudioSubmittingID = ref(null)
+const shareSubmittingID = ref(null)
+const deleteSubmittingID = ref(null)
 const appendAudioInputRef = ref(null)
 const appendAudioTargetClone = ref(null)
 const previewPlayerVisible = ref(false)
@@ -877,6 +899,43 @@ const retryClone = async (clone) => {
     await loadVoiceClones(true)
   } finally {
     retrySubmittingID.value = null
+  }
+}
+
+const toggleSharedToAll = async (clone, nextValue) => {
+  if (!authStore.isAdmin || !clone?.id) return
+  shareSubmittingID.value = clone.id
+  try {
+    await api.put(`/user/voice-clones/${clone.id}`, { shared_to_all: !!nextValue })
+    clone.shared_to_all = !!nextValue
+    ElMessage.success(nextValue ? '已启用给所有人使用' : '已关闭共享')
+  } finally {
+    shareSubmittingID.value = null
+  }
+}
+
+const deleteClone = async (clone) => {
+  if (!clone?.id || deleteSubmittingID.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除复刻音色“${clone.name || clone.provider_voice_id || clone.id}”吗？删除后将不再出现在列表和可选音色中。`,
+      '删除复刻音色',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch {
+    return
+  }
+  deleteSubmittingID.value = clone.id
+  try {
+    await api.delete(`/user/voice-clones/${clone.id}`)
+    ElMessage.success('删除成功')
+    await loadVoiceClones(true)
+  } finally {
+    deleteSubmittingID.value = null
   }
 }
 

@@ -147,6 +147,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				user.POST("/voice-clones", voiceCloneController.CreateVoiceClone)
 				user.GET("/voice-clones", voiceCloneController.GetVoiceClones)
 				user.PUT("/voice-clones/:id", voiceCloneController.UpdateVoiceClone)
+				user.DELETE("/voice-clones/:id", voiceCloneController.DeleteVoiceClone)
 				user.POST("/voice-clones/:id/retry", voiceCloneController.RetryVoiceClone)
 				user.POST("/voice-clones/:id/append-audio", voiceCloneController.AppendVoiceCloneAudio)
 				user.GET("/voice-clones/:id/preview", voiceCloneController.PreviewClonedVoice)

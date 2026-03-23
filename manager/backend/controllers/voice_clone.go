@@ -247,6 +247,7 @@ func (vcc *VoiceCloneController) CreateVoiceClone(c *gin.Context) {
 		Provider:           rawProvider,
 		ProviderVoiceID:    providerVoiceID,
 		TTSConfigID:        ttsConfigID,
+		SharedToAll:        false,
 		Status:             voiceCloneStatusProcessing,
 		TranscriptRequired: capability.RequiresTranscript,
 		MetaJSON:           string(pendingMetaJSON),
@@ -380,6 +381,7 @@ func (vcc *VoiceCloneController) GetVoiceClones(c *gin.Context) {
 			"provider_voice_id":   clone.ProviderVoiceID,
 			"tts_config_id":       clone.TTSConfigID,
 			"tts_config_name":     clone.TTSConfigID,
+			"shared_to_all":       clone.SharedToAll,
 			"status":              clone.Status,
 			"transcript_required": clone.TranscriptRequired,
 			"meta_json":           clone.MetaJSON,
@@ -421,19 +423,11 @@ func (vcc *VoiceCloneController) UpdateVoiceClone(c *gin.Context) {
 	}
 
 	var req struct {
-		Name string `json:"name"`
+		Name        *string `json:"name"`
+		SharedToAll *bool   `json:"shared_to_all"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数格式错误"})
-		return
-	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
-		return
-	}
-	if len([]rune(name)) > 100 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称长度不能超过100个字符"})
 		return
 	}
 
@@ -447,12 +441,86 @@ func (vcc *VoiceCloneController) UpdateVoiceClone(c *gin.Context) {
 		return
 	}
 
-	if err := vcc.DB.Model(&clone).Update("name", name).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新复刻名称失败"})
+	updateData := map[string]any{}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
+			return
+		}
+		if len([]rune(name)) > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "名称长度不能超过100个字符"})
+			return
+		}
+		updateData["name"] = name
+		clone.Name = name
+	}
+	if req.SharedToAll != nil {
+		roleVal, hasRole := c.Get("role")
+		isAdmin := hasRole && strings.TrimSpace(fmt.Sprint(roleVal)) == "admin"
+		if !isAdmin {
+			c.JSON(http.StatusForbidden, gin.H{"error": "仅管理员可设置共享状态"})
+			return
+		}
+		if normalizeCloneStatusValue(clone.Status) != voiceCloneStatusActive {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "仅成功状态的复刻音色允许设置共享状态"})
+			return
+		}
+		updateData["shared_to_all"] = *req.SharedToAll
+		clone.SharedToAll = *req.SharedToAll
+	}
+	if len(updateData) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "没有可更新的字段"})
 		return
 	}
-	clone.Name = name
+
+	if err := vcc.DB.Model(&clone).Updates(updateData).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新复刻音色失败"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": clone})
+}
+
+func (vcc *VoiceCloneController) DeleteVoiceClone(c *gin.Context) {
+	userIDAny, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "认证信息缺失"})
+		return
+	}
+	userID := userIDAny.(uint)
+
+	cloneID := strings.TrimSpace(c.Param("id"))
+	if cloneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "复刻音色ID不能为空"})
+		return
+	}
+
+	var clone models.VoiceClone
+	if err := vcc.DB.Where("id = ? AND user_id = ? AND status != ?", cloneID, userID, "deleted").First(&clone).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "复刻音色不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询复刻音色失败"})
+		return
+	}
+
+	now := time.Now()
+	cloneMetaJSON := mergeJSONMeta(clone.MetaJSON, map[string]any{
+		"deleted_at": now,
+	})
+	if err := vcc.DB.Model(&models.VoiceClone{}).
+		Where("id = ? AND user_id = ?", clone.ID, userID).
+		Updates(map[string]any{
+			"status":        "deleted",
+			"shared_to_all": false,
+			"meta_json":     cloneMetaJSON,
+		}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除复刻音色失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
 func (vcc *VoiceCloneController) RetryVoiceClone(c *gin.Context) {
