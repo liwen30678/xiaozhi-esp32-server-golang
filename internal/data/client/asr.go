@@ -56,6 +56,24 @@ func isXunfeiRetryableError(err error) (string, bool) {
 	return "", false
 }
 
+func isAliyunQwen3RetryableError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+
+	errText := strings.ToLower(err.Error())
+	if strings.Contains(errText, "read message failed") &&
+		(strings.Contains(errText, "forcibly closed by the remote host") ||
+			strings.Contains(errText, "websocket: close 1006") ||
+			strings.Contains(errText, "connection reset by peer") ||
+			strings.Contains(errText, "broken pipe") ||
+			strings.Contains(errText, "unexpected eof")) {
+		return asr_types.RetryReasonAliyunQwen3ConnectionClosed, true
+	}
+
+	return "", false
+}
+
 func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, bool, error) {
 	defer func() {
 		a.Reset()
@@ -82,6 +100,15 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, b
 				if a.AsrType == "xunfei" {
 					if retryReason, ok := isXunfeiRetryableError(result.Error); ok {
 						log.Warnf("xunfei ASR 返回可恢复错误(%s)，触发重建: %v", retryReason, result.Error)
+						return asr_types.StreamingResult{
+							Error:       result.Error,
+							RetryReason: retryReason,
+						}, true, nil
+					}
+				}
+				if a.AsrType == "aliyun_qwen3" {
+					if retryReason, ok := isAliyunQwen3RetryableError(result.Error); ok {
+						log.Warnf("aliyun qwen3 ASR 连接被上游关闭，触发重建(%s): %v", retryReason, result.Error)
 						return asr_types.StreamingResult{
 							Error:       result.Error,
 							RetryReason: retryReason,

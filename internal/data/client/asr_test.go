@@ -79,3 +79,45 @@ func TestRetireAsrResult_XunfeiNonRetryableError(t *testing.T) {
 		t.Fatalf("expected isRetry to be false")
 	}
 }
+
+func TestRetireAsrResult_AliyunQwen3RetryableError(t *testing.T) {
+	a := &Asr{
+		AsrType:          "aliyun_qwen3",
+		AsrResultChannel: make(chan asr_types.StreamingResult, 1),
+	}
+	a.AsrResultChannel <- asr_types.StreamingResult{
+		Error: errors.New("read message failed: read tcp 198.18.0.1:1822->198.18.0.97:443: wsarecv: An existing connection was forcibly closed by the remote host."),
+	}
+
+	result, isRetry, err := a.RetireAsrResult(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !isRetry {
+		t.Fatalf("expected isRetry to be true")
+	}
+	if result.RetryReason != asr_types.RetryReasonAliyunQwen3ConnectionClosed {
+		t.Fatalf("expected retry reason %q, got %q", asr_types.RetryReasonAliyunQwen3ConnectionClosed, result.RetryReason)
+	}
+	if result.Error == nil {
+		t.Fatalf("expected original error to be preserved")
+	}
+}
+
+func TestRetireAsrResult_AliyunQwen3NonRetryableError(t *testing.T) {
+	a := &Asr{
+		AsrType:          "aliyun_qwen3",
+		AsrResultChannel: make(chan asr_types.StreamingResult, 1),
+	}
+	a.AsrResultChannel <- asr_types.StreamingResult{
+		Error: errors.New("aliyun qwen3 error: invalid parameter"),
+	}
+
+	_, isRetry, err := a.RetireAsrResult(context.Background())
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if isRetry {
+		t.Fatalf("expected isRetry to be false")
+	}
+}

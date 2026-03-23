@@ -534,12 +534,12 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 				}
 
 				switch result.RetryReason {
-				case asr_types.RetryReasonXunfeiServiceInstanceInvalid:
+				case asr_types.RetryReasonXunfeiServiceInstanceInvalid, asr_types.RetryReasonAliyunQwen3ConnectionClosed:
 					a.releaseResource()
 					if isAllowedToRestart() {
 						invalidStatusWaitCount = 0
 						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
-							log.Errorf("xunfei ASR实例失效后重启识别失败: %v", restartErr)
+							log.Errorf("ASR可恢复错误后重启识别失败: reason=%s, err=%v", result.RetryReason, restartErr)
 							if onError != nil {
 								onError(restartErr)
 							}
