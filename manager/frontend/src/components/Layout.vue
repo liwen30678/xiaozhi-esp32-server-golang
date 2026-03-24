@@ -43,7 +43,7 @@
           <el-icon><Microphone /></el-icon>
           <span>声纹管理</span>
         </el-menu-item>
-        <el-menu-item index="/voice-clones">
+        <el-menu-item v-if="!authStore.isAdmin" index="/voice-clones">
           <el-icon><Microphone /></el-icon>
           <span>声音复刻</span>
         </el-menu-item>
@@ -86,6 +86,11 @@
           <el-menu-item index="/admin/memory-config">Memory配置</el-menu-item>
           <el-menu-item index="/admin/knowledge-search-config">知识库检索配置</el-menu-item>
         </el-sub-menu>
+
+        <el-menu-item v-if="authStore.isAdmin" index="/voice-clones">
+          <el-icon><Microphone /></el-icon>
+          <span>声音复刻</span>
+        </el-menu-item>
         
         <!-- 系统监控 -->
         <el-menu-item v-if="authStore.isAdmin" index="/admin/pool-stats">
