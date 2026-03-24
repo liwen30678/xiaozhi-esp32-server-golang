@@ -26,6 +26,30 @@ func TestRetireAsrResult_DoubaoRetryableError(t *testing.T) {
 	}
 }
 
+func TestRetireAsrResult_DoubaoWaitingNextPacketTimeoutRetryable(t *testing.T) {
+	a := &Asr{
+		AsrType:          "doubao",
+		AsrResultChannel: make(chan asr_types.StreamingResult, 1),
+	}
+	a.AsrResultChannel <- asr_types.StreamingResult{
+		Error: errors.New("[Timeout waiting next packet] Handle response: pre-handle: schedule request: allocate session: waiting next packet timeout: 5.000000 seconds, session has ended"),
+	}
+
+	result, isRetry, err := a.RetireAsrResult(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !isRetry {
+		t.Fatalf("expected isRetry to be true")
+	}
+	if result.RetryReason != asr_types.RetryReasonDoubaoWaitingNextPacketTimeout {
+		t.Fatalf("expected retry reason %q, got %q", asr_types.RetryReasonDoubaoWaitingNextPacketTimeout, result.RetryReason)
+	}
+	if result.Error == nil {
+		t.Fatalf("expected original error to be preserved")
+	}
+}
+
 func TestRetireAsrResult_DoubaoNonRetryableError(t *testing.T) {
 	a := &Asr{
 		AsrType:          "doubao",

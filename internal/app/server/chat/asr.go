@@ -539,7 +539,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 					if isAllowedToRestart() {
 						invalidStatusWaitCount = 0
 						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
-							log.Errorf("xunfei ASR实例失效后重启识别失败: %v", restartErr)
+							log.Errorf("ASR可恢复错误后重启识别失败: reason=%s, err=%v", result.RetryReason, restartErr)
 							if onError != nil {
 								onError(restartErr)
 							}
@@ -548,7 +548,14 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 						continue
 					}
 
-					log.Warnf("ASR可恢复错误发生时当前状态不允许立即重启: status=%s, realtime=%v", state.Status, state.IsRealTime())
+					log.Warnf("ASR可恢复错误发生时当前状态不允许立即重启: reason=%s, status=%s, realtime=%v", result.RetryReason, state.Status, state.IsRealTime())
+					state.Asr.SetPendingRestartOnVoice(true)
+					if state.Asr.Cancel != nil {
+						state.Asr.Cancel()
+					}
+					continue
+				case asr_types.RetryReasonDoubaoWaitingNextPacketTimeout:
+					log.Warnf("doubao ASR 会话空闲超时，挂起当前流并等待下一次语音时重建")
 					state.Asr.SetPendingRestartOnVoice(true)
 					if state.Asr.Cancel != nil {
 						state.Asr.Cancel()

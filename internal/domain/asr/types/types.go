@@ -5,8 +5,9 @@ const (
 	EmptyReasonNoServerResponse   = "no_server_response"
 	EmptyReasonProviderEmptyFinal = "provider_empty_final"
 
-	RetryReasonNone                         = ""
-	RetryReasonXunfeiServiceInstanceInvalid = "xunfei_service_instance_invalid"
+	RetryReasonNone                           = ""
+	RetryReasonDoubaoWaitingNextPacketTimeout = "doubao_waiting_next_packet_timeout"
+	RetryReasonXunfeiServiceInstanceInvalid   = "xunfei_service_instance_invalid"
 )
 
 // StreamingResult 流式识别结果
