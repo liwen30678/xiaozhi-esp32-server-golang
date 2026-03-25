@@ -673,13 +673,17 @@ func (uc *UserController) fetchIndexTTSVoices(c *gin.Context, configID, override
 		return nil, err
 	}
 	result := make([]VoiceOption, 0, len(voiceMap))
+	normalizedConfigPrefix := strings.ToLower(strings.TrimSpace(configID))
+	if normalizedConfigPrefix != "" {
+		normalizedConfigPrefix += "_"
+	}
 	for voice := range voiceMap {
 		v := strings.TrimSpace(voice)
 		if v == "" {
 			continue
 		}
-		// 过滤掉 IndexTTS 服务端内部默认前缀音色，优先展示可用系统音色与用户复刻音色
-		if strings.HasPrefix(strings.ToLower(v), "indextts_vllm") {
+		// 过滤掉当前 IndexTTS 配置实例生成的内部前缀音色，避免和复刻音色重复展示。
+		if normalizedConfigPrefix != "" && strings.HasPrefix(strings.ToLower(v), normalizedConfigPrefix) {
 			continue
 		}
 		result = append(result, VoiceOption{Value: v, Label: v})
