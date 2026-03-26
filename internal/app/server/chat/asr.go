@@ -15,6 +15,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/speaker"
 	"xiaozhi-esp32-server-golang/internal/domain/vad/inter"
 	"xiaozhi-esp32-server-golang/internal/pool"
+	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
 	"github.com/cloudwego/eino/schema"
@@ -54,6 +55,12 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 	go func() {
 		hasTriggeredCancel := true // 标志位，记录是否已触发过取消操作（当 voiceDuration > 120 时）
 		audioFormat := state.InputAudioFormat
+		const targetSampleRate = 16000
+		processingSampleRate := audioFormat.SampleRate
+		if processingSampleRate != targetSampleRate {
+			log.Infof("检测到输入采样率 %dHz，统一重采样为 %dHz 供 VAD/声纹/ASR 使用", processingSampleRate, targetSampleRate)
+			processingSampleRate = targetSampleRate
+		}
 		// 使用一个足够大的缓冲区用于解码（假设最大帧时长为120ms）
 		maxFrameSize := audioFormat.SampleRate * audioFormat.Channels * 120 / 1000
 		audioProcesser, err := audio.GetAudioProcesser(audioFormat.SampleRate, audioFormat.Channels, 20) // 传入一个默认值用于创建解码器
@@ -157,12 +164,18 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					continue
 				}
 
+				pcmData := pcmFrame[:n]
+				if audioFormat.SampleRate != processingSampleRate {
+					pcmData = util.ResampleLinearFloat32(pcmData, audioFormat.SampleRate, processingSampleRate)
+				}
+				n = len(pcmData)
+
 				// 从实际解码后的数据动态计算帧大小和帧时长
 				if frameSize == 0 {
 					// 第一帧：从实际解码的数据计算帧信息
 					frameSize = n
 					samplesPerChannel := n / audioFormat.Channels
-					frameDurationMs = samplesPerChannel * 1000 / audioFormat.SampleRate
+					frameDurationMs = samplesPerChannel * 1000 / processingSampleRate
 					audioFormat.FrameDuration = frameDurationMs
 
 					// 计算 VAD 需要的帧数
@@ -178,14 +191,13 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 				}
 
 				var vadPcmData []float32
-				pcmData := pcmFrame[:n]
 
 				// 检查帧大小是否一致（正常情况下应该一致，但不一致时使用实际值）
 				if n != frameSize {
 					log.Debugf("帧大小不一致: 期望=%d, 实际=%d，使用实际值", frameSize, n)
 					// 重新计算这一帧的时长
 					samplesPerChannel := n / audioFormat.Channels
-					currentFrameDurationMs := samplesPerChannel * 1000 / audioFormat.SampleRate
+					currentFrameDurationMs := samplesPerChannel * 1000 / processingSampleRate
 					frameSize = n
 					frameDurationMs = currentFrameDurationMs
 					audioFormat.FrameDuration = frameDurationMs
@@ -219,7 +231,7 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 
 						// 进行VAD检测
 						vadLastUseAt = time.Now()
-						haveVoice, err = vadProvider.IsVADExt(vadPcmData, audioFormat.SampleRate, frameSize)
+						haveVoice, err = vadProvider.IsVADExt(vadPcmData, processingSampleRate, frameSize)
 						if err != nil {
 							log.Errorf("processAsrAudio VAD检测失败: %v", err)
 							continue
@@ -304,7 +316,7 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						a.session != nil && a.session.speakerManager != nil {
 						// 首次检测到语音时，启动流式识别
 						if !a.session.speakerManager.IsActive() {
-							sampleRate := audioFormat.SampleRate
+							sampleRate := processingSampleRate
 							agentId := a.session.clientState.AgentID
 							if err := a.session.speakerManager.StartStreaming(ctx, sampleRate, agentId); err != nil {
 								log.Warnf("启动声纹识别流失败: %v", err)
