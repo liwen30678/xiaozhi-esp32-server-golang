@@ -1,6 +1,5 @@
-const OPENCLAW_PLUGIN_INSTALL_COMMAND = 'openclaw plugins install @xiaozhi_openclaw/xiaozhi'
-const OPENCLAW_GATEWAY_RESTART_COMMAND = 'openclaw gateway restart'
 const OPENCLAW_CHANNEL_NAME = 'xiaozhi'
+const OPENCLAW_CHANNEL_CONFIG_PREFIX = `channels.${OPENCLAW_CHANNEL_NAME}`
 
 const EMPTY_COMMAND_DATA = {
   ready: false,
@@ -30,16 +29,16 @@ export function buildOpenClawCommands(endpoint) {
 
     const steps = [
       {
-        title: '安装插件',
-        command: OPENCLAW_PLUGIN_INSTALL_COMMAND
+        title: '启用渠道',
+        command: `openclaw config set ${OPENCLAW_CHANNEL_CONFIG_PREFIX}.enabled true --strict-json`
       },
       {
-        title: '配置渠道',
-        command: `openclaw channels add --channel ${OPENCLAW_CHANNEL_NAME} --url ${url} --token ${token}`
+        title: '配置地址',
+        command: `openclaw config set ${OPENCLAW_CHANNEL_CONFIG_PREFIX}.url "${url}"`
       },
       {
-        title: '重启网关',
-        command: OPENCLAW_GATEWAY_RESTART_COMMAND
+        title: '配置令牌',
+        command: `openclaw config set ${OPENCLAW_CHANNEL_CONFIG_PREFIX}.token "${token}"`
       }
     ]
     const commands = steps.map((step) => step.command)

@@ -823,6 +823,11 @@ func (s *ChatSession) getOrCreateOpenClawStream(correlationID string) (chan llm_
 	if hasWarmup {
 		options.disableTTSCommands = true
 		options.onEndFunc = func(err error, args ...any) {
+			// 暖场接管了 start，正式 OpenClaw 回复收尾时需要在这里补回 stop；
+			// 不能放在暖场切换点发送，否则会把主回复中途截断。
+			if !s.clientState.IsRealTime() {
+				s.ttsManager.EnqueueTtsStop(ctx)
+			}
 			s.finishOpenClawWarmup(correlationID, false)
 		}
 	}
@@ -885,9 +890,10 @@ func (s *ChatSession) InjectOpenClawResponse(event openclaw.ResponseDelivery) er
 		if task := s.getOpenClawWarmupTask(correlationID); task != nil {
 			if text != "" {
 				// 仅在第一段真正可播正文到达时才停掉暖场，避免被过短前导分片过早抢占。
+				// 暖场自己的首段标记只用于暖场 TTS，不能吞掉正式回复首段的 IsStart，
+				// 否则正式回复会降级成单句 TTS，后续 snapshot 也会被当成第二句再次播报。
 				s.cancelOpenClawWarmup(correlationID, false)
 				s.beginOpenClawSpeech(task)
-				isStart = task.takeSegmentStartFlag()
 			} else {
 				isStart = false
 			}

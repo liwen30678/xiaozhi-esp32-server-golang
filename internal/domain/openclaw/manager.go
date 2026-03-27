@@ -104,11 +104,14 @@ type pendingRoute struct {
 }
 
 type responseStreamState struct {
-	DeviceID  string
-	Buffer    string
-	IsFirst   bool
-	LastSeq   int64
-	CreatedAt time.Time
+	DeviceID    string
+	Buffer      string
+	EmittedText string
+	PendingText string
+	HasDelta    bool
+	IsFirst     bool
+	LastSeq     int64
+	CreatedAt   time.Time
 }
 
 type AgentSession struct {
@@ -523,8 +526,10 @@ func (m *Manager) HandleResponse(
 	streamDone := parseMetadataBool(payload.Metadata, "done")
 	streamSeq := parseMetadataInt64(payload.Metadata, "seq")
 	streamID := readMetadataString(payload.Metadata, "stream_id")
-	streamPhase := readMetadataString(payload.Metadata, "phase")
-	isStreaming := streamDone || streamSeq > 0 || streamID != "" || streamPhase != ""
+	streamPhase := strings.ToLower(readMetadataString(payload.Metadata, "phase"))
+	streamContentType := strings.ToLower(readMetadataString(payload.Metadata, "content_type"))
+	isSnapshotFrame := isOpenClawSnapshotFrame(streamPhase, streamContentType)
+	isStreaming := streamDone || streamSeq > 0 || streamID != "" || streamPhase != "" || streamContentType != ""
 
 	// 非流式默认视为一次性完成；缺失 correlation_id 的流式响应也降级为一次性处理。
 	if !isStreaming || correlationID == "" {
@@ -558,7 +563,7 @@ func (m *Manager) HandleResponse(
 
 	if deviceID == "" {
 		logger.Warnf(
-			"OpenClaw response missing device route, agent=%s correlation_id=%s session=%s done=%v seq=%d stream_id=%s phase=%s",
+			"OpenClaw response missing device route, agent=%s correlation_id=%s session=%s done=%v seq=%d stream_id=%s phase=%s content_type=%s",
 			agentID,
 			correlationID,
 			sessionID,
@@ -566,6 +571,7 @@ func (m *Manager) HandleResponse(
 			streamSeq,
 			streamID,
 			streamPhase,
+			streamContentType,
 		)
 		return
 	}
@@ -581,26 +587,70 @@ func (m *Manager) HandleResponse(
 	if state != nil && streamSeq > 0 {
 		if state.LastSeq > 0 && streamSeq <= state.LastSeq {
 			logger.Warnf(
-				"OpenClaw response seq out-of-order, agent=%s correlation_id=%s seq=%d last_seq=%d",
+				"OpenClaw response seq ignored: agent=%s correlation_id=%s seq=%d last_seq=%d stream_id=%s phase=%s content_type=%s",
 				agentID,
 				correlationID,
 				streamSeq,
 				state.LastSeq,
+				streamID,
+				streamPhase,
+				streamContentType,
 			)
+			return
 		}
 		state.LastSeq = streamSeq
 	}
 
-	workingText := content
+	incrementalContent := normalizeOpenClawSpeechText(content)
+	workingText := incrementalContent
+	bufferedSnapshot := false
 	if state != nil {
-		if content != "" {
-			state.Buffer = normalizeOpenClawSpeechText(state.Buffer + content)
+		if isSnapshotFrame {
+			snapshotBuffer := state.applySnapshotContent(content)
+			incrementalContent = ""
+			workingText = ""
+			bufferedSnapshot = true
+			if content != "" {
+				logger.Debugf(
+					"OpenClaw snapshot buffered: agent=%s device=%s correlation_id=%s seq=%d stream_id=%s phase=%s content_type=%s snapshot_buffer_len=%d",
+					agentID,
+					deviceID,
+					correlationID,
+					streamSeq,
+					streamID,
+					streamPhase,
+					streamContentType,
+					len(snapshotBuffer),
+				)
+			}
+		} else {
+			incrementalContent = state.toIncrementalContent(content, streamDone)
+			if content != "" && incrementalContent == "" {
+				action := "deferred"
+				if state.HasDelta {
+					action = "ignored"
+				}
+				logger.Debugf(
+					"OpenClaw snapshot %s: agent=%s device=%s correlation_id=%s seq=%d stream_id=%s phase=%s content_type=%s",
+					action,
+					agentID,
+					deviceID,
+					correlationID,
+					streamSeq,
+					streamID,
+					streamPhase,
+					streamContentType,
+				)
+			}
+			if incrementalContent != "" {
+				state.Buffer = normalizeOpenClawSpeechText(state.Buffer + incrementalContent)
+			}
+			workingText = strings.TrimSpace(state.Buffer)
 		}
-		workingText = state.Buffer
 	}
 
 	logger.Infof(
-		"OpenClaw response routed: agent=%s device=%s session=%s correlation_id=%s route=%s done=%v seq=%d stream_id=%s phase=%s content_len=%d content_snippet=%q",
+		"OpenClaw response routed: agent=%s device=%s session=%s correlation_id=%s route=%s done=%v seq=%d stream_id=%s phase=%s content_type=%s content_len=%d content_snippet=%q",
 		agentID,
 		deviceID,
 		sessionID,
@@ -610,6 +660,7 @@ func (m *Manager) HandleResponse(
 		streamSeq,
 		streamID,
 		streamPhase,
+		streamContentType,
 		len(content),
 		logSnippet(content, 64),
 	)
@@ -625,7 +676,11 @@ func (m *Manager) HandleResponse(
 		sentences, remaining = extractOpenClawSentences(workingText, openClawSentenceMinLen, isFirst)
 	}
 	if state != nil {
-		state.Buffer = remaining
+		if bufferedSnapshot {
+			remaining = strings.TrimSpace(state.Buffer)
+		} else {
+			state.Buffer = remaining
+		}
 	}
 
 	emit := func(text string, isStart bool, isEnd bool) {
@@ -660,14 +715,28 @@ func (m *Manager) HandleResponse(
 
 	// 对话测试设备（__openclaw_test__）直接透传分片，避免拆句导致离线队列条目暴涨并触发20条上限截断。
 	if isOpenClawTestDevice(deviceID) {
-		if content != "" {
-			emit(content, isFirst, streamDone)
+		if incrementalContent != "" {
+			emit(incrementalContent, isFirst, streamDone)
 			if state != nil {
+				state.markEmitted(incrementalContent)
 				state.IsFirst = false
 				state.Buffer = ""
 			}
 		} else if streamDone {
-			emit("", isFirst, true)
+			finalText := ""
+			finalIsStart := isFirst
+			if state != nil {
+				finalText = strings.TrimSpace(state.Buffer)
+				finalIsStart = state.IsFirst
+			}
+			emit(finalText, finalIsStart, true)
+			if state != nil {
+				if finalText != "" {
+					state.markEmitted(finalText)
+					state.IsFirst = false
+					state.Buffer = ""
+				}
+			}
 		}
 
 		if streamDone && session != nil && correlationID != "" {
@@ -679,6 +748,9 @@ func (m *Manager) HandleResponse(
 
 	for i, sentence := range sentences {
 		emit(sentence, isFirst && i == 0, false)
+		if state != nil {
+			state.markEmitted(sentence)
+		}
 	}
 	if state != nil && len(sentences) > 0 {
 		state.IsFirst = false
@@ -698,6 +770,7 @@ func (m *Manager) HandleResponse(
 	if finalText != "" {
 		emit(finalText, finalIsStart, true)
 		if state != nil {
+			state.markEmitted(finalText)
 			state.IsFirst = false
 			state.Buffer = ""
 		}
@@ -710,6 +783,120 @@ func (m *Manager) HandleResponse(
 		session.RemovePending(correlationID)
 		session.RemoveStream(correlationID)
 	}
+}
+
+func (s *responseStreamState) toIncrementalContent(content string, streamDone bool) string {
+	if s == nil {
+		return normalizeOpenClawSpeechText(content)
+	}
+
+	normalizedContent := normalizeOpenClawSpeechText(content)
+	if normalizedContent == "" {
+		if streamDone && !s.HasDelta && s.PendingText != "" {
+			snapshot := s.PendingText
+			s.PendingText = ""
+			return snapshot
+		}
+		return ""
+	}
+
+	if s.HasDelta {
+		accountedText := s.accountedText()
+		if accountedText != "" {
+			if delta, ok := trimOpenClawCanonicalPrefix(normalizedContent, accountedText); ok {
+				return delta
+			}
+		}
+		return normalizedContent
+	}
+
+	accountedText := s.accountedText()
+	if accountedText != "" {
+		s.HasDelta = true
+		if delta, ok := trimOpenClawCanonicalPrefix(normalizedContent, accountedText); ok {
+			return delta
+		}
+		return normalizedContent
+	}
+
+	if s.PendingText == "" {
+		s.PendingText = normalizedContent
+		if streamDone {
+			snapshot := s.PendingText
+			s.PendingText = ""
+			return snapshot
+		}
+		return ""
+	}
+
+	if isOpenClawCanonicalGrowth(s.PendingText, normalizedContent) {
+		if len(openClawCanonicalKey(normalizedContent)) >= len(openClawCanonicalKey(s.PendingText)) {
+			s.PendingText = normalizedContent
+		}
+		if streamDone {
+			snapshot := s.PendingText
+			s.PendingText = ""
+			return snapshot
+		}
+		return ""
+	}
+
+	if isOpenClawPunctuationOnly(normalizedContent) {
+		s.PendingText = normalizeOpenClawSpeechText(s.PendingText + normalizedContent)
+		if streamDone {
+			snapshot := s.PendingText
+			s.PendingText = ""
+			return snapshot
+		}
+		return ""
+	}
+
+	s.HasDelta = true
+	combined := normalizeOpenClawSpeechText(s.PendingText + normalizedContent)
+	s.PendingText = ""
+	return combined
+}
+
+func (s *responseStreamState) applySnapshotContent(content string) string {
+	if s == nil {
+		return normalizeOpenClawSpeechText(content)
+	}
+
+	normalizedContent := normalizeOpenClawSpeechText(content)
+	if normalizedContent == "" {
+		return ""
+	}
+
+	s.PendingText = ""
+
+	snapshotBuffer := normalizedContent
+	emittedText := normalizeOpenClawSpeechText(s.EmittedText)
+	if emittedText != "" {
+		if suffix, ok := trimOpenClawCanonicalPrefix(normalizedContent, emittedText); ok {
+			snapshotBuffer = suffix
+		}
+	}
+
+	s.Buffer = normalizeOpenClawSpeechText(snapshotBuffer)
+	return s.Buffer
+}
+
+func (s *responseStreamState) markEmitted(text string) {
+	if s == nil {
+		return
+	}
+	normalized := normalizeOpenClawSpeechText(text)
+	if normalized == "" {
+		return
+	}
+	s.EmittedText = normalizeOpenClawSpeechText(s.EmittedText + normalized)
+}
+
+func (s *responseStreamState) accountedText() string {
+	if s == nil {
+		return ""
+	}
+	return normalizeOpenClawSpeechText(strings.TrimSpace(s.EmittedText) + strings.TrimSpace(s.Buffer))
 }
 
 func readMetadataString(metadata map[string]interface{}, key string) string {
@@ -853,6 +1040,121 @@ func extractOpenClawSentences(text string, minLen int, isFirst bool) ([]string, 
 
 	remaining := trimOpenClawSegment(string(runes[start:]))
 	return sentences, remaining
+}
+
+func trimOpenClawCanonicalPrefix(text string, prefix string) (string, bool) {
+	normalizedText := normalizeOpenClawSpeechText(text)
+	normalizedPrefix := normalizeOpenClawSpeechText(prefix)
+	if normalizedPrefix == "" {
+		return strings.TrimSpace(normalizedText), true
+	}
+
+	textKey := openClawComparableKey(normalizedText)
+	prefixKey := openClawComparableKey(normalizedPrefix)
+	if prefixKey == "" {
+		return strings.TrimSpace(normalizedText), true
+	}
+	if !strings.HasPrefix(textKey, prefixKey) {
+		return "", false
+	}
+	if textKey == prefixKey {
+		return "", true
+	}
+
+	textRunes := []rune(normalizedText)
+	prefixRunes := []rune(normalizedPrefix)
+	matched := 0
+	advancePrefix := func() {
+		for matched < len(prefixRunes) && isOpenClawComparableIgnorableRune(prefixRunes[matched]) {
+			matched++
+		}
+	}
+	advancePrefix()
+	for idx, r := range textRunes {
+		if isOpenClawComparableIgnorableRune(r) {
+			continue
+		}
+		if matched >= len(prefixRunes) || r != prefixRunes[matched] {
+			return "", false
+		}
+		matched++
+		advancePrefix()
+		if matched == len(prefixRunes) {
+			suffixStart := idx + 1
+			for suffixStart < len(textRunes) && isOpenClawComparableIgnorableRune(textRunes[suffixStart]) {
+				suffixStart++
+			}
+			return strings.TrimSpace(string(textRunes[suffixStart:])), true
+		}
+	}
+	return "", false
+}
+
+func isOpenClawCanonicalGrowth(base string, candidate string) bool {
+	baseKey := openClawComparableKey(base)
+	candidateKey := openClawComparableKey(candidate)
+	if baseKey == "" || candidateKey == "" {
+		return false
+	}
+	return strings.HasPrefix(candidateKey, baseKey) || strings.HasPrefix(baseKey, candidateKey)
+}
+
+func isOpenClawSnapshotFrame(phase string, contentType string) bool {
+	phase = strings.TrimSpace(strings.ToLower(phase))
+	contentType = strings.TrimSpace(strings.ToLower(contentType))
+	return phase == "snapshot" || contentType == "snapshot"
+}
+
+func openClawCanonicalKey(text string) string {
+	normalized := normalizeOpenClawSpeechText(text)
+	if normalized == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(normalized))
+	for _, r := range normalized {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+func openClawComparableKey(text string) string {
+	normalized := normalizeOpenClawSpeechText(text)
+	if normalized == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(normalized))
+	for _, r := range normalized {
+		if isOpenClawComparableIgnorableRune(r) {
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+func isOpenClawComparableIgnorableRune(r rune) bool {
+	return unicode.IsSpace(r) || isOpenClawPauseRune(r)
+}
+
+func isOpenClawPunctuationOnly(text string) bool {
+	normalized := normalizeOpenClawSpeechText(text)
+	if normalized == "" {
+		return false
+	}
+	for _, r := range normalized {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if !isOpenClawPauseRune(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func isOpenClawSoftSeparator(r rune) bool {

@@ -385,8 +385,7 @@
             <template #content>
               <div class="openclaw-tip-content">
                 <div>架构：设备语音 -> 服务端路由 -> OpenClaw 会话 -> xiaozhi 插件。</div>
-                <div>安装：执行 <code>openclaw plugins install @xiaozhi_openclaw/xiaozhi</code>。</div>
-                <div>接入：按下方命令直接安装插件、添加 xiaozhi channel，并使用系统生成的 URL 与 JWT token。</div>
+                <div>角色配置：在 OpenClaw 控制台角色配置中使用下方三条命令，系统会自动填入当前服务的 URL 与 JWT token。</div>
                 <div>进入逻辑：命中进入词（默认“打开龙虾/进入龙虾”）后进入 OpenClaw 模式，后续文本优先走 OpenClaw。</div>
                 <div>退出逻辑：在 OpenClaw 模式下命中退出词（默认“关闭龙虾/退出龙虾”）即退出，恢复普通 LLM 对话。</div>
                 <el-link :href="openClawDocURL" target="_blank" type="primary" :underline="false">
@@ -440,13 +439,13 @@
           </div>
           <div class="mcp-endpoint-display">
             <div class="endpoint-header">
-              <div class="endpoint-label">OpenClaw接入命令：</div>
+              <div class="endpoint-label">OpenClaw角色配置命令：</div>
               <div class="endpoint-actions">
                 <el-button size="small" @click="fetchOpenClawEndpoint" :loading="openClawEndpointLoading">刷新</el-button>
                 <el-button size="small" type="primary" @click="copyOpenClawCommands" :disabled="!openClawCommandData.ready">复制命令</el-button>
               </div>
             </div>
-            <div v-if="openClawCommandData.ready" class="openclaw-command-hint">在 OpenClaw 所在环境依次执行以下命令：</div>
+            <div v-if="openClawCommandData.ready" class="openclaw-command-hint">在 OpenClaw 控制台角色配置中依次执行以下命令：</div>
             <div v-if="openClawCommandData.ready" class="openclaw-command-steps">
               <div
                 v-for="(step, index) in openClawCommandData.steps"
@@ -862,14 +861,14 @@ const fetchOpenClawEndpoint = async () => {
 const copyOpenClawCommands = async () => {
   const commands = openClawCommandData.value.copyText
   if (!commands) {
-    ElMessage.warning('暂无可复制的 OpenClaw 接入命令')
+    ElMessage.warning('暂无可复制的 OpenClaw 角色配置命令')
     return
   }
   try {
     await navigator.clipboard.writeText(commands)
-    ElMessage.success('OpenClaw 接入命令已复制')
+    ElMessage.success('OpenClaw 角色配置命令已复制')
   } catch (error) {
-    console.error('复制 OpenClaw 接入命令失败:', error)
+    console.error('复制 OpenClaw 角色配置命令失败:', error)
     ElMessage.error('复制失败，请手动复制')
   }
 }

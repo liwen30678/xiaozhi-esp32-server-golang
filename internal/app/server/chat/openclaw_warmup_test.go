@@ -81,3 +81,14 @@ func TestSanitizeOpenClawWarmupTextRejectsUserCommandEcho(t *testing.T) {
 		t.Fatalf("expected invalid warmup text to be rejected, got %q", got)
 	}
 }
+
+func TestTakeWarmupSegmentStartFlagOnlyMarksFirstWarmupSentence(t *testing.T) {
+	task := &openClawWarmupTask{nextWarmupSegmentIsStart: true}
+
+	if !task.takeWarmupSegmentStartFlag() {
+		t.Fatal("expected first warmup sentence to carry start flag")
+	}
+	if task.takeWarmupSegmentStartFlag() {
+		t.Fatal("expected subsequent warmup sentence to clear start flag")
+	}
+}

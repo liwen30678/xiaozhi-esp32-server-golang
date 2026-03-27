@@ -69,12 +69,12 @@ type openClawWarmupTask struct {
 	linesMu sync.RWMutex
 	lines   []string
 
-	stateMu            sync.Mutex
-	speechStarted      bool
-	speechEnded        bool
-	nextSegmentIsStart bool
-	planReadyAt        time.Time
-	planReadySignaled  bool
+	stateMu                  sync.Mutex
+	speechStarted            bool
+	speechEnded              bool
+	nextWarmupSegmentIsStart bool
+	planReadyAt              time.Time
+	planReadySignaled        bool
 
 	spokeAny    atomic.Bool
 	planReadyCh chan struct{}
@@ -94,13 +94,13 @@ func (s *ChatSession) startOpenClawWarmup(correlationID string, userText string)
 	parentCtx := s.clientState.AfterAsrSessionCtx.Get(sessionCtx)
 	warmupCtx, cancelWarmup := context.WithCancel(parentCtx)
 	task := &openClawWarmupTask{
-		correlationID:      correlationID,
-		sessionCtx:         parentCtx,
-		warmupCtx:          warmupCtx,
-		cancelWarmup:       cancelWarmup,
-		lines:              make([]string, openClawWarmupPlanSize),
-		nextSegmentIsStart: true,
-		planReadyCh:        make(chan struct{}),
+		correlationID:            correlationID,
+		sessionCtx:               parentCtx,
+		warmupCtx:                warmupCtx,
+		cancelWarmup:             cancelWarmup,
+		lines:                    make([]string, openClawWarmupPlanSize),
+		nextWarmupSegmentIsStart: true,
+		planReadyCh:              make(chan struct{}),
 	}
 
 	s.replaceOpenClawWarmup(task)
@@ -153,14 +153,14 @@ func (task *openClawWarmupTask) markSpeechEnded() bool {
 	return true
 }
 
-func (task *openClawWarmupTask) takeSegmentStartFlag() bool {
+func (task *openClawWarmupTask) takeWarmupSegmentStartFlag() bool {
 	if task == nil {
 		return true
 	}
 	task.stateMu.Lock()
 	defer task.stateMu.Unlock()
-	isStart := task.nextSegmentIsStart
-	task.nextSegmentIsStart = false
+	isStart := task.nextWarmupSegmentIsStart
+	task.nextWarmupSegmentIsStart = false
 	return isStart
 }
 
@@ -308,9 +308,6 @@ func (s *ChatSession) endOpenClawSpeech(task *openClawWarmupTask) {
 	if !task.markSpeechEnded() {
 		return
 	}
-	if !s.clientState.IsRealTime() {
-		s.ttsManager.EnqueueTtsStop(task.sessionCtx)
-	}
 	s.ttsManager.GetAndClearAudioHistory()
 }
 
@@ -444,7 +441,7 @@ func (s *ChatSession) speakOpenClawWarmupLine(task *openClawWarmupTask, text str
 
 	resp := llm_common.LLMResponseStruct{
 		Text:    text,
-		IsStart: task.takeSegmentStartFlag(),
+		IsStart: task.takeWarmupSegmentStartFlag(),
 		IsEnd:   true,
 	}
 	// 暖场句需要确保已经进入发送链路，避免被后续正式回复“看起来像没生效”。
