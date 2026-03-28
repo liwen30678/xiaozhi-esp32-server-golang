@@ -385,7 +385,7 @@
             <template #content>
               <div class="openclaw-tip-content">
                 <div>架构：设备语音 -> 服务端路由 -> OpenClaw 会话 -> xiaozhi 插件。</div>
-                <div>角色配置：在 OpenClaw 控制台角色配置中使用下方三条命令，系统会自动填入当前服务的 URL 与 JWT token。</div>
+                <div>角色配置：在 OpenClaw 控制台角色配置中使用下方四条命令，最后执行 `openclaw gateway restart` 使配置生效。</div>
                 <div>进入逻辑：命中进入词（默认“打开龙虾/进入龙虾”）后进入 OpenClaw 模式，后续文本优先走 OpenClaw。</div>
                 <div>退出逻辑：在 OpenClaw 模式下命中退出词（默认“关闭龙虾/退出龙虾”）即退出，恢复普通 LLM 对话。</div>
                 <el-link :href="openClawDocURL" target="_blank" type="primary" :underline="false">
