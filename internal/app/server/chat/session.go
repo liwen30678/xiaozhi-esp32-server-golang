@@ -562,10 +562,12 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 
 	isDuplicateHello := s.helloInited
 	if isDuplicateHello {
+		prevAgentID := clientState.AgentID
 		// 仅在重复 hello 场景尝试刷新设备维度配置；失败时降级处理，不阻断 hello
 		if err := s.refreshDeviceConfigOnHello(); err != nil {
 			log.Warnf("设备 %s duplicate hello 刷新配置失败，降级继续: %v", clientState.DeviceID, err)
 		}
+		s.resetOpenClawModeOnHello(prevAgentID, clientState.AgentID)
 		if isMcp, ok := msg.Features["mcp"]; ok && isMcp && !s.mcpHelloInited {
 			s.mcpHelloInited = true
 			go initMcp(s.clientState, s.serverTransport)
@@ -575,6 +577,7 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 	}
 
 	// 首次 hello 初始化
+	s.resetOpenClawModeOnHello(clientState.AgentID)
 	session, err := auth.A().CreateSession(msg.DeviceID)
 	if err != nil {
 		return fmt.Errorf("创建会话失败: %v", err)
@@ -595,6 +598,29 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 
 	s.helloInited = true
 	return nil
+}
+
+func (s *ChatSession) resetOpenClawModeOnHello(agentIDs ...string) {
+	deviceID := strings.TrimSpace(s.clientState.DeviceID)
+	if deviceID == "" {
+		return
+	}
+
+	openclawManager := openclaw.GetManager()
+	seen := make(map[string]struct{}, len(agentIDs))
+	for _, agentID := range agentIDs {
+		agentID = strings.TrimSpace(agentID)
+		if agentID == "" {
+			continue
+		}
+		if _, exists := seen[agentID]; exists {
+			continue
+		}
+		seen[agentID] = struct{}{}
+		if openclawManager.ExitMode(agentID, deviceID) {
+			log.Infof("设备 %s 在 hello 后重置OpenClaw模式: agent=%s", deviceID, agentID)
+		}
+	}
 }
 
 func (s *ChatSession) refreshDeviceConfigOnHello() error {
