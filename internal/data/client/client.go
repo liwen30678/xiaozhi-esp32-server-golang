@@ -39,6 +39,10 @@ const (
 	ClientStatusLLMStart   = "llmStart"
 	ClientStatusTTSStart   = "ttsStart"
 
+	ListenPhaseIdle      = "idle"
+	ListenPhaseStarting  = "starting"
+	ListenPhaseListening = "listening"
+
 	MemoryModeNone  = "none"
 	MemoryModeShort = "short"
 	MemoryModeLong  = "long"
@@ -66,6 +70,8 @@ type ClientState struct {
 	Abort bool
 	// 拾音模式
 	ListenMode string
+	// listen start 流程状态: idle / starting / listening
+	ListenPhase string
 	// 设备ID
 	DeviceID string
 	AgentID  string
@@ -115,7 +121,8 @@ type ClientState struct {
 	Status string //状态 listening, llmStart, ttsStart
 
 	IsTtsStart        bool //是否tts开始
-	IsWelcomeSpeaking bool //是否已经欢迎语
+	IsWelcomeSpeaking bool //是否已经播放过欢迎语
+	IsWelcomePlaying  bool //是否正在播放欢迎语
 
 	// 声纹识别相关
 	SpeakerProvider speaker.SpeakerProvider // 声纹识别提供者（在 session 中初始化）
@@ -332,6 +339,14 @@ func (c *ClientState) GetStatus() string {
 	return c.Status
 }
 
+func (c *ClientState) SetListenPhase(phase string) {
+	c.ListenPhase = phase
+}
+
+func (c *ClientState) GetListenPhase() string {
+	return c.ListenPhase
+}
+
 type Ctx struct {
 	sync.RWMutex
 	ctx    context.Context
@@ -446,7 +461,9 @@ func (c *ClientState) Destroy() {
 
 	c.Statistic.Reset()
 	c.SetStatus(ClientStatusInit)
+	c.SetListenPhase(ListenPhaseIdle)
 	c.SetTtsStart(false)
+	c.IsWelcomePlaying = false
 }
 
 func (state *ClientState) OnManualStop() {
@@ -463,6 +480,7 @@ func (state *ClientState) OnVoiceSilence() {
 	state.Vad.Reset() //释放vad实例
 
 	state.SetStatus(ClientStatusListenStop)
+	state.SetListenPhase(ListenPhaseIdle)
 
 	// 如果设置了异步获取声纹结果的回调，则调用
 	if state.OnVoiceSilenceSpeakerCallback != nil {

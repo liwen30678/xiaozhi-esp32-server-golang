@@ -39,6 +39,10 @@ export function buildOpenClawCommands(endpoint) {
       {
         title: '配置令牌',
         command: `openclaw config set ${OPENCLAW_CHANNEL_CONFIG_PREFIX}.token "${token}"`
+      },
+      {
+        title: '重启网关',
+        command: 'openclaw gateway restart'
       }
     ]
     const commands = steps.map((step) => step.command)
