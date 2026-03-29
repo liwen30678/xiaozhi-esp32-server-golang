@@ -42,6 +42,16 @@ func (a *Asr) Reset() {
 	a.AsrResult.Reset()
 }
 
+func (a *Asr) CancelWithReason(reason string) {
+	a.lock.RLock()
+	cancel := a.Cancel
+	a.lock.RUnlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, bool, error) {
 	defer func() {
 		a.Reset()
@@ -124,14 +134,18 @@ func (a *Asr) ResetReceivedText() {
 	a.ReceivedTextInTurn = false
 }
 
-func (a *Asr) Stop() {
+func (a *Asr) StopWithReason(reason string) {
 	a.lock.Lock()
 	defer a.lock.Unlock()
+
 	if a.AsrAudioChannel != nil {
-		log.Debugf("停止asr")
-		close(a.AsrAudioChannel) //close掉asr输入音频的channel，通知asr停止, 返回结果
-		a.AsrAudioChannel = nil  //由于已经close，所以需要置空
+		close(a.AsrAudioChannel) // close掉asr输入音频的channel，通知asr停止, 返回结果
+		a.AsrAudioChannel = nil  // 由于已经close，所以需要置空
 	}
+}
+
+func (a *Asr) Stop() {
+	a.StopWithReason("Asr.Stop")
 }
 
 func (a *Asr) AddAudioData(pcmFrameData []float32) error {
