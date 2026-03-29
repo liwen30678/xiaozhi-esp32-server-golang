@@ -8,8 +8,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/gopxl/beep"
 
 	"xiaozhi-esp32-server-golang/internal/data/audio"
 	"xiaozhi-esp32-server-golang/internal/util"
@@ -196,32 +199,50 @@ func (p *OpenAITTSProvider) TextToSpeechStream(ctx context.Context, text string,
 			return
 		}
 
-		// 根据音频格式处理流式响应
-		if p.ResponseFormat == "mp3" || p.ResponseFormat == "wav" || p.ResponseFormat == "pcm" {
-			// 创建音频解码器
-			decoder, err := util.CreateAudioDecoderWithSampleRate(ctx, resp.Body, outputChan, frameDuration, p.ResponseFormat, sampleRate)
-			if err != nil {
-				log.Errorf("创建OpenAI音频解码器失败: %v", err)
-				close(outputChan)
-				return
+		responseFormat := strings.ToLower(strings.TrimSpace(p.ResponseFormat))
+		decoderFormat := responseFormat
+		if responseFormat == "opus" {
+			decoderFormat = "ogg_opus"
+			contentTypeFormat := util.GetAudioFormatByMimeType(strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type"))))
+			if contentTypeFormat == "ogg_opus" || contentTypeFormat == "opus" {
+				decoderFormat = contentTypeFormat
 			}
+		}
 
-			// 启动解码过程
-			if err := decoder.Run(startTs); err != nil {
-				log.Errorf("OpenAI音频解码失败: %v", err)
-				return
-			}
-
-			select {
-			case <-ctx.Done():
-				log.Debugf("OpenAI TTS流式合成取消, 文本: %s", text)
-				return
-			default:
-				log.Infof("OpenAI TTS耗时: 从输入至获取音频数据结束耗时: %d ms", time.Now().UnixMilli()-startTs)
-			}
-		} else {
-			log.Errorf("当前仅支持 mp3/wav/pcm 格式的流式合成")
+		if decoderFormat != "mp3" && decoderFormat != "wav" && decoderFormat != "pcm" && decoderFormat != "opus" && decoderFormat != "ogg_opus" {
+			log.Errorf("当前仅支持 mp3/wav/pcm/opus/ogg_opus 格式的流式合成")
 			close(outputChan)
+			return
+		}
+
+		decoder, err := util.CreateAudioDecoderWithSampleRate(ctx, resp.Body, outputChan, frameDuration, decoderFormat, sampleRate)
+		if err != nil {
+			log.Errorf("创建OpenAI音频解码器失败: %v", err)
+			close(outputChan)
+			return
+		}
+		if decoderFormat == "opus" {
+			sourceChannels := channels
+			if sourceChannels < 1 {
+				sourceChannels = 1
+			}
+			decoder.WithFormat(beep.Format{
+				SampleRate:  beep.SampleRate(util.NormalizeOpusSampleRate(sampleRate)),
+				NumChannels: sourceChannels,
+			})
+		}
+
+		if err := decoder.Run(startTs); err != nil {
+			log.Errorf("OpenAI音频解码失败: %v", err)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Debugf("OpenAI TTS流式合成取消, 文本: %s", text)
+			return
+		default:
+			log.Infof("OpenAI TTS耗时: 从输入至获取音频数据结束耗时: %d ms", time.Now().UnixMilli()-startTs)
 		}
 	}()
 

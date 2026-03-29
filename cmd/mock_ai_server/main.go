@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"xiaozhi-esp32-server-golang/internal/util"
 )
 
 type serverConfig struct {
@@ -289,11 +291,29 @@ func (c *serverConfig) handleTTSSpeech(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = c.ttsFrameDelay // 预留字段，方便后续扩展成真实分帧流式返回
 
-	wavBytes := synthWAV(c.ttsMode, c.ttsSampleRate, c.ttsDurationMs)
-	w.Header().Set("Content-Type", "audio/wav")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wavBytes)))
-	_, _ = w.Write(wavBytes)
-	log.Printf("[TTS-%d] speech sent (text_len=%d, bytes=%d)", ttsID, len(req.Input), len(wavBytes))
+	responseFormat := strings.ToLower(strings.TrimSpace(req.ResponseFormat))
+	if responseFormat == "" {
+		responseFormat = "wav"
+	}
+
+	switch responseFormat {
+	case "opus":
+		opusBytes, err := synthOggOpus(c.ttsMode, c.ttsSampleRate, c.ttsDurationMs)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("synth opus failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/ogg")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(opusBytes)))
+		_, _ = w.Write(opusBytes)
+		log.Printf("[TTS-%d] speech sent (format=%s text_len=%d bytes=%d)", ttsID, responseFormat, len(req.Input), len(opusBytes))
+	default:
+		wavBytes := synthWAV(c.ttsMode, c.ttsSampleRate, c.ttsDurationMs)
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(wavBytes)))
+		_, _ = w.Write(wavBytes)
+		log.Printf("[TTS-%d] speech sent (format=%s text_len=%d bytes=%d)", ttsID, responseFormat, len(req.Input), len(wavBytes))
+	}
 }
 
 func splitByRune(s string, size int) []string {
@@ -316,6 +336,17 @@ func splitByRune(s string, size int) []string {
 }
 
 func synthWAV(mode string, sampleRate, durationMs int) []byte {
+	pcm := synthPCM16(mode, sampleRate, durationMs)
+	return encodeWAVPCM16(pcm, sampleRate)
+}
+
+func synthOggOpus(mode string, sampleRate, durationMs int) ([]byte, error) {
+	sampleRate = util.NormalizeOpusSampleRate(sampleRate)
+	pcm := synthPCM16(mode, sampleRate, durationMs)
+	return util.PCM16ToOggOpus(pcm, sampleRate, 1, 20)
+}
+
+func synthPCM16(mode string, sampleRate, durationMs int) []int16 {
 	if sampleRate <= 0 {
 		sampleRate = 16000
 	}
@@ -332,8 +363,7 @@ func synthWAV(mode string, sampleRate, durationMs int) []byte {
 			pcm[i] = int16(v * 9000)
 		}
 	}
-
-	return encodeWAVPCM16(pcm, sampleRate)
+	return pcm
 }
 
 func encodeWAVPCM16(samples []int16, sampleRate int) []byte {

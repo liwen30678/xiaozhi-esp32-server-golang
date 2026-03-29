@@ -185,6 +185,8 @@ func (d *AudioDecoder) Run(startTs int64) error {
 		return d.RunMp3Decoder(startTs)
 	} else if d.AudioFormat == "opus" {
 		return d.RunOpusDecoder(startTs)
+	} else if d.AudioFormat == "ogg_opus" {
+		return d.RunOggOpusDecoder(startTs)
 	}
 	return nil
 }
@@ -250,11 +252,104 @@ func (d *AudioDecoder) RunOpusDecoder(startTs int64) error {
 		log.Warnf("Opus 输入通道数为0，按单声道处理")
 	}
 
-	targetSampleRate := sourceSampleRate
-	if d.targetSampleRate > 0 {
-		targetSampleRate = d.targetSampleRate
+	return d.runOpusPacketStream(startTs, sourceSampleRate, channels, func() ([]byte, error) {
+		packet, err := readLengthPrefixedFrame(d.pipeReader)
+		if err == io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("读取Opus帧失败: 数据不完整")
+		}
+		if err != nil {
+			return nil, err
+		}
+		return packet, nil
+	})
+}
+
+func (d *AudioDecoder) RunOggOpusDecoder(startTs int64) error {
+	defer func() {
+		close(d.outputOpusChan)
+		if d.pipeReader != nil {
+			d.pipeReader.Close()
+		}
+	}()
+
+	packetReader := &oggOpusPacketReader{reader: d.pipeReader}
+	info, err := packetReader.Prepare()
+	if err != nil {
+		return fmt.Errorf("解析 Ogg Opus 头失败: %v", err)
 	}
 
+	log.Debugf("Ogg Opus解码器开始，原始采样率: %d, 原始通道: %d, 目标采样率: %d, 目标格式: %s", info.SampleRate, info.Channels, d.getTargetSampleRate(info.SampleRate), d.TargetAudioFormat)
+
+	return d.runOpusPacketStream(startTs, info.SampleRate, info.Channels, packetReader.NextPacket)
+}
+
+func (d *AudioDecoder) runOpusPacketStream(startTs int64, sourceSampleRate int, channels int, nextPacket func() ([]byte, error)) error {
+	firstPacket, err := nextPacket()
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if d.canPassthroughOpusPacket(sourceSampleRate, channels, firstPacket) {
+		return d.passThroughOpusPackets(startTs, firstPacket, nextPacket)
+	}
+	if d.canRepacketizeOpusPacket(sourceSampleRate, channels, firstPacket) {
+		return d.repacketizeOpusPackets(startTs, sourceSampleRate, firstPacket, nextPacket)
+	}
+
+	return d.transcodeOpusPackets(startTs, sourceSampleRate, channels, firstPacket, nextPacket)
+}
+
+func (d *AudioDecoder) passThroughOpusPackets(startTs int64, firstPacket []byte, nextPacket func() ([]byte, error)) error {
+	var firstFrame bool
+	emitPacket := func(packet []byte) error {
+		if len(packet) == 0 {
+			return nil
+		}
+		if !firstFrame {
+			firstFrame = true
+			log.Infof("tts云端->首帧直通完成耗时: %d ms", time.Now().UnixMilli()-startTs)
+		}
+		frameData := make([]byte, len(packet))
+		copy(frameData, packet)
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opus passthrough context done, exit")
+			return nil
+		case d.outputOpusChan <- frameData:
+		}
+		return nil
+	}
+
+	if err := emitPacket(firstPacket); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opus passthrough context done, exit")
+			return nil
+		default:
+		}
+
+		packet, err := nextPacket()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := emitPacket(packet); err != nil {
+			return err
+		}
+	}
+}
+
+func (d *AudioDecoder) transcodeOpusPackets(startTs int64, sourceSampleRate int, channels int, firstPacket []byte, nextPacket func() ([]byte, error)) error {
+	targetSampleRate := d.getTargetSampleRate(sourceSampleRate)
 	frameDurationMs := d.perFrameDurationMs
 	if frameDurationMs <= 0 {
 		frameDurationMs = 60
@@ -289,7 +384,7 @@ func (d *AudioDecoder) RunOpusDecoder(startTs int64) error {
 	opusBuffer := make([]byte, 1000)
 	var firstFrame bool
 
-	log.Debugf("Opus解码器开始，原始采样率: %d, 目标采样率: %d, 原始通道: %d, 帧大小: %d, 目标格式: %s", sourceSampleRate, targetSampleRate, channels, sourceFrameSize, d.TargetAudioFormat)
+	log.Debugf("Opus转码开始，原始采样率: %d, 目标采样率: %d, 原始通道: %d, 帧大小: %d, 目标格式: %s", sourceSampleRate, targetSampleRate, channels, sourceFrameSize, d.TargetAudioFormat)
 
 	emitFrame := func(frame []int16) error {
 		if len(frame) == 0 {
@@ -357,32 +452,13 @@ func (d *AudioDecoder) RunOpusDecoder(startTs int64) error {
 		return nil
 	}
 
-	for {
-		select {
-		case <-d.ctx.Done():
-			log.Debugf("opusDecoder context done, exit")
-			return nil
-		default:
-		}
-
-		packet, err := readLengthPrefixedFrame(d.pipeReader)
-		if err == io.EOF {
-			log.Debugf("Opus流读取结束，处理剩余数据")
-			return flushFrames(true)
-		}
-		if err == io.ErrUnexpectedEOF {
-			return fmt.Errorf("读取Opus帧失败: 数据不完整")
-		}
-		if err != nil {
-			return fmt.Errorf("读取Opus帧失败: %v", err)
-		}
-
+	processPacket := func(packet []byte) error {
 		n, err := opusDecoder.Decode(packet, decodedBuffer)
 		if err != nil {
 			return fmt.Errorf("解码Opus帧失败: %v", err)
 		}
 		if n <= 0 {
-			continue
+			return nil
 		}
 
 		if channels == 1 {
@@ -397,11 +473,439 @@ func (d *AudioDecoder) RunOpusDecoder(startTs int64) error {
 				pcmBuffer = append(pcmBuffer, int16(sampleSum/int32(channels)))
 			}
 		}
+		return flushFrames(false)
+	}
 
-		if err := flushFrames(false); err != nil {
+	if err := processPacket(firstPacket); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opusDecoder context done, exit")
+			return nil
+		default:
+		}
+
+		packet, err := nextPacket()
+		if err == io.EOF {
+			log.Debugf("Opus流读取结束，处理剩余数据")
+			return flushFrames(true)
+		}
+		if err != nil {
+			return err
+		}
+		if err := processPacket(packet); err != nil {
 			return err
 		}
 	}
+}
+
+func (d *AudioDecoder) repacketizeOpusPackets(startTs int64, sourceSampleRate int, firstPacket []byte, nextPacket func() ([]byte, error)) error {
+	targetDurationMs := d.perFrameDurationMs
+	if targetDurationMs <= 0 {
+		return fmt.Errorf("无效的目标 Opus 帧时长: %d ms", targetDurationMs)
+	}
+
+	rp, err := newOpusRepacketizer()
+	if err != nil {
+		return err
+	}
+	defer rp.close()
+
+	currentDurationMs := 0
+	prevTOC := byte(0)
+	var firstFrame bool
+
+	emitCurrent := func() error {
+		if rp.nbFrames() == 0 {
+			return nil
+		}
+		packet, err := rp.out()
+		if err != nil {
+			return fmt.Errorf("输出重组后的 Opus packet 失败: %v", err)
+		}
+		if len(packet) == 0 {
+			rp.reset()
+			currentDurationMs = 0
+			prevTOC = 0
+			return nil
+		}
+		if !firstFrame {
+			firstFrame = true
+			log.Infof("tts云端->首帧重组完成耗时: %d ms", time.Now().UnixMilli()-startTs)
+		}
+		frameData := make([]byte, len(packet))
+		copy(frameData, packet)
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opus repacketize context done, exit")
+			return nil
+		case d.outputOpusChan <- frameData:
+		}
+		rp.reset()
+		currentDurationMs = 0
+		prevTOC = 0
+		return nil
+	}
+
+	appendPacket := func(packet []byte) error {
+		if len(packet) == 0 {
+			return nil
+		}
+		packetDurationMs, err := opusPacketDurationMs(packet, sourceSampleRate)
+		if err != nil {
+			return err
+		}
+		if packetDurationMs <= 0 {
+			return fmt.Errorf("非法 Opus packet 时长: %d ms", packetDurationMs)
+		}
+		if packetDurationMs > targetDurationMs {
+			return fmt.Errorf("Opus packet 时长 %d ms 大于目标帧长 %d ms，无法仅通过重组处理", packetDurationMs, targetDurationMs)
+		}
+
+		needFlush := rp.nbFrames() > 0 && (((prevTOC & 0xFC) != (packet[0] & 0xFC)) || currentDurationMs+packetDurationMs > targetDurationMs)
+		if needFlush {
+			if err := emitCurrent(); err != nil {
+				return err
+			}
+		}
+
+		if err := rp.cat(packet); err != nil {
+			return fmt.Errorf("提交 Opus packet 到 repacketizer 失败: %v", err)
+		}
+		prevTOC = packet[0]
+		currentDurationMs += packetDurationMs
+		if currentDurationMs == targetDurationMs {
+			return emitCurrent()
+		}
+		return nil
+	}
+
+	if err := appendPacket(firstPacket); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			log.Debugf("opus repacketize context done, exit")
+			return nil
+		default:
+		}
+
+		packet, err := nextPacket()
+		if err == io.EOF {
+			return emitCurrent()
+		}
+		if err != nil {
+			return err
+		}
+		if err := appendPacket(packet); err != nil {
+			return err
+		}
+	}
+}
+
+func (d *AudioDecoder) getTargetSampleRate(sourceSampleRate int) int {
+	targetSampleRate := sourceSampleRate
+	if d.targetSampleRate > 0 {
+		targetSampleRate = d.targetSampleRate
+	}
+	return targetSampleRate
+}
+
+func (d *AudioDecoder) canPassthroughOpusPacket(sourceSampleRate int, channels int, firstPacket []byte) bool {
+	if d.TargetAudioFormat != "opus" {
+		return false
+	}
+	if channels != 1 {
+		return false
+	}
+	if d.getTargetSampleRate(sourceSampleRate) != sourceSampleRate {
+		return false
+	}
+	if d.perFrameDurationMs <= 0 {
+		return true
+	}
+
+	packetDurationMs, err := opusPacketDurationMs(firstPacket, sourceSampleRate)
+	if err != nil {
+		log.Debugf("解析 Opus packet 时长失败，回退转码: %v", err)
+		return false
+	}
+	if packetDurationMs != d.perFrameDurationMs {
+		log.Debugf("Opus packet 时长不匹配，回退转码: packet=%dms target=%dms", packetDurationMs, d.perFrameDurationMs)
+		return false
+	}
+	return true
+}
+
+func (d *AudioDecoder) canRepacketizeOpusPacket(sourceSampleRate int, channels int, firstPacket []byte) bool {
+	if d.TargetAudioFormat != "opus" {
+		return false
+	}
+	if channels != 1 {
+		return false
+	}
+	if d.getTargetSampleRate(sourceSampleRate) != sourceSampleRate {
+		return false
+	}
+	targetDurationMs := d.perFrameDurationMs
+	if targetDurationMs <= 0 || targetDurationMs > 120 {
+		return false
+	}
+
+	packetDurationMs, err := opusPacketDurationMs(firstPacket, sourceSampleRate)
+	if err != nil {
+		log.Debugf("解析 Opus packet 时长失败，回退转码: %v", err)
+		return false
+	}
+	if packetDurationMs <= 0 || packetDurationMs >= targetDurationMs {
+		return false
+	}
+	return true
+}
+
+func opusPacketDurationMs(packet []byte, sampleRate int) (int, error) {
+	if len(packet) == 0 {
+		return 0, fmt.Errorf("空 Opus packet")
+	}
+	if sampleRate <= 0 {
+		sampleRate = 48000
+	}
+
+	samplesPerFrame := opusPacketSamplesPerFrame(packet[0], sampleRate)
+	frameCount, err := opusPacketFrameCount(packet)
+	if err != nil {
+		return 0, err
+	}
+	totalSamples := samplesPerFrame * frameCount
+	return totalSamples * 1000 / sampleRate, nil
+}
+
+func opusPacketSamplesPerFrame(toc byte, sampleRate int) int {
+	if toc&0x80 != 0 {
+		return (sampleRate << ((toc >> 3) & 0x03)) / 400
+	}
+	if toc&0x60 == 0x60 {
+		if toc&0x08 != 0 {
+			return sampleRate / 50
+		}
+		return sampleRate / 100
+	}
+
+	audioSize := (toc >> 3) & 0x03
+	if audioSize == 3 {
+		return sampleRate * 60 / 1000
+	}
+	return (sampleRate << audioSize) / 100
+}
+
+func opusPacketFrameCount(packet []byte) (int, error) {
+	if len(packet) == 0 {
+		return 0, fmt.Errorf("空 Opus packet")
+	}
+
+	switch packet[0] & 0x03 {
+	case 0:
+		return 1, nil
+	case 1, 2:
+		return 2, nil
+	default:
+		if len(packet) < 2 {
+			return 0, fmt.Errorf("Opus packet 长度不足，无法解析 frame count")
+		}
+		return int(packet[1] & 0x3F), nil
+	}
+}
+
+type opusStreamInfo struct {
+	SampleRate int
+	Channels   int
+}
+
+type oggPage struct {
+	HeaderType byte
+	Segments   []byte
+	Body       []byte
+}
+
+type oggOpusPacketReader struct {
+	reader   io.Reader
+	queue    [][]byte
+	carry    []byte
+	info     opusStreamInfo
+	headSeen bool
+	tagsSeen bool
+}
+
+func (r *oggOpusPacketReader) Prepare() (opusStreamInfo, error) {
+	for !r.headSeen || !r.tagsSeen {
+		if err := r.readNextPage(); err != nil {
+			if err == io.EOF {
+				return opusStreamInfo{}, fmt.Errorf("Ogg Opus 流缺少必要头部")
+			}
+			return opusStreamInfo{}, err
+		}
+	}
+
+	if r.info.SampleRate <= 0 {
+		r.info.SampleRate = 48000
+	}
+	if r.info.Channels <= 0 {
+		r.info.Channels = 1
+	}
+	return r.info, nil
+}
+
+func (r *oggOpusPacketReader) NextPacket() ([]byte, error) {
+	for len(r.queue) == 0 {
+		if err := r.readNextPage(); err != nil {
+			if err == io.EOF {
+				if len(r.carry) > 0 {
+					return nil, io.ErrUnexpectedEOF
+				}
+				return nil, io.EOF
+			}
+			return nil, err
+		}
+	}
+
+	packet := r.queue[0]
+	r.queue = r.queue[1:]
+	return packet, nil
+}
+
+func (r *oggOpusPacketReader) readNextPage() error {
+	page, err := readOggPage(r.reader)
+	if err != nil {
+		return err
+	}
+
+	packet := r.carry
+	if len(packet) == 0 && page.HeaderType&0x01 != 0 {
+		return fmt.Errorf("收到缺少前序数据的 Ogg continuation page")
+	}
+
+	offset := 0
+	for _, segmentLen := range page.Segments {
+		end := offset + int(segmentLen)
+		if end > len(page.Body) {
+			return fmt.Errorf("Ogg page 数据长度不完整")
+		}
+		packet = append(packet, page.Body[offset:end]...)
+		offset = end
+		if segmentLen < 255 {
+			completePacket := append([]byte(nil), packet...)
+			if err := r.handlePacket(completePacket); err != nil {
+				return err
+			}
+			packet = nil
+		}
+	}
+
+	if offset != len(page.Body) {
+		return fmt.Errorf("Ogg page 数据存在未消费尾部: offset=%d total=%d", offset, len(page.Body))
+	}
+
+	r.carry = packet
+	return nil
+}
+
+func (r *oggOpusPacketReader) handlePacket(packet []byte) error {
+	switch {
+	case !r.headSeen:
+		info, err := parseOpusHeadPacket(packet)
+		if err != nil {
+			return err
+		}
+		r.info = info
+		r.headSeen = true
+	case !r.tagsSeen:
+		if !bytes.HasPrefix(packet, []byte("OpusTags")) {
+			return fmt.Errorf("缺少 OpusTags 包")
+		}
+		r.tagsSeen = true
+	default:
+		if len(packet) > 0 {
+			r.queue = append(r.queue, packet)
+		}
+	}
+	return nil
+}
+
+func parseOpusHeadPacket(packet []byte) (opusStreamInfo, error) {
+	if len(packet) < 19 {
+		return opusStreamInfo{}, fmt.Errorf("OpusHead 包长度不足: %d", len(packet))
+	}
+	if !bytes.HasPrefix(packet, []byte("OpusHead")) {
+		return opusStreamInfo{}, fmt.Errorf("缺少 OpusHead 包")
+	}
+
+	channels := int(packet[9])
+	if channels < 1 {
+		channels = 1
+	}
+	sampleRate := int(binary.LittleEndian.Uint32(packet[12:16]))
+	if sampleRate <= 0 {
+		sampleRate = 48000
+	}
+
+	return opusStreamInfo{
+		SampleRate: NormalizeOpusSampleRate(sampleRate),
+		Channels:   channels,
+	}, nil
+}
+
+func readOggPage(reader io.Reader) (oggPage, error) {
+	header := make([]byte, 27)
+	n, err := io.ReadFull(reader, header)
+	if err != nil {
+		if err == io.EOF && n == 0 {
+			return oggPage{}, io.EOF
+		}
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			return oggPage{}, io.ErrUnexpectedEOF
+		}
+		return oggPage{}, err
+	}
+
+	if !bytes.Equal(header[:4], []byte("OggS")) {
+		return oggPage{}, fmt.Errorf("非法 OggS 头")
+	}
+	if header[4] != 0 {
+		return oggPage{}, fmt.Errorf("不支持的 Ogg 版本: %d", header[4])
+	}
+
+	segmentCount := int(header[26])
+	segments := make([]byte, segmentCount)
+	if _, err := io.ReadFull(reader, segments); err != nil {
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			return oggPage{}, io.ErrUnexpectedEOF
+		}
+		return oggPage{}, err
+	}
+
+	bodyLen := 0
+	for _, segmentLen := range segments {
+		bodyLen += int(segmentLen)
+	}
+
+	body := make([]byte, bodyLen)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			return oggPage{}, io.ErrUnexpectedEOF
+		}
+		return oggPage{}, err
+	}
+
+	return oggPage{
+		HeaderType: header[5],
+		Segments:   segments,
+		Body:       body,
+	}, nil
 }
 
 func (d *AudioDecoder) RunWavDecoder(startTs int64, isRaw bool) error {
@@ -861,6 +1365,10 @@ func GetAudioFormatByMimeType(mimeType string) string {
 		return "wav"
 	case "audio/pcm", "audio/x-pcm":
 		return "pcm"
+	case "audio/ogg", "application/ogg":
+		return "ogg_opus"
+	case "audio/opus":
+		return "opus"
 	default:
 		// 默认返回mp3格式
 		return "mp3"
