@@ -207,7 +207,7 @@ func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, 
 		clientState.MarkAsrFirstText()
 		s.TraceAsrFirstText(clientState.Ctx, time.Now().UnixMilli())
 		if clientState.IsRealTime() && viper.GetInt("chat.realtime_mode") == 4 {
-			clientState.AfterAsrSessionCtx.Cancel()
+			clientState.AfterAsrSessionCtx.CancelWithReason("ChatSession.OnAsrFirstTextCallback: realtime_mode=4")
 			s.InterruptAndClearTTSQueue()
 		}
 	}
@@ -1200,9 +1200,7 @@ func (s *ChatSession) OnListenStart(startSeq uint64) error {
 
 	if !s.isCurrentListenStart(startSeq) {
 		log.Debugf("OnListenStart stale after ASR restart, cancel current start")
-		if s.clientState.Asr.Cancel != nil {
-			s.clientState.Asr.Cancel()
-		}
+		s.clientState.Asr.CancelWithReason("ChatSession.OnListenStart: stale listen start after ASR restart")
 		return nil
 	}
 

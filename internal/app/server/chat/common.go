@@ -11,8 +11,8 @@ import (
 const stopSpeakingInterruptTimeout = 2 * time.Second
 
 func (s *ChatSession) StopSpeaking(isSendTtsStop bool) {
-	s.clientState.SessionCtx.Cancel()
-	s.clientState.AfterAsrSessionCtx.Cancel()
+	s.clientState.SessionCtx.CancelWithReason("ChatSession.StopSpeaking: session_ctx")
+	s.clientState.AfterAsrSessionCtx.CancelWithReason("ChatSession.StopSpeaking: after_asr_ctx")
 	s.clientState.IsWelcomePlaying = false
 	s.invalidateListenStart()
 

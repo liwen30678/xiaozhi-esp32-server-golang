@@ -2,9 +2,15 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"xiaozhi-esp32-server-golang/internal/util"
 )
 
 func TestOpenAITTS(t *testing.T) {
@@ -176,5 +182,78 @@ func TestOpenAITTSProviderDefaults(t *testing.T) {
 
 	if provider.Speed != 1.0 {
 		t.Errorf("期望默认速度为 1.0，实际为 %.1f", provider.Speed)
+	}
+}
+
+func TestOpenAITTSProviderSupportsOpusResponse(t *testing.T) {
+	sampleRate := 16000
+	pcm := make([]int16, sampleRate/2)
+	for i := range pcm {
+		if i%32 < 16 {
+			pcm[i] = 2400
+		} else {
+			pcm[i] = -2400
+		}
+	}
+
+	opusBytes, err := util.PCM16ToOggOpus(pcm, sampleRate, 1, 20)
+	if err != nil {
+		t.Fatalf("生成测试 Ogg Opus 失败: %v", err)
+	}
+
+	requestErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req openAIRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			requestErrCh <- err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.ResponseFormat != "opus" {
+			requestErrCh <- fmt.Errorf("期望 response_format=opus，实际为 %s", req.ResponseFormat)
+			http.Error(w, "unexpected response_format", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "audio/ogg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(opusBytes)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAITTSProvider(map[string]interface{}{
+		"api_url":         server.URL,
+		"model":           "tts-1",
+		"voice":           "alloy",
+		"response_format": "opus",
+		"speed":           1.0,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	outputChan, err := provider.TextToSpeechStream(ctx, "测试 opus 输出", sampleRate, 1, 60)
+	if err != nil {
+		t.Fatalf("TextToSpeechStream 返回错误: %v", err)
+	}
+
+	frameCount := 0
+	for frame := range outputChan {
+		if len(frame) == 0 {
+			t.Fatal("收到空 Opus 帧")
+		}
+		frameCount++
+	}
+
+	if frameCount == 0 {
+		t.Fatal("未收到任何 Opus 帧")
+	}
+
+	select {
+	case err := <-requestErrCh:
+		t.Fatalf("mock server 校验失败: %v", err)
+	default:
 	}
 }

@@ -47,7 +47,7 @@ type PoolConfig struct {
 // DefaultConfig 返回默认配置
 func DefaultConfig() *PoolConfig {
 	return &PoolConfig{
-		MaxSize:          10,
+		MaxSize:          1000,
 		MinSize:          1,
 		MaxIdle:          5,
 		AcquireTimeout:   30 * time.Second,
