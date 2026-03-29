@@ -354,11 +354,16 @@ type Ctx struct {
 }
 
 func (c *Ctx) Reset() {
+	c.ResetWithReason("Ctx.Reset")
+}
+
+func (c *Ctx) ResetWithReason(reason string) {
 	c.Lock()
 	defer c.Unlock()
 	if c.ctx != nil {
 		c.cancel()
 		c.ctx = nil
+		c.cancel = nil
 	}
 }
 
@@ -375,11 +380,16 @@ func (c *Ctx) Get(parentCtx context.Context) context.Context {
 }
 
 func (c *Ctx) Cancel() {
+	c.CancelWithReason("Ctx.Cancel")
+}
+
+func (c *Ctx) CancelWithReason(reason string) {
 	c.Lock()
 	defer c.Unlock()
 	if c.ctx != nil {
 		c.cancel()
 		c.ctx = nil
+		c.cancel = nil
 	}
 }
 
@@ -445,7 +455,7 @@ func (s *ClientState) InitAsr() error {
 }
 
 func (c *ClientState) Destroy() {
-	c.Asr.Stop()
+	c.Asr.StopWithReason("ClientState.Destroy")
 	c.Vad.Reset()
 
 	// 归还ASR资源（如果存在）
@@ -456,8 +466,8 @@ func (c *ClientState) Destroy() {
 	c.VoiceStatus.Reset()
 	c.AsrAudioBuffer.ClearAsrAudioData()
 
-	c.SessionCtx.Reset()
-	c.AfterAsrSessionCtx.Reset()
+	c.SessionCtx.ResetWithReason("ClientState.Destroy: session_ctx")
+	c.AfterAsrSessionCtx.ResetWithReason("ClientState.Destroy: after_asr_ctx")
 
 	c.Statistic.Reset()
 	c.SetStatus(ClientStatusInit)
@@ -475,7 +485,7 @@ func (state *ClientState) OnVoiceSilence() {
 	state.Asr.ResetReceivedText()
 	state.SetClientVoiceStop(true) //设置停止说话标志位, 此时收到的音频数据不会进vad
 	//客户端停止说话
-	state.Asr.Stop() //停止asr并获取结果，进行llm
+	state.Asr.StopWithReason("ClientState.OnVoiceSilence") //停止asr并获取结果，进行llm
 	//释放vad
 	state.Vad.Reset() //释放vad实例
 
