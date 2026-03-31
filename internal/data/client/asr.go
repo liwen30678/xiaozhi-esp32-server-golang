@@ -63,39 +63,44 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, b
 	for {
 		select {
 		case <-ctx.Done():
+			log.Debugf("RetireAsrResult: ctx done, exit")
 			return emptyResult, false, nil
-		case result, ok := <-a.AsrResultChannel:
-			if !ok {
-				log.Debugf("asr result channel closed")
-				return emptyResult, true, nil
-			}
-			log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, emptyReason: %s, error: %+v", result.Text, ok, result.IsFinal, result.EmptyReason, result.Error)
-			if result.Error != nil {
-				if result.RetryReason != "" {
-					log.Warnf("ASR 返回可恢复错误(%s)，交由上层恢复: %v", result.RetryReason, result.Error)
+		default:
+			// 避免 ctx 取消时概率性选中 channel，导致使用已取消 context 的结果
+			select {
+			case result, ok := <-a.AsrResultChannel:
+				if !ok {
+					log.Debugf("asr result channel closed")
+					return emptyResult, true, nil
+				}
+				log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, emptyReason: %s, error: %+v", result.Text, ok, result.IsFinal, result.EmptyReason, result.Error)
+				if result.Error != nil {
+					if result.RetryReason != "" {
+						log.Warnf("ASR 返回可恢复错误(%s)，交由上层恢复: %v", result.RetryReason, result.Error)
+						return result, true, nil
+					}
+					return emptyResult, false, result.Error
+				}
+
+				// 检测首次返回字符（文本不为空且未发送过）
+				if result.Text != "" && !firstTextSent && a.ClientState != nil && a.ClientState.OnAsrFirstTextCallback != nil {
+					firstTextSent = true
+					// 调用回调函数通知首次字符
+					a.ClientState.OnAsrFirstTextCallback(result.Text, result.IsFinal)
+				}
+
+				if a.AsrType == "funasr" &&
+					strings.EqualFold(a.Mode, "2pass") &&
+					strings.EqualFold(result.Mode, "2pass-online") {
+					if result.IsFinal {
+						log.Debugf("funasr 2pass-online 结果误标 final，继续等待 2pass-offline 最终结果")
+					}
+					continue
+				}
+
+				if result.IsFinal {
 					return result, true, nil
 				}
-				return emptyResult, false, result.Error
-			}
-
-			// 检测首次返回字符（文本不为空且未发送过）
-			if result.Text != "" && !firstTextSent && a.ClientState != nil && a.ClientState.OnAsrFirstTextCallback != nil {
-				firstTextSent = true
-				// 调用回调函数通知首次字符
-				a.ClientState.OnAsrFirstTextCallback(result.Text, result.IsFinal)
-			}
-
-			if a.AsrType == "funasr" &&
-				strings.EqualFold(a.Mode, "2pass") &&
-				strings.EqualFold(result.Mode, "2pass-online") {
-				if result.IsFinal {
-					log.Debugf("funasr 2pass-online 结果误标 final，继续等待 2pass-offline 最终结果")
-				}
-				continue
-			}
-
-			if result.IsFinal {
-				return result, true, nil
 			}
 		}
 	}
