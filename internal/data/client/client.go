@@ -70,6 +70,8 @@ type ClientState struct {
 	Abort bool
 	// 拾音模式
 	ListenMode string
+	// realtime 模式是否已完成首次启动
+	RealtimeModeInitialized bool
 	// listen start 流程状态: idle / starting / listening
 	ListenPhase string
 	// 设备ID
