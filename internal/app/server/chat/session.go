@@ -697,43 +697,8 @@ func (s *ChatSession) isCurrentListenStart(startSeq uint64) bool {
 	return startSeq == s.listenStartSeq.Load()
 }
 
-func (s *ChatSession) isListenStartActive() bool {
-	phase := s.clientState.GetListenPhase()
-	return phase == ListenPhaseStarting || phase == ListenPhaseListening
-}
-
-func (s *ChatSession) handleDetectDuringListening(msg *ClientMessage) error {
-	if strings.TrimSpace(msg.Text) == "" {
-		return nil
-	}
-
-	text := removePunctuation(msg.Text)
-	if !isWakeupWord(text) {
-		log.Debugf("设备 %s 监听已启动，忽略后到达的 detect 文本: %s", msg.DeviceID, text)
-		return nil
-	}
-
-	if viper.GetBool("enable_greeting") && !s.clientState.IsWelcomeSpeaking {
-		s.clientState.IsWelcomeSpeaking = true
-		log.Infof("设备 %s listen start 流程中收到 detect 唤醒词，跳过欢迎语并继续当前监听", msg.DeviceID)
-	}
-
-	return nil
-}
-
 func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
-	/*if s.clientState.Status == ClientStatusListening {
-		log.Debugf("设备 %s 正在监听, 跳过唤醒词检测", msg.DeviceID)
-		return nil
-	}*/
-	if s.isListenStartActive() {
-		return s.handleDetectDuringListening(msg)
-	}
-
-	// 唤醒词检测
-	s.StopSpeaking(false)
-
-	// 如果有文本，处理唤醒词
+	// 检查设备激活状态
 	if msg.Text != "" {
 		isActivated, err := s.CheckDeviceActivated()
 		if err != nil {
@@ -743,33 +708,26 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 		if !isActivated {
 			return nil
 		}
+	}
 
-		text := msg.Text
-		// 移除标点符号和处理长度
-		text = removePunctuation(text)
+	// 停止当前播放
+	s.StopSpeaking(false)
 
-		// 检查是否是唤醒词
-		isWakeupWord := isWakeupWord(text)
-		enableGreeting := viper.GetBool("enable_greeting") // 从配置获取
+	// 如果有文本，处理
+	if msg.Text != "" {
+		text := removePunctuation(msg.Text)
 
-		var needStartChat bool
-		if !isWakeupWord || (isWakeupWord && enableGreeting) {
-			needStartChat = true
-		}
-		if needStartChat {
-			// 否则开始对话
-			if enableGreeting && isWakeupWord {
-				//进行tts欢迎语
-				if !s.clientState.IsWelcomeSpeaking {
-					s.HandleWelcome()
-				}
-			} else {
-				s.clientState.Destroy()
-				//进行llm->tts聊天
-				if err := s.AddAsrResultToQueue(text, nil); err != nil {
-					log.Errorf("开始对话失败: %v", err)
-				}
+		// 唤醒词 + 启用 greeting -> 走欢迎模式
+		if isWakeupWord(text) && viper.GetBool("enable_greeting") {
+			if !s.clientState.IsWelcomeSpeaking {
+				s.HandleWelcome()
 			}
+			return nil
+		}
+
+		// 默认兜底走 AddAsrResultToQueue
+		if err := s.AddAsrResultToQueue(text, nil); err != nil {
+			log.Errorf("开始对话失败: %v", err)
 		}
 	}
 	return nil
