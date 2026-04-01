@@ -69,10 +69,6 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, b
 			// 避免 ctx 取消时概率性选中 channel，导致使用已取消 context 的结果
 			select {
 			case result, ok := <-a.AsrResultChannel:
-				if !ok {
-					log.Debugf("asr result channel closed")
-					return emptyResult, false, nil
-				}
 				log.Debugf("asr result: %s, ok: %+v, isFinal: %+v, emptyReason: %s, error: %+v", result.Text, ok, result.IsFinal, result.EmptyReason, result.Error)
 				if result.Error != nil {
 					if result.RetryReason != "" {
@@ -100,6 +96,11 @@ func (a *Asr) RetireAsrResult(ctx context.Context) (asr_types.StreamingResult, b
 
 				if result.IsFinal {
 					return result, true, nil
+				}
+
+				if !ok {
+					log.Debugf("asr result channel closed")
+					return emptyResult, true, nil
 				}
 			}
 		}

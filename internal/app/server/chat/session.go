@@ -74,6 +74,9 @@ type ChatSession struct {
 	closeOnce sync.Once
 	closed    bool
 
+	// stopSpeaking 保护，防止与 AddAsrResultToQueue/HandleWelcome 并发冲突
+	stopSpeakingMu sync.Mutex
+
 	openClawStreamMu sync.Mutex
 	openClawStreams  map[string]chan llm_common.LLMResponseStruct
 
@@ -805,7 +808,26 @@ func (s *ChatSession) HandleNotActivated() {
 func (s *ChatSession) HandleWelcome() {
 	greetingText := s.GetRandomGreeting()
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+
+	// 检查 session 是否已被停止（通过尝试获取锁来判断）
+	if !s.stopSpeakingMu.TryLock() {
+		log.Debugf("HandleWelcome 正在执行 StopSpeaking，跳过欢迎语")
+		return
+	}
+	s.stopSpeakingMu.Unlock()
+
+	// 检查 sessionCtx 是否已取消
+	if sessionCtx.Err() != nil {
+		log.Debugf("HandleWelcome sessionCtx 已取消，跳过欢迎语")
+		return
+	}
+
 	ctx := s.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	// 检查 afterAsrCtx 是否已取消
+	if ctx.Err() != nil {
+		log.Debugf("HandleWelcome afterAsrCtx 已取消，跳过欢迎语")
+		return
+	}
 
 	s.clientState.IsWelcomeSpeaking = true
 	s.clientState.IsWelcomePlaying = true
@@ -1250,7 +1272,22 @@ func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.Id
 	if speakerResult != nil && speakerResult.Identified {
 		log.Debugf("AddAsrResultToQueue speaker: %s (confidence: %.2f)", speakerResult.SpeakerName, speakerResult.Confidence)
 	}
+
+	// 检查 session 是否已被停止（通过尝试获取锁来判断）
+	// 如果 StopSpeaking 正在执行，这里会等待；如果已执行完成，tryLock 会立即返回
+	if !s.stopSpeakingMu.TryLock() {
+		log.Debugf("AddAsrResultToQueue 正在执行 StopSpeaking，丢弃消息")
+		return nil
+	}
+	s.stopSpeakingMu.Unlock()
+
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+	// 检查 sessionCtx 是否已取消
+	if sessionCtx.Err() != nil {
+		log.Debugf("AddAsrResultToQueue sessionCtx 已取消，丢弃消息")
+		return nil
+	}
+
 	item := AsrResponseChannelItem{
 		ctx:           s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
 		text:          text,

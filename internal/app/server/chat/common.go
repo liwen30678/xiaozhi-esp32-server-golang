@@ -11,10 +11,28 @@ import (
 const stopSpeakingInterruptTimeout = 2 * time.Second
 
 func (s *ChatSession) StopSpeaking(isSendTtsStop bool) {
-	s.clientState.SessionCtx.CancelWithReason("ChatSession.StopSpeaking: session_ctx")
-	s.clientState.AfterAsrSessionCtx.CancelWithReason("ChatSession.StopSpeaking: after_asr_ctx")
+	s.stopSpeakingWithLock(true, isSendTtsStop)
+}
+
+func (s *ChatSession) StopSpeakingAfterAsr(isSendTtsStop bool) {
+	s.stopSpeakingWithLock(false, isSendTtsStop)
+}
+
+// stopSpeakingWithLock 在 stopSpeaking 基础上增加了 mutex 保护
+func (s *ChatSession) stopSpeakingWithLock(cancelSession bool, isSendTtsStop bool) {
+	s.stopSpeakingMu.Lock()
+	defer s.stopSpeakingMu.Unlock()
+	s.stopSpeaking(cancelSession, isSendTtsStop)
+}
+
+func (s *ChatSession) stopSpeaking(cancelSession bool, isSendTtsStop bool) {
+	if cancelSession {
+		s.clientState.SessionCtx.CancelWithReason("ChatSession.stopSpeaking: session_ctx")
+		s.invalidateListenStart()
+	}
+	s.clientState.AfterAsrSessionCtx.CancelWithReason("ChatSession.stopSpeaking: after_asr_ctx")
+
 	s.clientState.IsWelcomePlaying = false
-	s.invalidateListenStart()
 
 	s.ClearChatTextQueue()
 	s.llmManager.ClearLLMResponseQueue()
