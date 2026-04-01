@@ -74,6 +74,9 @@ type ChatSession struct {
 	closeOnce sync.Once
 	closed    bool
 
+	// stopSpeaking 保护，防止与 AddAsrResultToQueue/HandleWelcome 并发冲突
+	stopSpeakingMu sync.Mutex
+
 	openClawStreamMu sync.Mutex
 	openClawStreams  map[string]chan llm_common.LLMResponseStruct
 
@@ -697,43 +700,8 @@ func (s *ChatSession) isCurrentListenStart(startSeq uint64) bool {
 	return startSeq == s.listenStartSeq.Load()
 }
 
-func (s *ChatSession) isListenStartActive() bool {
-	phase := s.clientState.GetListenPhase()
-	return phase == ListenPhaseStarting || phase == ListenPhaseListening
-}
-
-func (s *ChatSession) handleDetectDuringListening(msg *ClientMessage) error {
-	if strings.TrimSpace(msg.Text) == "" {
-		return nil
-	}
-
-	text := removePunctuation(msg.Text)
-	if !isWakeupWord(text) {
-		log.Debugf("设备 %s 监听已启动，忽略后到达的 detect 文本: %s", msg.DeviceID, text)
-		return nil
-	}
-
-	if viper.GetBool("enable_greeting") && !s.clientState.IsWelcomeSpeaking {
-		s.clientState.IsWelcomeSpeaking = true
-		log.Infof("设备 %s listen start 流程中收到 detect 唤醒词，跳过欢迎语并继续当前监听", msg.DeviceID)
-	}
-
-	return nil
-}
-
 func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
-	/*if s.clientState.Status == ClientStatusListening {
-		log.Debugf("设备 %s 正在监听, 跳过唤醒词检测", msg.DeviceID)
-		return nil
-	}*/
-	if s.isListenStartActive() {
-		return s.handleDetectDuringListening(msg)
-	}
-
-	// 唤醒词检测
-	s.StopSpeaking(false)
-
-	// 如果有文本，处理唤醒词
+	// 检查设备激活状态
 	if msg.Text != "" {
 		isActivated, err := s.CheckDeviceActivated()
 		if err != nil {
@@ -743,32 +711,28 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 		if !isActivated {
 			return nil
 		}
+	}
 
-		text := msg.Text
-		// 移除标点符号和处理长度
-		text = removePunctuation(text)
+	// 停止当前播放
+	s.StopSpeaking(false)
 
-		// 检查是否是唤醒词
-		isWakeupWord := isWakeupWord(text)
-		enableGreeting := viper.GetBool("enable_greeting") // 从配置获取
+	// 如果有文本，处理
+	if msg.Text != "" {
+		text := removePunctuation(msg.Text)
 
-		var needStartChat bool
-		if !isWakeupWord || (isWakeupWord && enableGreeting) {
-			needStartChat = true
+		enableGreeting := viper.GetBool("enable_greeting")
+		// 唤醒词 + 启用 greeting -> 走欢迎模式
+		if isWakeupWord(text) && enableGreeting {
+			if !s.clientState.IsWelcomeSpeaking {
+				s.HandleWelcome()
+			}
+			return nil
 		}
-		if needStartChat {
-			// 否则开始对话
-			if enableGreeting && isWakeupWord {
-				//进行tts欢迎语
-				if !s.clientState.IsWelcomeSpeaking {
-					s.HandleWelcome()
-				}
-			} else {
-				s.clientState.Destroy()
-				//进行llm->tts聊天
-				if err := s.AddAsrResultToQueue(text, nil); err != nil {
-					log.Errorf("开始对话失败: %v", err)
-				}
+
+		if enableGreeting {
+			// 默认兜底走 AddAsrResultToQueue
+			if err := s.AddAsrResultToQueue(text, nil); err != nil {
+				log.Errorf("开始对话失败: %v", err)
 			}
 		}
 	}
@@ -805,7 +769,26 @@ func (s *ChatSession) HandleNotActivated() {
 func (s *ChatSession) HandleWelcome() {
 	greetingText := s.GetRandomGreeting()
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+
+	// 检查 session 是否已被停止（通过尝试获取锁来判断）
+	if !s.stopSpeakingMu.TryLock() {
+		log.Debugf("HandleWelcome 正在执行 StopSpeaking，跳过欢迎语")
+		return
+	}
+	s.stopSpeakingMu.Unlock()
+
+	// 检查 sessionCtx 是否已取消
+	if sessionCtx.Err() != nil {
+		log.Debugf("HandleWelcome sessionCtx 已取消，跳过欢迎语")
+		return
+	}
+
 	ctx := s.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	// 检查 afterAsrCtx 是否已取消
+	if ctx.Err() != nil {
+		log.Debugf("HandleWelcome afterAsrCtx 已取消，跳过欢迎语")
+		return
+	}
 
 	s.clientState.IsWelcomeSpeaking = true
 	s.clientState.IsWelcomePlaying = true
@@ -1254,7 +1237,22 @@ func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.Id
 	if speakerResult != nil && speakerResult.Identified {
 		log.Debugf("AddAsrResultToQueue speaker: %s (confidence: %.2f)", speakerResult.SpeakerName, speakerResult.Confidence)
 	}
+
+	// 检查 session 是否已被停止（通过尝试获取锁来判断）
+	// 如果 StopSpeaking 正在执行，这里会等待；如果已执行完成，tryLock 会立即返回
+	if !s.stopSpeakingMu.TryLock() {
+		log.Debugf("AddAsrResultToQueue 正在执行 StopSpeaking，丢弃消息")
+		return nil
+	}
+	s.stopSpeakingMu.Unlock()
+
 	sessionCtx := s.clientState.SessionCtx.Get(s.clientState.Ctx)
+	// 检查 sessionCtx 是否已取消
+	if sessionCtx.Err() != nil {
+		log.Debugf("AddAsrResultToQueue sessionCtx 已取消，丢弃消息")
+		return nil
+	}
+
 	item := AsrResponseChannelItem{
 		ctx:           s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
 		text:          text,
