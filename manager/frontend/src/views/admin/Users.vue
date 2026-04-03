@@ -200,6 +200,7 @@ const quotaLoading = ref(false)
 const quotaSaving = ref(false)
 const quotaRows = ref([])
 const quotaUser = ref({})
+const quotaOriginalMaxMap = ref({})
 const isEditMode = ref(false)
 const currentUser = ref({})
 const searchKeyword = ref('')
@@ -395,9 +396,14 @@ const loadQuotaSettings = async (userID) => {
       used_count: Number(item.used_count || 0),
       remaining_count: Number.isFinite(Number(item.remaining_count)) ? Number(item.remaining_count) : -1
     }))
+    quotaOriginalMaxMap.value = quotaRows.value.reduce((acc, row) => {
+      acc[row.tts_config_id] = Number(row.max_count)
+      return acc
+    }, {})
   } catch (error) {
     ElMessage.error('加载复刻额度失败')
     quotaRows.value = []
+    quotaOriginalMaxMap.value = {}
   } finally {
     quotaLoading.value = false
   }
@@ -405,11 +411,11 @@ const loadQuotaSettings = async (userID) => {
 
 const saveQuotaSettings = async () => {
   if (!quotaUser.value?.id) return
-  const items = quotaRows.value.map((row) => ({
+  const normalizedItems = quotaRows.value.map((row) => ({
     tts_config_id: row.tts_config_id,
     max_count: Number(row.max_count)
   }))
-  for (const item of items) {
+  for (const item of normalizedItems) {
     if (!item.tts_config_id) {
       ElMessage.error('存在无效的 tts_config_id')
       return
@@ -418,6 +424,12 @@ const saveQuotaSettings = async () => {
       ElMessage.error('max_count 只能是大于等于 -1 的整数')
       return
     }
+  }
+
+  const items = normalizedItems.filter((item) => quotaOriginalMaxMap.value[item.tts_config_id] !== item.max_count)
+  if (items.length === 0) {
+    ElMessage.info('额度未变更')
+    return
   }
 
   quotaSaving.value = true
@@ -435,6 +447,7 @@ const saveQuotaSettings = async () => {
 const resetQuotaDialog = () => {
   quotaRows.value = []
   quotaUser.value = {}
+  quotaOriginalMaxMap.value = {}
 }
 
 // 重置密码表单
