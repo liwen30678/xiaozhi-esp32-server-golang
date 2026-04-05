@@ -128,23 +128,22 @@ func (s *UdpServer) processPacket(addr *net.UDPAddr, data []byte) {
 		return
 	}
 
-	var udpSession *UdpSession
-	//从addr
-	udpSession = s.getUdpSession(addr)
+	// 以 connID 为准查找会话；addr->session 仅作为缓存映射。
+	fullNonce := data[:16]
+	connID := fullNonce[4:8] // 取5-8字节作为连接id
+	strConnID := hex.EncodeToString(connID)
+	udpSession := s.getSessionByNonce(strConnID)
 	if udpSession == nil {
-		// 获取会话ID
-		fullNonce := data[:16]
-		connID := fullNonce[4:8] // 取5-8字节作为连接id
-		strConnID := hex.EncodeToString(connID)
-		//Debugf("收到数据包, fullNonce: %s, connID: %s", hex.EncodeToString(fullNonce), strConnID)
-		udpSession = s.getSessionByNonce(strConnID)
-		if udpSession == nil {
-			Warnf("session不存在 addr: %s", addr)
-			return
-		}
-		udpSession.RemoteAddr = addr
-		s.addUdpSession(addr, udpSession)
+		Warnf("session不存在 connID: %s, addr: %s", strConnID, addr)
+		return
 	}
+
+	// 如果当前 addr 对应了错误 session，立即清理脏映射后按 connID 重绑。
+	if addrSession := s.getUdpSession(addr); addrSession != nil && addrSession != udpSession {
+		Warnf("检测到脏addr映射，addr: %s, 清理旧映射并按connID重绑", addr)
+		s.removeUdpSession(addr)
+	}
+	s.rebindUdpSessionAddr(addr, udpSession)
 
 	if udpSession == nil {
 		Warnf("udpSession不存在 addr: %s", addr)
@@ -276,7 +275,7 @@ func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 func (s *UdpServer) CloseSession(connID string) {
 	session := s.getSessionByNonce(connID)
 	if session != nil {
-		s.addr2Session.Delete(session.RemoteAddr.String())
+		s.detachUdpSessionAddr(session)
 		session.Destroy()
 	}
 	s.nonce2Session.Delete(connID)
@@ -317,4 +316,25 @@ func (s *UdpServer) addUdpSession(addr *net.UDPAddr, session *UdpSession) {
 
 func (s *UdpServer) removeUdpSession(addr *net.UDPAddr) {
 	s.addr2Session.Delete(addr.String())
+}
+
+func (s *UdpServer) detachUdpSessionAddr(session *UdpSession) {
+	if session == nil || session.RemoteAddr == nil {
+		return
+	}
+	s.addr2Session.Delete(session.RemoteAddr.String())
+	session.RemoteAddr = nil
+}
+
+func (s *UdpServer) rebindUdpSessionAddr(addr *net.UDPAddr, session *UdpSession) {
+	if addr == nil || session == nil {
+		return
+	}
+	if session.RemoteAddr != nil && session.RemoteAddr.String() == addr.String() {
+		return
+	}
+	// 端口切换时先清理旧 addr 映射，再绑定新 addr。
+	s.detachUdpSessionAddr(session)
+	session.RemoteAddr = addr
+	s.addUdpSession(addr, session)
 }

@@ -13,6 +13,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/app/server/types"
 	"xiaozhi-esp32-server-golang/internal/data/client"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
+	msg_types "xiaozhi-esp32-server-golang/internal/data/msg"
 	. "xiaozhi-esp32-server-golang/logger"
 	log "xiaozhi-esp32-server-golang/logger"
 )
@@ -182,17 +183,22 @@ func (s *MqttUdpAdapter) connectAndRetry() {
 
 func (s *MqttUdpAdapter) checkClientActive() error {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(sessionCleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-s.stopCtx.Done():
 				return
 			case <-ticker.C:
+				now := time.Now()
 				s.deviceId2Conn.Range(func(key, value interface{}) bool {
 					conn := value.(*MqttUdpConn)
-					if !conn.IsActive() {
+					if !conn.IsMqttActive(now) {
 						conn.Destroy()
+						return true
+					}
+					if !conn.IsUdpActive(now) {
+						conn.ReleaseUdpSession()
 					}
 					return true
 				})
@@ -234,10 +240,7 @@ func (s *MqttUdpAdapter) handleDisconnect(deviceId string) {
 		Debugf("handleDisconnect, deviceId: %s not found", deviceId)
 		return
 	}
-	udpServer := s.getUdpServer()
-	if udpServer != nil {
-		udpServer.CloseSession(conn.UdpSession.ConnId)
-	}
+	conn.ReleaseUdpSession()
 	s.deviceId2Conn.Delete(deviceId)
 }
 
@@ -311,14 +314,9 @@ func (s *MqttUdpAdapter) processMessage() {
 			deviceSession := s.getDeviceSession(deviceId)
 			if deviceSession == nil {
 				// 从UDP服务端获取会话信息
-				udpServer := s.getUdpServer()
-				if udpServer == nil {
-					Errorf("udpServer is nil, deviceId: %s", deviceId)
-					continue
-				}
-				udpSession := udpServer.CreateSession(deviceId, "")
-				if udpSession == nil {
-					Errorf("创建 udpSession 失败, deviceId: %s", deviceId)
+				udpServer, udpSession, err := s.createUdpSession(deviceId)
+				if err != nil {
+					Errorf("创建 udpSession 失败, deviceId: %s, err: %v", deviceId, err)
 					continue
 				}
 
@@ -330,10 +328,7 @@ func (s *MqttUdpAdapter) processMessage() {
 					continue
 				}
 				deviceSession = NewMqttUdpConn(deviceId, publicTopic, mqttClient, udpServer, udpSession)
-
-				strAesKey, strFullNonce := udpSession.GetAesKeyAndNonce()
-				deviceSession.SetData("aes_key", strAesKey)
-				deviceSession.SetData("full_nonce", strFullNonce)
+				s.bindUdpSessionData(deviceSession, udpSession)
 
 				//保存至deviceId2UdpSession
 				s.SetDeviceSession(deviceId, deviceSession)
@@ -341,6 +336,19 @@ func (s *MqttUdpAdapter) processMessage() {
 				deviceSession.OnClose(s.handleDisconnect)
 
 				s.onNewConnection(deviceSession)
+			} else if clientMsg.Type == msg_types.MessageTypeHello {
+				udpSession := deviceSession.GetUdpSession()
+				if udpSession == nil {
+					_, newUdpSession, err := s.createUdpSession(deviceId)
+					if err != nil {
+						Errorf("hello 重建 udpSession 失败, deviceId: %s, err: %v", deviceId, err)
+						continue
+					}
+					s.bindUdpSessionData(deviceSession, newUdpSession)
+				} else if udpServer := s.getUdpServer(); udpServer != nil {
+					// 设备短线重连后端口可能变化，先解绑旧地址，后续首包按 connID 自动重绑。
+					udpServer.detachUdpSessionAddr(udpSession)
+				}
 			}
 
 			err := deviceSession.PushMsgToRecvCmd(msg.Payload())
@@ -350,6 +358,28 @@ func (s *MqttUdpAdapter) processMessage() {
 			}
 		}
 	}
+}
+
+func (s *MqttUdpAdapter) createUdpSession(deviceID string) (*UdpServer, *UdpSession, error) {
+	udpServer := s.getUdpServer()
+	if udpServer == nil {
+		return nil, nil, fmt.Errorf("udpServer is nil")
+	}
+	udpSession := udpServer.CreateSession(deviceID, "")
+	if udpSession == nil {
+		return nil, nil, fmt.Errorf("udpSession is nil")
+	}
+	return udpServer, udpSession, nil
+}
+
+func (s *MqttUdpAdapter) bindUdpSessionData(conn *MqttUdpConn, udpSession *UdpSession) {
+	if conn == nil || udpSession == nil {
+		return
+	}
+	conn.SetUdpSession(udpSession)
+	strAesKey, strFullNonce := udpSession.GetAesKeyAndNonce()
+	conn.SetData("aes_key", strAesKey)
+	conn.SetData("full_nonce", strFullNonce)
 }
 
 func (s *MqttUdpAdapter) getDeviceIdByTopic(topic string) (string, string) {
