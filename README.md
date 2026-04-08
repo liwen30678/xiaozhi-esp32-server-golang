@@ -71,6 +71,8 @@ sudo apt install -y libc++1 libc++abi1
 
 > 📖 完整依赖说明与 Windows/macOS 配置请参考 [config.md](doc/config.md)
 
+主程序、控制台前后端、声纹服务的分离编译与 AIO 打包流程请参考 [doc/compile_deploy.md](doc/compile_deploy.md)
+
 参考 [FunASR 官方文档](https://github.com/modelscope/FunASR/blob/main/runtime/docs/SDK_advanced_guide_online_zh.md) 部署。
 
 **编译与启动**
@@ -91,6 +93,7 @@ go build -o xiaozhi_server ./cmd/server/
 - [一键启动包教程](doc/quickstart_bundle_tutorial.md)
 - [Docker Compose 部署](doc/docker_compose.md)
 - [Docker 部署](doc/docker.md)
+- [编译与部署指南](doc/compile_deploy.md)
 - [配置详解](doc/config.md)
 
 ### 使用指南
