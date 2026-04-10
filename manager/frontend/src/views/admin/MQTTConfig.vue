@@ -214,22 +214,62 @@ const loadConfig = async () => {
 
 const handleSave = async () => {
   if (!formRef.value) return
-  
+
   await formRef.value.validate(async (valid) => {
     if (valid) {
       saving.value = true
       try {
         // 生成config_id，格式为"类型_名称"
         const generatedConfigId = `mqtt_${form.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`
-        
-        const configData = {
-          name: form.name,
-          config_id: generatedConfigId,
-          is_default: true,
-          json_data: generateConfig()
-        }
-        
+
+        let configData, isUpdate = false
+
+        // 如果是更新操作，先获取现有配置，只更新 enable 字段，保留其他配置
         if (configId.value) {
+          const response = await api.get('/admin/mqtt-configs')
+          const configs = response.data.data || []
+          const existingConfig = configs.find(c => c.id === configId.value)
+
+          if (existingConfig) {
+            // 解析现有配置，保留其他字段，只更新 enable
+            const existingData = JSON.parse(existingConfig.json_data || '{}')
+            existingData.enable = form.enable
+
+            // 同时更新其他字段（如果表单有值则用表单值）
+            if (form.broker) existingData.broker = form.broker
+            if (form.type) existingData.type = form.type
+            if (form.port) existingData.port = form.port
+            if (form.client_id) existingData.client_id = form.client_id
+            if (form.username) existingData.username = form.username
+            if (form.password) existingData.password = form.password
+
+            configData = {
+              name: form.name,
+              config_id: generatedConfigId,
+              is_default: true,
+              json_data: JSON.stringify(existingData)
+            }
+            isUpdate = true
+          } else {
+            // 配置不存在，走新建逻辑
+            configData = {
+              name: form.name,
+              config_id: generatedConfigId,
+              is_default: true,
+              json_data: generateConfig()
+            }
+          }
+        } else {
+          // 新建配置，使用完整表单数据
+          configData = {
+            name: form.name,
+            config_id: generatedConfigId,
+            is_default: true,
+            json_data: generateConfig()
+          }
+        }
+
+        if (isUpdate) {
           // 更新现有配置
           await api.put(`/admin/mqtt-configs/${configId.value}`, configData)
           ElMessage.success('更新成功')

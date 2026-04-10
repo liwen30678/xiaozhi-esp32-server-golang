@@ -616,24 +616,45 @@ async function saveMqttConfig() {
   const host = otaForm.host?.trim() || '127.0.0.1'
   const port = Number(otaForm.mqttServerPort) || 1883
   const useTls = port === 8883
-  const configData = {
-    enable: true,
-    broker: host,
-    type: useTls ? 'ssl' : 'tcp',
-    port,
-    client_id: 'xiaozhi_manager',
-    username: MQTT_SERVER_DEFAULT_USER,
-    password: MQTT_SERVER_DEFAULT_PASS
+
+  // 先获取现有配置，只更新 enable 字段，保留其他配置不变
+  const resGet = await api.get('/admin/mqtt-configs')
+  const list = resGet.data?.data || []
+  const existing = list.find(c => c.is_default) || list[0]
+
+  let configData
+  if (existing?.id) {
+    // 解析现有配置，保留其他字段
+    const existingData = JSON.parse(existing.json_data || '{}')
+    existingData.enable = true
+    // 同时更新与 mqtt_server 相关的字段
+    existingData.broker = host
+    existingData.type = useTls ? 'ssl' : 'tcp'
+    existingData.port = port
+    existingData.client_id = existingData.client_id || 'xiaozhi_manager'
+    existingData.username = MQTT_SERVER_DEFAULT_USER
+    existingData.password = MQTT_SERVER_DEFAULT_PASS
+    configData = existingData
+  } else {
+    // 新建配置，使用完整数据
+    configData = {
+      enable: true,
+      broker: host,
+      type: useTls ? 'ssl' : 'tcp',
+      port,
+      client_id: 'xiaozhi_manager',
+      username: MQTT_SERVER_DEFAULT_USER,
+      password: MQTT_SERVER_DEFAULT_PASS
+    }
   }
+
   const payload = {
     name: 'MQTT配置',
     config_id: 'mqtt_wizard_default',
     is_default: true,
     json_data: JSON.stringify(configData)
   }
-  const res = await api.get('/admin/mqtt-configs')
-  const list = res.data?.data || []
-  const existing = list.find(c => c.is_default) || list[0]
+
   if (existing?.id) {
     await api.put(`/admin/mqtt-configs/${existing.id}`, payload)
   } else {
