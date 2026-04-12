@@ -46,6 +46,9 @@ const (
 	MemoryModeNone  = "none"
 	MemoryModeShort = "short"
 	MemoryModeLong  = "long"
+
+	SpeakerChatModeOff            = "off"
+	SpeakerChatModeIdentifiedOnly = "identified_only"
 )
 
 func NormalizeMemoryMode(mode string) string {
@@ -56,6 +59,15 @@ func NormalizeMemoryMode(mode string) string {
 		return MemoryModeLong
 	default:
 		return MemoryModeShort
+	}
+}
+
+func NormalizeSpeakerChatMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case SpeakerChatModeIdentifiedOnly:
+		return SpeakerChatModeIdentifiedOnly
+	default:
+		return SpeakerChatModeOff
 	}
 }
 
@@ -153,6 +165,22 @@ func (c *ClientState) IsRealTime() bool {
 
 func (c *ClientState) GetMemoryMode() string {
 	return NormalizeMemoryMode(c.DeviceConfig.MemoryMode)
+}
+
+func (c *ClientState) GetSpeakerChatMode() string {
+	return NormalizeSpeakerChatMode(c.DeviceConfig.SpeakerChatMode)
+}
+
+func (c *ClientState) RequireMatchedSpeakerForChat() bool {
+	return c.HasSpeakerGroups() && c.GetSpeakerChatMode() == SpeakerChatModeIdentifiedOnly
+}
+
+func (c *ClientState) HasMatchedConfiguredSpeaker(result *speaker.IdentifyResult) bool {
+	if result == nil || !result.Identified {
+		return false
+	}
+	_, ok := c.DeviceConfig.VoiceIdentify[result.SpeakerName]
+	return ok
 }
 
 func (c *ClientState) GetDeviceIDOrAgentID() string {

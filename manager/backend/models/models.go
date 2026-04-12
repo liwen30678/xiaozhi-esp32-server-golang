@@ -52,14 +52,15 @@ type Device struct {
 type Agent struct {
 	ID              uint    `json:"id" gorm:"primarykey"`
 	UserID          uint    `json:"user_id" gorm:"not null"`
-	Name            string  `json:"name" gorm:"type:varchar(100);not null"`              // 昵称
-	CustomPrompt    string  `json:"custom_prompt" gorm:"type:text"`                      // 角色介绍(prompt)
-	LLMConfigID     *string `json:"llm_config_id" gorm:"type:varchar(100)"`              // 语言模型配置ID
-	TTSConfigID     *string `json:"tts_config_id" gorm:"type:varchar(100)"`              // 音色配置ID
-	Voice           *string `json:"voice" gorm:"type:varchar(200)"`                      // 音色值
-	ASRSpeed        string  `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`  // 语音识别速度: normal/patient/fast
-	MemoryMode      string  `json:"memory_mode" gorm:"type:varchar(20);default:'short'"` // 记忆模式: none/short/long
-	MCPServiceNames string  `json:"mcp_service_names" gorm:"type:text"`                  // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
+	Name            string  `json:"name" gorm:"type:varchar(100);not null"`                  // 昵称
+	CustomPrompt    string  `json:"custom_prompt" gorm:"type:text"`                          // 角色介绍(prompt)
+	LLMConfigID     *string `json:"llm_config_id" gorm:"type:varchar(100)"`                  // 语言模型配置ID
+	TTSConfigID     *string `json:"tts_config_id" gorm:"type:varchar(100)"`                  // 音色配置ID
+	Voice           *string `json:"voice" gorm:"type:varchar(200)"`                          // 音色值
+	ASRSpeed        string  `json:"asr_speed" gorm:"type:varchar(20);default:'normal'"`      // 语音识别速度: normal/patient/fast
+	MemoryMode      string  `json:"memory_mode" gorm:"type:varchar(20);default:'short'"`     // 记忆模式: none/short/long
+	SpeakerChatMode string  `json:"speaker_chat_mode" gorm:"type:varchar(32);default:'off'"` // 声纹聊天模式: off/identified_only
+	MCPServiceNames string  `json:"mcp_service_names" gorm:"type:text"`                      // 逗号分隔的MCP服务名，空=使用全部已启用全局MCP服务
 	// OpenClaw 配置，JSON字符串，结构：
 	// {"allowed":true,"enter_keywords":["进入openclaw"],"exit_keywords":["退出openclaw"]}
 	OpenClawConfig string    `json:"openclaw_config" gorm:"type:text"`

@@ -11,6 +11,10 @@ type SpeakerManager struct {
 	provider speaker.SpeakerProvider
 }
 
+type peekableSpeakerProvider interface {
+	PeekAndIdentify(ctx context.Context, requestID string) (*speaker.IdentifyResult, bool, error)
+}
+
 // NewSpeakerManager 创建声纹管理器
 func NewSpeakerManager(provider speaker.SpeakerProvider) *SpeakerManager {
 	return &SpeakerManager{
@@ -41,4 +45,17 @@ func (sm *SpeakerManager) Close() error {
 // IsActive 检查是否处于激活状态
 func (sm *SpeakerManager) IsActive() bool {
 	return sm.provider.IsActive()
+}
+
+// PeekAndIdentify 获取声纹中间识别结果（不结束当前轮次）
+// 返回: 识别结果, 是否被服务端防抖, 错误
+func (sm *SpeakerManager) PeekAndIdentify(ctx context.Context, requestID string) (*speaker.IdentifyResult, bool, error) {
+	if sm == nil || sm.provider == nil {
+		return nil, false, nil
+	}
+	peekProvider, ok := sm.provider.(peekableSpeakerProvider)
+	if !ok {
+		return nil, false, nil
+	}
+	return peekProvider.PeekAndIdentify(ctx, requestID)
 }

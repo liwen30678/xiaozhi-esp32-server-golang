@@ -49,6 +49,13 @@
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="声纹聊天" width="180">
+        <template #default="{ row }">
+          <el-tag :type="getSpeakerChatModeType(row.speaker_chat_mode)">
+            {{ getSpeakerChatModeText(row.speaker_chat_mode) }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="status" label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.status === 'active' ? 'success' : 'info'">
@@ -124,6 +131,12 @@
             <el-option label="无记忆" value="none" />
             <el-option label="短记忆" value="short" />
             <el-option label="长记忆" value="long" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="只允许声纹聊天" prop="speaker_chat_mode">
+          <el-select v-model="agentForm.speaker_chat_mode" style="width: 100%">
+            <el-option label="关闭" value="off" />
+            <el-option label="仅命中声纹时允许聊天" value="identified_only" />
           </el-select>
         </el-form-item>
         <el-form-item label="MCP服务">
@@ -452,6 +465,7 @@ const agentForm = ref({
   tts_config_id: null,
   asr_speed: 'normal',
   memory_mode: 'short',
+  speaker_chat_mode: 'off',
   mcp_service_names: '',
   openclaw_allowed: false,
   openclaw_enter_keywords: [...OPENCLAW_DEFAULT_ENTER_KEYWORDS],
@@ -464,6 +478,7 @@ const agentRules = {
   name: [{ required: true, message: '请输入智能体昵称', trigger: 'blur' }],
   asr_speed: [{ required: true, message: '请选择语音识别速度', trigger: 'change' }],
   memory_mode: [{ required: true, message: '请选择记忆模式', trigger: 'change' }],
+  speaker_chat_mode: [{ required: true, message: '请选择声纹聊天限制', trigger: 'change' }],
   status: [{ required: true, message: '请选择状态', trigger: 'change' }]
 }
 
@@ -517,6 +532,7 @@ const editAgent = (agent) => {
     tts_config_id: agent.tts_config_id,
     asr_speed: agent.asr_speed || 'normal',
     memory_mode: agent.memory_mode || 'short',
+    speaker_chat_mode: agent.speaker_chat_mode || 'off',
     mcp_service_names: agent.mcp_service_names || '',
     openclaw_allowed: !!openclawConfig.allowed,
     openclaw_enter_keywords: normalizeKeywordList(openclawConfig.enter_keywords),
@@ -611,6 +627,7 @@ const resetForm = () => {
     tts_config_id: null,
     asr_speed: 'normal',
     memory_mode: 'short',
+    speaker_chat_mode: 'off',
     mcp_service_names: '',
     openclaw_allowed: false,
     openclaw_enter_keywords: [...OPENCLAW_DEFAULT_ENTER_KEYWORDS],
@@ -670,6 +687,22 @@ const getMemoryModeType = (mode) => {
     long: 'success'
   }
   return typeMap[mode] || ''
+}
+
+const getSpeakerChatModeText = (mode) => {
+  const modeMap = {
+    off: '关闭',
+    identified_only: '仅命中声纹'
+  }
+  return modeMap[mode] || '关闭'
+}
+
+const getSpeakerChatModeType = (mode) => {
+  const typeMap = {
+    off: 'info',
+    identified_only: 'warning'
+  }
+  return typeMap[mode] || 'info'
 }
 
 const normalizeKeywordList = (keywords) => {

@@ -74,17 +74,21 @@ func (p *AsrServerProvider) StartStreaming(ctx context.Context, sampleRate int, 
 // SendAudioChunk 发送音频块
 func (p *AsrServerProvider) SendAudioChunk(ctx context.Context, pcmData []float32) error {
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	isActive := p.isActive
+	streamingClient := p.streamingClient
+	p.mutex.Unlock()
 
-	if !p.isActive {
+	if !isActive {
 		return nil // 未激活，静默忽略
 	}
 
-	err := p.streamingClient.SendAudioChunk(pcmData)
+	err := streamingClient.SendAudioChunk(pcmData)
 	if err != nil {
 		log.Warnf("发送音频块到声纹识别服务失败: %v", err)
 		// 发送失败时，标记为非激活状态
+		p.mutex.Lock()
 		p.isActive = false
+		p.mutex.Unlock()
 		return err
 	}
 
@@ -94,14 +98,15 @@ func (p *AsrServerProvider) SendAudioChunk(ctx context.Context, pcmData []float3
 // FinishAndIdentify 完成识别并获取结果
 func (p *AsrServerProvider) FinishAndIdentify(ctx context.Context) (*IdentifyResult, error) {
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
 	if !p.isActive {
+		p.mutex.Unlock()
 		return nil, nil // 未激活，返回 nil
 	}
-
-	result, err := p.streamingClient.FinishAndIdentify()
 	p.isActive = false
+	streamingClient := p.streamingClient
+	p.mutex.Unlock()
+
+	result, err := streamingClient.FinishAndIdentify(ctx)
 
 	if err != nil {
 		log.Warnf("获取声纹识别结果失败: %v", err)
@@ -109,6 +114,38 @@ func (p *AsrServerProvider) FinishAndIdentify(ctx context.Context) (*IdentifyRes
 	}
 
 	return result, nil
+}
+
+// PeekAndIdentify 获取中间识别结果（不结束当前轮次）
+// 返回: 识别结果, 是否被服务端防抖, 错误
+func (p *AsrServerProvider) PeekAndIdentify(ctx context.Context, requestID string) (*IdentifyResult, bool, error) {
+	select {
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	default:
+	}
+
+	p.mutex.Lock()
+	isActive := p.isActive
+	streamingClient := p.streamingClient
+	p.mutex.Unlock()
+
+	if !isActive {
+		return nil, false, nil
+	}
+
+	result, throttled, err := streamingClient.PeekAndIdentify(ctx, requestID)
+	if err != nil {
+		if !streamingClient.IsConnected() {
+			p.mutex.Lock()
+			p.isActive = false
+			p.mutex.Unlock()
+		}
+		log.Warnf("获取声纹中间识别结果失败: %v", err)
+		return nil, throttled, err
+	}
+
+	return result, throttled, nil
 }
 
 // Close 关闭声纹提供者

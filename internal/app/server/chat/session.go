@@ -57,9 +57,10 @@ type ChatSession struct {
 	chatTextQueue *util.Queue[AsrResponseChannelItem]
 
 	// 声纹识别结果暂存（带锁保护）
-	speakerResultMu      sync.RWMutex
-	pendingSpeakerResult *speaker.IdentifyResult
-	speakerResultReady   chan struct{} // 仅用于通知就绪，不传数据
+	speakerResultMu        sync.RWMutex
+	pendingSpeakerResult   *speaker.IdentifyResult
+	speakerResultReady     chan struct{} // 仅用于通知就绪，不传数据
+	turnSpeakerInterrupted atomic.Bool
 
 	// hello 幂等控制：MQTT-UDP 短时离线重连会重复发送 hello，避免重复初始化造成资源泄漏。
 	helloMu        sync.Mutex
@@ -1600,6 +1601,44 @@ func hasAvailableKnowledgeBase(knowledgeBases []types.KnowledgeBaseRef) bool {
 		return true
 	}
 	return false
+}
+
+func (s *ChatSession) MarkTurnSpeakerInterrupted() {
+	if s == nil {
+		return
+	}
+	s.turnSpeakerInterrupted.Store(true)
+}
+
+func (s *ChatSession) ConsumeTurnSpeakerInterrupted() bool {
+	if s == nil {
+		return false
+	}
+	return s.turnSpeakerInterrupted.Swap(false)
+}
+
+func (s *ChatSession) ResetTurnSpeakerInterrupted() {
+	if s == nil {
+		return
+	}
+	s.turnSpeakerInterrupted.Store(false)
+}
+
+func (s *ChatSession) ShouldAllowSpeakerChat(speakerResult *speaker.IdentifyResult, speakerInterrupted bool) (bool, string) {
+	if s == nil || s.clientState == nil {
+		return true, ""
+	}
+
+	matchedConfiguredSpeaker := s.clientState.HasMatchedConfiguredSpeaker(speakerResult)
+	if speakerInterrupted && !matchedConfiguredSpeaker {
+		return false, "speaker_interrupt_without_identify"
+	}
+
+	if s.clientState.RequireMatchedSpeakerForChat() && !matchedConfiguredSpeaker {
+		return false, "speaker_chat_mode_identified_only_not_matched"
+	}
+
+	return true, ""
 }
 
 // switchTTSForSpeaker 为识别的说话人切换TTS

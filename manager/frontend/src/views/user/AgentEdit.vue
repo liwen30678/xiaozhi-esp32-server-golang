@@ -231,6 +231,17 @@
           </div>
 
           <div class="form-group">
+            <label class="form-label">只允许声纹聊天</label>
+            <el-select v-model="form.speaker_chat_mode" placeholder="请选择声纹聊天限制" size="large" style="width: 100%">
+              <el-option label="关闭" value="off" />
+              <el-option label="仅命中声纹时允许聊天" value="identified_only" />
+            </el-select>
+            <div class="form-help">
+              智能体配置了声纹组时，可限制为只有命中已配置声纹的说话人才允许继续聊天。
+            </div>
+          </div>
+
+          <div class="form-group">
             <label class="form-label">OpenClaw</label>
             <el-button type="primary" size="large" style="width: 100%" @click="showOpenClawSettings">
               查看openclaw
@@ -536,6 +547,7 @@ const form = reactive({
   asr_speed: 'normal',
   knowledge_base_ids: [],
   memory_mode: 'short',
+  speaker_chat_mode: 'off',
   mcp_service_names: '',
   openclaw_allowed: false,
   openclaw_enter_keywords: [...OPENCLAW_DEFAULT_ENTER_KEYWORDS],
@@ -657,6 +669,7 @@ const loadAgent = async () => {
       voice: agent.voice || null,
       knowledge_base_ids: agent.knowledge_base_ids || [],
       memory_mode: agent.memory_mode || 'short',
+      speaker_chat_mode: agent.speaker_chat_mode || 'off',
       mcp_service_names: agent.mcp_service_names || '',
       openclaw_allowed: !!openclawConfig.allowed,
       openclaw_enter_keywords: normalizeKeywordList(openclawConfig.enter_keywords),

@@ -302,6 +302,7 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		Voice            *string                 `json:"voice"`
 		ASRSpeed         string                  `json:"asr_speed"`
 		MemoryMode       string                  `json:"memory_mode"`
+		SpeakerChatMode  string                  `json:"speaker_chat_mode"`
 		MCPServiceNames  string                  `json:"mcp_service_names"`
 		OpenClaw         *OpenClawConfigResponse `json:"openclaw"`
 		KnowledgeBaseIDs []uint                  `json:"knowledge_base_ids"`
@@ -317,6 +318,7 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		req.ASRSpeed = "normal"
 	}
 	req.MemoryMode = normalizeMemoryMode(req.MemoryMode)
+	req.SpeakerChatMode = normalizeAgentSpeakerChatMode(req.SpeakerChatMode)
 	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -337,6 +339,7 @@ func (uc *UserController) CreateAgent(c *gin.Context) {
 		Voice:           req.Voice,
 		ASRSpeed:        req.ASRSpeed,
 		MemoryMode:      req.MemoryMode,
+		SpeakerChatMode: req.SpeakerChatMode,
 		MCPServiceNames: normalizedMCPServiceNames,
 		Status:          "active",
 	}
@@ -418,6 +421,7 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 		Voice            *string                 `json:"voice"`
 		ASRSpeed         string                  `json:"asr_speed"`
 		MemoryMode       *string                 `json:"memory_mode"`
+		SpeakerChatMode  *string                 `json:"speaker_chat_mode"`
 		MCPServiceNames  string                  `json:"mcp_service_names"`
 		OpenClaw         *OpenClawConfigResponse `json:"openclaw"`
 		KnowledgeBaseIDs []uint                  `json:"knowledge_base_ids"`
@@ -444,6 +448,11 @@ func (uc *UserController) UpdateAgent(c *gin.Context) {
 		agent.MemoryMode = normalizeMemoryMode(*req.MemoryMode)
 	} else if strings.TrimSpace(agent.MemoryMode) == "" {
 		agent.MemoryMode = "short"
+	}
+	if req.SpeakerChatMode != nil {
+		agent.SpeakerChatMode = normalizeAgentSpeakerChatMode(*req.SpeakerChatMode)
+	} else if strings.TrimSpace(agent.SpeakerChatMode) == "" {
+		agent.SpeakerChatMode = "off"
 	}
 	normalizedMCPServiceNames, err := uc.normalizeAndValidateAgentMCPServices(req.MCPServiceNames)
 	if err != nil {

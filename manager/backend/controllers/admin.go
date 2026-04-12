@@ -53,6 +53,15 @@ func normalizeAgentMemoryMode(mode string) string {
 	}
 }
 
+func normalizeAgentSpeakerChatMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "identified_only":
+		return "identified_only"
+	default:
+		return "off"
+	}
+}
+
 type AdminController struct {
 	DB                  *gorm.DB
 	WebSocketController *WebSocketController
@@ -104,6 +113,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 		Prompt          string                      `json:"prompt"`
 		AgentID         string                      `json:"agent_id"`
 		MemoryMode      string                      `json:"memory_mode"`
+		SpeakerChatMode string                      `json:"speaker_chat_mode"`
 		MCPServiceNames string                      `json:"mcp_service_names"`
 		OpenClaw        OpenClawConfigResponse      `json:"openclaw"`
 		ConfigSource    string                      `json:"config_source"` // 新增：配置来源
@@ -111,6 +121,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 	var response ConfigResponse
 	response.MemoryMode = "short"
+	response.SpeakerChatMode = "off"
 	response.OpenClaw = OpenClawConfigResponse{
 		Allowed:       false,
 		EnterKeywords: []string{},
@@ -154,6 +165,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 
 	if deviceFound && agent.ID != 0 {
 		response.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+		response.SpeakerChatMode = normalizeAgentSpeakerChatMode(agent.SpeakerChatMode)
 		response.MCPServiceNames = normalizeMCPServiceNamesCSV(agent.MCPServiceNames)
 		response.OpenClaw = buildOpenClawConfigFromAgent(agent)
 	}
@@ -3157,6 +3169,7 @@ func (ac *AdminController) CreateAgent(c *gin.Context) {
 	}
 
 	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	agent.SpeakerChatMode = normalizeAgentSpeakerChatMode(agent.SpeakerChatMode)
 	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -3211,6 +3224,7 @@ func (ac *AdminController) UpdateAgent(c *gin.Context) {
 	}
 
 	agent.MemoryMode = normalizeAgentMemoryMode(agent.MemoryMode)
+	agent.SpeakerChatMode = normalizeAgentSpeakerChatMode(agent.SpeakerChatMode)
 	normalizedMCPServiceNames, err := ac.normalizeAndValidateAgentMCPServices(agent.MCPServiceNames)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

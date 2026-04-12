@@ -1,6 +1,7 @@
 package speaker
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,22 @@ type StreamingClient struct {
 	conn       *websocket.Conn
 	sampleRate int
 	mutex      sync.Mutex
+	writeMu    sync.Mutex
+	peekMu     sync.Mutex
+	finishWait chan finishResponse
+	peekWaits  map[string]chan peekResponse
+	lastPeekAt time.Time
+}
+
+type finishResponse struct {
+	result *IdentifyResult
+	err    error
+}
+
+type peekResponse struct {
+	result    *IdentifyResult
+	throttled bool
+	err       error
 }
 
 // NewStreamingClient 创建流式识别客户端
@@ -85,6 +102,8 @@ func (sc *StreamingClient) Connect(sampleRate int, agentId string, threshold flo
 	}
 
 	sc.conn = conn
+	sc.finishWait = nil
+	sc.peekWaits = make(map[string]chan peekResponse)
 
 	// 设置读取超时
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -102,17 +121,17 @@ func (sc *StreamingClient) Connect(sampleRate int, agentId string, threshold flo
 		sc.conn = nil
 		return fmt.Errorf("意外的连接消息: %v", connectionMsg)
 	}
+	conn.SetReadDeadline(time.Time{})
 
 	log.Debugf("声纹识别 WebSocket 连接成功，采样率: %d Hz, agent_id: %s, 阈值: %.4f", sampleRate, agentId, threshold)
+	go sc.readLoop(conn)
 	return nil
 }
 
 // SendAudioChunk 发送音频数据块
 func (sc *StreamingClient) SendAudioChunk(audioData []float32) error {
-	sc.mutex.Lock()
-	defer sc.mutex.Unlock()
-
-	if sc.conn == nil {
+	conn := sc.getConn()
+	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
@@ -120,9 +139,12 @@ func (sc *StreamingClient) SendAudioChunk(audioData []float32) error {
 	chunkBytes := float32ToBytes(audioData)
 
 	// 发送二进制消息
-	if err := sc.conn.WriteMessage(websocket.BinaryMessage, chunkBytes); err != nil {
+	sc.writeMu.Lock()
+	err := conn.WriteMessage(websocket.BinaryMessage, chunkBytes)
+	sc.writeMu.Unlock()
+	if err != nil {
 		// 发送失败时关闭连接
-		sc.closeConnectionLocked()
+		sc.failConnection(conn, fmt.Errorf("发送音频数据失败: %v", err))
 		return fmt.Errorf("发送音频数据失败: %v", err)
 	}
 
@@ -130,71 +152,135 @@ func (sc *StreamingClient) SendAudioChunk(audioData []float32) error {
 }
 
 // FinishAndIdentify 完成输入并获取识别结果
-func (sc *StreamingClient) FinishAndIdentify() (*IdentifyResult, error) {
-	sc.mutex.Lock()
-	defer sc.mutex.Unlock()
+func (sc *StreamingClient) FinishAndIdentify(ctx context.Context) (*IdentifyResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
+	resultCh := make(chan finishResponse, 1)
+
+	sc.mutex.Lock()
 	if sc.conn == nil {
+		sc.mutex.Unlock()
 		return nil, fmt.Errorf("not connected")
 	}
+	if sc.finishWait != nil {
+		sc.mutex.Unlock()
+		return nil, fmt.Errorf("finish already in progress")
+	}
+	sc.finishWait = resultCh
+	conn := sc.conn
+	sc.mutex.Unlock()
 
 	// 发送完成命令
 	finishCmd := map[string]interface{}{
 		"action": "finish",
 	}
-	if err := sc.conn.WriteJSON(finishCmd); err != nil {
-		sc.closeConnectionLocked()
+	sc.writeMu.Lock()
+	err := conn.WriteJSON(finishCmd)
+	sc.writeMu.Unlock()
+	if err != nil {
+		sc.clearFinishWait(resultCh)
+		sc.failConnection(conn, fmt.Errorf("发送完成命令失败: %v", err))
 		return nil, fmt.Errorf("发送完成命令失败: %v", err)
 	}
 
-	// 设置读取超时
-	sc.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
 
-	// 等待识别结果
-	for {
-		messageType, message, err := sc.conn.ReadMessage()
-		if err != nil {
-			sc.closeConnectionLocked()
-			return nil, fmt.Errorf("读取消息失败: %v", err)
+	select {
+	case resp := <-resultCh:
+		return resp.result, resp.err
+	case <-ctx.Done():
+		sc.clearFinishWait(resultCh)
+		return nil, ctx.Err()
+	case <-timer.C:
+		sc.clearFinishWait(resultCh)
+		return nil, fmt.Errorf("等待最终识别结果超时")
+	}
+}
+
+// PeekAndIdentify 获取中间识别结果（不结束当前轮次）
+// 返回: 识别结果, 是否被服务端防抖, 错误
+func (sc *StreamingClient) PeekAndIdentify(ctx context.Context, requestID string) (*IdentifyResult, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if requestID == "" {
+		requestID = fmt.Sprintf("peek_%d", time.Now().UnixNano())
+	}
+
+	sc.peekMu.Lock()
+	peekStarted := false
+	defer func() {
+		if peekStarted {
+			sc.lastPeekAt = time.Now()
 		}
+		sc.peekMu.Unlock()
+	}()
+	if !sc.lastPeekAt.IsZero() && time.Since(sc.lastPeekAt) < 200*time.Millisecond {
+		return nil, true, nil
+	}
+	peekStarted = true
 
-		if messageType == websocket.TextMessage {
-			var msg map[string]interface{}
-			if err := json.Unmarshal(message, &msg); err != nil {
-				log.Warnf("解析消息失败: %v", err)
-				continue
-			}
+	respCh := make(chan peekResponse, 1)
 
-			if msgType, ok := msg["type"].(string); ok {
-				switch msgType {
-				case "result":
-					// 连接保持打开，供下次识别复用
-					if resultData, ok := msg["result"].(map[string]interface{}); ok {
-						result := &IdentifyResult{
-							Identified:  getBool(resultData, "identified"),
-							SpeakerID:   getString(resultData, "speaker_id"),
-							SpeakerName: getString(resultData, "speaker_name"),
-							Confidence:  getFloat32(resultData, "confidence"),
-							Threshold:   getFloat32(resultData, "threshold"),
-						}
-						return result, nil
-					}
-				case "error":
-					sc.closeConnectionLocked()
-					if errMsg, ok := msg["message"].(string); ok {
-						return nil, fmt.Errorf("服务器错误: %s", errMsg)
-					}
-				}
-			}
-		}
+	sc.mutex.Lock()
+	if sc.conn == nil {
+		sc.mutex.Unlock()
+		return nil, false, fmt.Errorf("not connected")
+	}
+	if sc.peekWaits == nil {
+		sc.peekWaits = make(map[string]chan peekResponse)
+	}
+	sc.peekWaits[requestID] = respCh
+	conn := sc.conn
+	sc.mutex.Unlock()
+
+	peekCmd := map[string]interface{}{
+		"action": "peek",
+	}
+	peekCmd["request_id"] = requestID
+	sc.writeMu.Lock()
+	err := conn.WriteJSON(peekCmd)
+	sc.writeMu.Unlock()
+	if err != nil {
+		sc.removePeekWait(requestID, respCh)
+		sc.failConnection(conn, fmt.Errorf("发送peek命令失败: %v", err))
+		return nil, false, fmt.Errorf("发送peek命令失败: %v", err)
+	}
+
+	timer := time.NewTimer(1500 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case resp := <-respCh:
+		return resp.result, resp.throttled, resp.err
+	case <-ctx.Done():
+		sc.removePeekWait(requestID, respCh)
+		return nil, false, ctx.Err()
+	case <-timer.C:
+		sc.removePeekWait(requestID, respCh)
+		return nil, false, fmt.Errorf("等待peek结果超时")
 	}
 }
 
 // Close 关闭连接
 func (sc *StreamingClient) Close() error {
 	sc.mutex.Lock()
-	defer sc.mutex.Unlock()
-	return sc.closeConnectionLocked()
+	conn := sc.conn
+	sc.conn = nil
+	finishWait, peekWaits := sc.takePendingLocked()
+	sc.mutex.Unlock()
+
+	if conn != nil {
+		if err := conn.Close(); err != nil {
+			sc.signalPending(finishWait, peekWaits, fmt.Errorf("连接已关闭: %v", err))
+			return err
+		}
+	}
+	sc.signalPending(finishWait, peekWaits, fmt.Errorf("连接已关闭"))
+	return nil
 }
 
 // closeConnectionLocked 关闭连接（必须在已持有 mutex 的情况下调用）
@@ -221,11 +307,160 @@ func (sc *StreamingClient) pingConnectionLocked() bool {
 	}
 
 	// 使用 Ping 消息检测连接活性
+	sc.writeMu.Lock()
 	sc.conn.SetWriteDeadline(time.Now().Add(1000 * time.Millisecond))
 	err := sc.conn.WriteMessage(websocket.PingMessage, nil)
 	sc.conn.SetWriteDeadline(time.Time{})
+	sc.writeMu.Unlock()
 
 	return err == nil
+}
+
+func (sc *StreamingClient) getConn() *websocket.Conn {
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
+	return sc.conn
+}
+
+func (sc *StreamingClient) clearFinishWait(waitCh chan finishResponse) {
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
+	if sc.finishWait == waitCh {
+		sc.finishWait = nil
+	}
+}
+
+func (sc *StreamingClient) removePeekWait(requestID string, waitCh chan peekResponse) {
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
+	if existing, ok := sc.peekWaits[requestID]; ok && existing == waitCh {
+		delete(sc.peekWaits, requestID)
+	}
+}
+
+func (sc *StreamingClient) takePendingLocked() (chan finishResponse, []chan peekResponse) {
+	finishWait := sc.finishWait
+	sc.finishWait = nil
+
+	peekWaits := make([]chan peekResponse, 0, len(sc.peekWaits))
+	for requestID, waitCh := range sc.peekWaits {
+		peekWaits = append(peekWaits, waitCh)
+		delete(sc.peekWaits, requestID)
+	}
+	return finishWait, peekWaits
+}
+
+func (sc *StreamingClient) signalPending(finishWait chan finishResponse, peekWaits []chan peekResponse, err error) {
+	if finishWait != nil {
+		select {
+		case finishWait <- finishResponse{err: err}:
+		default:
+		}
+	}
+	for _, waitCh := range peekWaits {
+		if waitCh == nil {
+			continue
+		}
+		select {
+		case waitCh <- peekResponse{err: err}:
+		default:
+		}
+	}
+}
+
+func (sc *StreamingClient) failConnection(conn *websocket.Conn, err error) {
+	sc.mutex.Lock()
+	if sc.conn != conn {
+		sc.mutex.Unlock()
+		return
+	}
+	_ = sc.closeConnectionLocked()
+	finishWait, peekWaits := sc.takePendingLocked()
+	sc.mutex.Unlock()
+	sc.signalPending(finishWait, peekWaits, err)
+}
+
+func (sc *StreamingClient) readLoop(conn *websocket.Conn) {
+	for {
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			sc.failConnection(conn, fmt.Errorf("读取消息失败: %v", err))
+			return
+		}
+		if messageType != websocket.TextMessage {
+			continue
+		}
+
+		var msg map[string]interface{}
+		if err := json.Unmarshal(message, &msg); err != nil {
+			log.Warnf("解析声纹消息失败: %v", err)
+			continue
+		}
+
+		if !sc.dispatchMessage(msg) {
+			sc.failConnection(conn, parseServerError(msg))
+			return
+		}
+	}
+}
+
+func (sc *StreamingClient) dispatchMessage(msg map[string]interface{}) bool {
+	msgType, _ := msg["type"].(string)
+	switch msgType {
+	case "partial_result":
+		requestID := getString(msg, "request_id")
+		throttled := getBool(msg, "throttled")
+
+		sc.mutex.Lock()
+		waitCh := sc.peekWaits[requestID]
+		if waitCh != nil {
+			delete(sc.peekWaits, requestID)
+		}
+		sc.mutex.Unlock()
+		if waitCh == nil {
+			return true
+		}
+
+		var result *IdentifyResult
+		if resultData, ok := msg["result"].(map[string]interface{}); ok && resultData != nil {
+			result = identifyResultFromMap(resultData)
+		}
+		select {
+		case waitCh <- peekResponse{result: result, throttled: throttled}:
+		default:
+		}
+		return true
+	case "result":
+		sc.mutex.Lock()
+		waitCh := sc.finishWait
+		sc.finishWait = nil
+		sc.mutex.Unlock()
+		if waitCh == nil {
+			return true
+		}
+
+		var result *IdentifyResult
+		if resultData, ok := msg["result"].(map[string]interface{}); ok && resultData != nil {
+			result = identifyResultFromMap(resultData)
+		}
+		select {
+		case waitCh <- finishResponse{result: result}:
+		default:
+		}
+		return true
+	case "error":
+		return false
+	default:
+		// audio_received/connection/ready/cancelled/closing 等消息仅用于状态提示，这里直接忽略
+		return true
+	}
+}
+
+func parseServerError(msg map[string]interface{}) error {
+	if errMsg, ok := msg["message"].(string); ok && errMsg != "" {
+		return fmt.Errorf("服务器错误: %s", errMsg)
+	}
+	return fmt.Errorf("服务器错误: %v", msg)
 }
 
 // float32ToBytes 将 float32 数组转换为二进制字节（小端序）
@@ -258,4 +493,14 @@ func getFloat32(m map[string]interface{}, key string) float32 {
 		return float32(v)
 	}
 	return 0.0
+}
+
+func identifyResultFromMap(resultData map[string]interface{}) *IdentifyResult {
+	return &IdentifyResult{
+		Identified:  getBool(resultData, "identified"),
+		SpeakerID:   getString(resultData, "speaker_id"),
+		SpeakerName: getString(resultData, "speaker_name"),
+		Confidence:  getFloat32(resultData, "confidence"),
+		Threshold:   getFloat32(resultData, "threshold"),
+	}
 }

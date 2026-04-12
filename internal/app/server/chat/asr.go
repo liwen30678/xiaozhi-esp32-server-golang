@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
 	"xiaozhi-esp32-server-golang/internal/domain/asr"
@@ -55,6 +56,13 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 	go func() {
 		hasTriggeredCancel := true // 标志位，记录是否已触发过取消操作（当 voiceDuration > 120 时）
 		hasLoggedFirstTextExtendedWait := false
+		speakerInterruptTriggered := atomic.Bool{}
+		speakerPeekInFlight := atomic.Bool{}
+		lastSpeakerPeekDoneAt := atomic.Int64{}
+		var speakerPeekAudioMs int64
+		var speakerPeekRequestSeq uint64
+		const speakerPeekInterval = 200 * time.Millisecond
+		const firstSpeakerPeekAudioThresholdMs int64 = 400
 		audioFormat := state.InputAudioFormat
 		// 使用一个足够大的缓冲区用于解码（假设最大帧时长为120ms）
 		maxFrameSize := audioFormat.SampleRate * audioFormat.Channels * 120 / 1000
@@ -181,6 +189,7 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 
 				var vadPcmData []float32
 				pcmData := pcmFrame[:n]
+				speakerPcmData := pcmFrame[:n]
 
 				// 检查帧大小是否一致（正常情况下应该一致，但不一致时使用实际值）
 				if n != frameSize {
@@ -279,6 +288,9 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					// 没有声音时，如果之前也没有语音，则重置累积的声音时长
 					// 如果之前有语音但本次没有，保留时长值，让后续逻辑判断是否应该重置
 					if !clientHaveVoice {
+						speakerInterruptTriggered.Store(false)
+						lastSpeakerPeekDoneAt.Store(0)
+						speakerPeekAudioMs = 0
 						//保留近10帧
 						/*
 							if state.AsrAudioBuffer.GetFrameCount(frameSize) > vadNeedGetCount*3 {
@@ -295,9 +307,9 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					//log.Infof("vad识别成功, 往asr音频通道里发送数据, len: %d", len(pcmData))
 					state.Asr.AddAudioData(pcmData)
 
-					// 如果启用声纹识别，同时发送到声纹识别服务
-					// 需要同时满足：全局开关启用、设备配置中有声纹组、speakerManager已初始化
-					if state.IsSpeakerEnabled() && state.HasSpeakerGroups() &&
+					// 声纹只接收当前判定为有声的帧，避免将首段前导静音和尾静音送入识别流。
+					if haveVoice &&
+						state.IsSpeakerEnabled() && state.HasSpeakerGroups() &&
 						a.session != nil && a.session.speakerManager != nil {
 						// 首次检测到语音时，启动流式识别
 						if !a.session.speakerManager.IsActive() {
@@ -305,12 +317,75 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 							agentId := a.session.clientState.AgentID
 							if err := a.session.speakerManager.StartStreaming(ctx, sampleRate, agentId); err != nil {
 								log.Warnf("启动声纹识别流失败: %v", err)
+							} else {
+								speakerInterruptTriggered.Store(false)
+								lastSpeakerPeekDoneAt.Store(0)
+								speakerPeekAudioMs = 0
 							}
 						}
 
 						// 发送音频块
-						if err := a.session.speakerManager.SendAudioChunk(ctx, pcmData); err != nil {
+						if err := a.session.speakerManager.SendAudioChunk(ctx, speakerPcmData); err != nil {
 							log.Warnf("发送音频块到声纹识别服务失败: %v", err)
+						} else if a.session.speakerManager.IsActive() {
+							if audioFormat.Channels > 0 && audioFormat.SampleRate > 0 {
+								speakerPeekAudioMs += int64(len(speakerPcmData)/audioFormat.Channels) * 1000 / int64(audioFormat.SampleRate)
+							}
+
+							if state.IsRealTime() &&
+								viper.GetInt("chat.realtime_mode") == 3 &&
+								!speakerInterruptTriggered.Load() &&
+								speakerPeekAudioMs >= firstSpeakerPeekAudioThresholdMs {
+								now := time.Now()
+								lastDoneAt := lastSpeakerPeekDoneAt.Load()
+								if (lastDoneAt <= 0 || now.Sub(time.Unix(0, lastDoneAt)) >= speakerPeekInterval) &&
+									speakerPeekInFlight.CompareAndSwap(false, true) {
+									reqSeq := atomic.AddUint64(&speakerPeekRequestSeq, 1)
+									requestID := fmt.Sprintf("peek_%d_%d", now.UnixMilli(), reqSeq)
+
+									go func(reqID string) {
+										defer func() {
+											lastSpeakerPeekDoneAt.Store(time.Now().UnixNano())
+											speakerPeekInFlight.Store(false)
+										}()
+
+										if a.session == nil || a.session.speakerManager == nil || !a.session.speakerManager.IsActive() {
+											return
+										}
+
+										peekCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+										defer cancel()
+
+										peekResult, throttled, err := a.session.speakerManager.PeekAndIdentify(peekCtx, reqID)
+										if err != nil {
+											if ctx.Err() == nil {
+												log.Debugf("声纹peek失败: device=%s, request_id=%s, err=%v", state.DeviceID, reqID, err)
+											}
+											return
+										}
+										if throttled {
+											return
+										}
+										if peekResult == nil || !peekResult.Identified {
+											return
+										}
+										if !speakerInterruptTriggered.CompareAndSwap(false, true) {
+											return
+										}
+
+										log.Infof(
+											"realtime模式声纹peek命中，立即打断: device=%s, speaker=%s, confidence=%.4f, threshold=%.4f",
+											state.DeviceID,
+											peekResult.SpeakerName,
+											peekResult.Confidence,
+											peekResult.Threshold,
+										)
+										a.session.MarkTurnSpeakerInterrupted()
+										state.AfterAsrSessionCtx.CancelWithReason("ASRManager.ProcessVadAudio: realtime_mode=3 speaker peek interrupt")
+										a.session.InterruptAndClearTTSQueue()
+									}(requestID)
+								}
+							}
 						}
 					}
 				}
@@ -325,6 +400,9 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						log.Debugf("语音时长过短 (%dms < 300ms)，重置clientHaveVoice", voiceDurationInSession)
 						state.SetClientHaveVoice(false)
 						state.Vad.ResetVoiceDuration()
+						speakerInterruptTriggered.Store(false)
+						lastSpeakerPeekDoneAt.Store(0)
+						speakerPeekAudioMs = 0
 						continue
 					}
 
@@ -370,6 +448,9 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						)
 						// 在 OnVoiceSilence 之前重置标志位，以便下次可以再次触发
 						hasTriggeredCancel = false
+						speakerInterruptTriggered.Store(false)
+						lastSpeakerPeekDoneAt.Store(0)
+						speakerPeekAudioMs = 0
 						state.OnVoiceSilence()
 						state.VoiceStatus.Reset()
 						continue
@@ -403,6 +484,9 @@ func (a *ASRManager) Cleanup() {
 func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 	state := a.clientState
 	log.Debugf("重启ASR识别开始")
+	if a.session != nil {
+		a.session.ResetTurnSpeakerInterrupted()
+	}
 
 	// 取消当前ASR上下文
 	state.Asr.CancelWithReason("ASRManager.RestartAsrRecognition: cancel previous ASR context before restart")
@@ -620,6 +704,10 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 
 				// 获取暂存的声纹结果（带超时）
 				speakerResult := a.getSpeakerResult()
+				speakerInterrupted := false
+				if a.session != nil {
+					speakerInterrupted = a.session.ConsumeTurnSpeakerInterrupted()
+				}
 				state.MarkAsrFinalText()
 				if a.session != nil {
 					a.session.TraceAsrFinalText(ctx, time.Now().UnixMilli())
@@ -635,6 +723,33 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 					if stop {
 						log.Infof("ASR_OUTPUT hook 请求停止当前流程")
 						state.Asr.ClearHistoryAudio()
+						continue
+					}
+				}
+
+				if a.session != nil {
+					allowChat, denyReason := a.session.ShouldAllowSpeakerChat(speakerResult, speakerInterrupted)
+					if !allowChat {
+						log.Infof(
+							"丢弃ASR结果并跳过STT/LLM: device=%s, reason=%s, speaker_interrupted=%v, speaker_result=%+v, text=%q",
+							state.DeviceID,
+							denyReason,
+							speakerInterrupted,
+							speakerResult,
+							text,
+						)
+						state.Asr.ClearHistoryAudio()
+
+						if !state.IsRealTime() {
+							return
+						}
+						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
+							log.Errorf("丢弃ASR结果后重启识别失败: %v", restartErr)
+							if onError != nil {
+								onError(restartErr)
+							}
+							return
+						}
 						continue
 					}
 				}

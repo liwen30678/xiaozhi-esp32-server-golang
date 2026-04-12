@@ -27,6 +27,15 @@ func cloneOpenClawKeywords(keywords []string) []string {
 	return cloned
 }
 
+func normalizeSpeakerChatMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "identified_only":
+		return "identified_only"
+	default:
+		return "off"
+	}
+}
+
 // ConfigManager 配置管理器
 // 提供高层级的配置管理功能，包括缓存、热更新、配置验证等
 type ConfigManager struct {
@@ -104,6 +113,7 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 			Prompt          string                   `json:"prompt"`
 			AgentId         string                   `json:"agent_id"`
 			MemoryMode      string                   `json:"memory_mode"`
+			SpeakerChatMode string                   `json:"speaker_chat_mode"`
 			MCPServiceNames string                   `json:"mcp_service_names"`
 			OpenClaw        struct {
 				Allowed       bool     `json:"allowed"`
@@ -194,6 +204,7 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 		KnowledgeBases:  response.Data.KnowledgeBases,
 		VoiceIdentify:   voiceIdentifyData,
 		MemoryMode:      response.Data.MemoryMode,
+		SpeakerChatMode: response.Data.SpeakerChatMode,
 		AgentId:         response.Data.AgentId,
 		MCPServiceNames: strings.TrimSpace(response.Data.MCPServiceNames),
 		OpenClaw: types.OpenClawConfig{
@@ -205,6 +216,7 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 	if strings.TrimSpace(config.MemoryMode) == "" {
 		config.MemoryMode = "short"
 	}
+	config.SpeakerChatMode = normalizeSpeakerChatMode(config.SpeakerChatMode)
 
 	log.Log().Infof("成功获取设备配置: deviceId: %s, config: %+v", deviceID, config)
 	return config, nil
