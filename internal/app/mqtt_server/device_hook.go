@@ -13,7 +13,7 @@ import (
 )
 
 // DeviceHook 设备权限与自动订阅钩子
-// 普通用户禁止显式订阅，只允许发布指定 topic，连接时自动订阅 /devices/p2p/{mac}
+// 普通用户禁止随意订阅，只允许发布指定 topic，连接时自动订阅 /p2p/device_sub/{mac}
 type DeviceHook struct {
 	mqttServer.HookBase
 	server *mqttServer.Server
@@ -43,9 +43,20 @@ func (h *DeviceHook) OnACLCheck(cl *mqttServer.Client, topic string, write bool)
 		log.Warnf("禁止普通用户发布到 %s", topic)
 		return false
 	}
-	// 禁止显式订阅
-	//return false
-	return true
+
+	mac := parseMacFromClientId(cl.ID)
+	if mac == "" {
+		log.Warnf("禁止普通用户订阅 %s: 无法从客户端ID解析MAC, clientID=%s", topic, cl.ID)
+		return false
+	}
+
+	allowedTopic := deviceSubTopic(mac)
+	if topic == allowedTopic {
+		return true
+	}
+
+	log.Warnf("禁止普通用户订阅 %s: 仅允许订阅自己的主题 %s", topic, allowedTopic)
+	return false
 }
 
 func (h *DeviceHook) OnConnect(cl *mqttServer.Client, pk packets.Packet) error {
@@ -71,7 +82,7 @@ func (h *DeviceHook) OnDisconnect(cl *mqttServer.Client, err error, ok bool) {
 		log.Info("警告: 无法从客户端ID解析MAC地址:", cl.ID)
 		return
 	}
-	topic := fmt.Sprintf("%s%s", client.MDeviceSubTopicPrefix, mac)
+	topic := deviceSubTopic(mac)
 
 	action := h.server.Topics.Unsubscribe(topic, cl.ID)
 	log.Infof("取消订阅客户端 %s 到主题 %s, action: %v", cl.ID, topic, action)
@@ -91,7 +102,7 @@ func (h *DeviceHook) OnSessionEstablished(cl *mqttServer.Client, pk packets.Pack
 		return
 	}
 
-	topic := fmt.Sprintf("%s%s", client.MDeviceSubTopicPrefix, mac)
+	topic := deviceSubTopic(mac)
 
 	// 使用服务器的API直接订阅，而不是注入数据包
 	clientID := cl.ID
@@ -172,6 +183,10 @@ func parseMacFromClientId(clientId string) string {
 	return ""
 }
 
+func deviceSubTopic(mac string) string {
+	return fmt.Sprintf("%s%s", client.MDeviceSubTopicPrefix, mac)
+}
+
 // 启动周期性打印订阅主题的任务
 func (h *DeviceHook) StartPeriodicSubscriptionPrinter(interval time.Duration) {
 	go func() {
@@ -217,7 +232,7 @@ func (h *DeviceHook) PrintAllClientSubscriptions() {
 		// 再检查一下特定主题
 		mac := parseMacFromClientId(clientID)
 		if mac != "" {
-			topic := "/devices/p2p/" + mac
+			topic := deviceSubTopic(mac)
 			topicSubs := h.server.Topics.Subscribers(topic)
 			if subs, ok := topicSubs.Subscriptions[clientID]; ok {
 				log.Infof("  - %s (QoS: %d)", subs.Filter, subs.Qos)
