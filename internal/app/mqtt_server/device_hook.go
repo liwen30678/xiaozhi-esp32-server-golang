@@ -43,9 +43,20 @@ func (h *DeviceHook) OnACLCheck(cl *mqttServer.Client, topic string, write bool)
 		log.Warnf("禁止普通用户发布到 %s", topic)
 		return false
 	}
-	// 禁止显式订阅
-	//return false
-	return true
+
+	mac := parseMacFromClientId(cl.ID)
+	if mac == "" {
+		log.Warnf("禁止普通用户订阅 %s: 无法从客户端ID解析MAC, clientID=%s", topic, cl.ID)
+		return false
+	}
+
+	allowedTopic := fmt.Sprintf("%s%s", client.MDeviceSubTopicPrefix, mac)
+	if topic == allowedTopic {
+		return true
+	}
+
+	log.Warnf("禁止普通用户订阅 %s: 仅允许订阅自己的主题 %s", topic, allowedTopic)
+	return false
 }
 
 func (h *DeviceHook) OnConnect(cl *mqttServer.Client, pk packets.Packet) error {
