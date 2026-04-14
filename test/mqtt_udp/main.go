@@ -17,6 +17,7 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
 
+	"xiaozhi-esp32-server-golang/constants"
 	"xiaozhi-esp32-server-golang/internal/domain/tts"
 )
 
@@ -29,6 +30,7 @@ var audioRate = 16000
 var frameDuration = 60
 
 var allowChat = make(chan struct{}, 1)
+var ttsProviderName = constants.TtsTypeCosyvoice
 
 // ServerMessage 表示服务器消息
 type ServerMessage struct {
@@ -138,6 +140,7 @@ func main() {
 	otaUrl := flag.String("ota", "https://api.tenclass.net/xiaozhi/ota/", "OTA服务器地址")
 	deviceID := flag.String("device", "ba:8f:17:de:94:94", "设备ID")
 	mode := flag.String("mode", "manual", "拾音模式: manual(手动) 或 auto(自动)")
+	ttsProvider := flag.String("tts_provider", constants.TtsTypeCosyvoice, "TTS provider: cosyvoice|edge|edge_offline|indextts_vllm")
 	flag.Parse()
 
 	// 验证模式参数
@@ -146,7 +149,9 @@ func main() {
 		os.Exit(1)
 	}
 	listenMode = *mode
+	ttsProviderName = strings.ToLower(strings.TrimSpace(*ttsProvider))
 	fmt.Printf("📋 拾音模式: %s\n", listenMode)
+	fmt.Printf("📋 TTS 提供商: %s\n", ttsProviderName)
 
 	clientID := "e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d"
 	boardName := "lc-esp32-s3"
@@ -649,8 +654,7 @@ func sendAbort(mqttClient mqtt.Client, sessionID string) error {
 	return nil
 }
 
-// 调用tts服务生成语音, 并编码至opus发送至服务端
-func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDPClient, udpConfig *UDPConfig) error {
+func getTTSProviderConfig() (string, map[string]interface{}, error) {
 	cosyVoiceConfig := map[string]interface{}{
 		"api_url":        "https://tts.linkerai.cn/tts",
 		"spk_id":         "OUeAo1mhq6IBExi",
@@ -659,17 +663,6 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 		"audio_format":   "mp3",
 		"instruct_text":  "你好",
 	}
-	_ = cosyVoiceConfig
-	/**
-		    "edge": {
-	      "voice": "zh-CN-XiaoxiaoNeural",
-	      "rate": "+0%",
-	      "volume": "+0%",
-	      "pitch": "+0Hz",
-	      "connect_timeout": 10,
-	      "receive_timeout": 60
-	    }
-	*/
 	edgeConfig := map[string]interface{}{
 		"voice":           "zh-CN-XiaoxiaoNeural",
 		"rate":            "+0%",
@@ -678,12 +671,46 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 		"connect_timeout": 10,
 		"receive_timeout": 60,
 	}
-	_ = edgeConfig
-	//调用tts服务生成语音
-	ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
-	//ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
+	edgeOfflineConfig := map[string]interface{}{
+		"server_url":        "ws://192.168.208.214:8081/tts",
+		"timeout":           30.0,
+		"handshake_timeout": 10.0,
+	}
+	indexTTSVLLMConfig := map[string]interface{}{
+		"api_url":         "http://127.0.0.1:7860/audio/speech",
+		"model":           "indextts-vllm",
+		"voice":           "zh-CN-XiaoxiaoNeural",
+		"response_format": "wav",
+		"stream":          false,
+	}
+
+	providerName := strings.TrimSpace(ttsProviderName)
+	switch providerName {
+	case constants.TtsTypeCosyvoice:
+		return providerName, cosyVoiceConfig, nil
+	case constants.TtsTypeEdge:
+		return providerName, edgeConfig, nil
+	case constants.TtsTypeEdgeOffline:
+		return providerName, edgeOfflineConfig, nil
+	case constants.TtsTypeIndexTTSVLLM:
+		return providerName, indexTTSVLLMConfig, nil
+	default:
+		return "", nil, fmt.Errorf("不支持的tts provider: %s, 可选: cosyvoice|edge|edge_offline|indextts_vllm", providerName)
+	}
+}
+
+// 调用tts服务生成语音, 并编码至opus发送至服务端
+func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDPClient, udpConfig *UDPConfig) error {
+	providerName, providerConfig, err := getTTSProviderConfig()
 	if err != nil {
-		return fmt.Errorf("获取tts服务失败: %v", err)
+		return err
+	}
+	fmt.Printf("使用 TTS provider: %s\n", providerName)
+
+	//调用tts服务生成语音
+	ttsProvider, err := tts.GetTTSProvider(providerName, providerConfig)
+	if err != nil {
+		return fmt.Errorf("获取tts服务失败(provider=%s): %v", providerName, err)
 	}
 
 	/*
