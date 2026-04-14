@@ -309,6 +309,12 @@ func (s *MqttUdpAdapter) processMessage() {
 			}
 
 			deviceSession := s.getDeviceSession(deviceId)
+			if deviceSession != nil && clientMsg.Type == "hello" {
+				udpServer := s.getUdpServer()
+				if udpServer != nil && deviceSession.UdpSession != nil {
+					udpServer.ClearSessionAddrBinding(deviceSession.UdpSession.ConnId)
+				}
+			}
 			if deviceSession == nil {
 				// 从UDP服务端获取会话信息
 				udpServer := s.getUdpServer()

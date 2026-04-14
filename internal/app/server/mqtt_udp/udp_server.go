@@ -287,6 +287,18 @@ func (s *UdpServer) CloseSession(connID string) {
 	s.nonce2Session.Delete(connID)
 }
 
+// ClearSessionAddrBinding 清理 connID 对应会话的 UDP 地址绑定，不销毁会话本身
+func (s *UdpServer) ClearSessionAddrBinding(connID string) {
+	session := s.getSessionByNonce(connID)
+	if session == nil {
+		return
+	}
+	if remoteAddr := session.GetRemoteAddr(); remoteAddr != nil {
+		s.addr2Session.Delete(remoteAddr.String())
+	}
+	session.SetRemoteAddr(nil)
+}
+
 func (s *UdpServer) SetNonce2Session(connID string, session *UdpSession) {
 	Debugf("SetNonce2Session, connID: %s, session: %+v", connID, session)
 	s.nonce2Session.Store(connID, session)
