@@ -66,7 +66,6 @@ type ChatSession struct {
 	helloMu        sync.Mutex
 	helloInited    bool
 	vadLoopStarted bool
-	mcpHelloInited bool
 	listenStartSeq atomic.Uint64
 
 	// 未激活设备高频触发时，短时间内复用最近一次“未激活”判定，避免频繁打接口。
@@ -86,6 +85,8 @@ type ChatSession struct {
 	openClawWarmupMu sync.Mutex
 	openClawWarmup   *openClawWarmupTask
 
+	mcpTransport *McpTransport
+
 	hookHub *chathooks.Hub
 }
 
@@ -98,7 +99,11 @@ func NewChatSession(clientState *ClientState, serverTransport *ServerTransport, 
 		chatTextQueue:      util.NewQueue[AsrResponseChannelItem](10),
 		speakerResultReady: make(chan struct{}, 1), // 缓冲为1，避免阻塞
 		openClawStreams:    make(map[string]chan llm_common.LLMResponseStruct),
-		hookHub:            hookHub,
+		mcpTransport: &McpTransport{
+			Client:          clientState,
+			ServerTransport: serverTransport,
+		},
+		hookHub: hookHub,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -591,9 +596,8 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 			log.Warnf("设备 %s duplicate hello 刷新配置失败，降级继续: %v", clientState.DeviceID, err)
 		}
 		s.resetOpenClawModeOnHello(prevAgentID, clientState.AgentID)
-		if isMcp, ok := msg.Features["mcp"]; ok && isMcp && !s.mcpHelloInited {
-			s.mcpHelloInited = true
-			go initMcp(s.clientState, s.serverTransport)
+		if isMcp, ok := msg.Features["mcp"]; ok && isMcp {
+			go initMcp(s.clientState.DeviceID, s.mcpTransport)
 		}
 		log.Infof("设备 %s 收到重复hello，跳过重复初始化", clientState.DeviceID)
 		return nil
@@ -614,9 +618,8 @@ func (s *ChatSession) HandleCommonHelloMessage(msg *ClientMessage) error {
 		s.vadLoopStarted = true
 	}
 
-	if isMcp, ok := msg.Features["mcp"]; ok && isMcp && !s.mcpHelloInited {
-		s.mcpHelloInited = true
-		go initMcp(s.clientState, s.serverTransport)
+	if isMcp, ok := msg.Features["mcp"]; ok && isMcp {
+		go initMcp(s.clientState.DeviceID, s.mcpTransport)
 	}
 
 	s.helloInited = true
@@ -1052,16 +1055,7 @@ func (s *ChatSession) HandleIoTMessage(msg *ClientMessage) error {
 }
 
 func (s *ChatSession) HandleMcpMessage(msg *ClientMessage) error {
-	mcpSession := mcp.GetDeviceMcpClient(s.clientState.DeviceID)
-	if mcpSession != nil {
-		select {
-		case <-s.ctx.Done():
-			return nil
-		default:
-			return s.serverTransport.HandleMcpMessage(msg.PayLoad)
-		}
-	}
-	return nil
+	return mcp.HandleDeviceIotMcpMessage(s.clientState.DeviceID, s.mcpTransport.GetMcpTransportType(), msg.PayLoad)
 }
 
 // 释放udp资源

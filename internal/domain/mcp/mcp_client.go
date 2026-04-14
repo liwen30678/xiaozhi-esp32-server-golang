@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"strings"
 
 	log "xiaozhi-esp32-server-golang/logger"
@@ -118,6 +119,90 @@ func AddDeviceMcpClient(deviceId string, mcpClient *DeviceMcpSession) error {
 func RemoveDeviceMcpClient(deviceId string) error {
 	mcpClientPool.RemoveMcpClient(deviceId)
 	return nil
+}
+
+// EnsureDeviceIotOverMcp 确保设备侧 IotOverMcp 运行时与 transport 绑定。
+// 复用已有连接；当 transport 变化时替换旧连接。
+func EnsureDeviceIotOverMcp(deviceId string, conn ConnInterface) error {
+	if deviceId == "" || conn == nil {
+		return fmt.Errorf("deviceId 或 conn 为空")
+	}
+	transportType := strings.TrimSpace(conn.GetMcpTransportType())
+	if transportType == "" {
+		return fmt.Errorf("transportType 为空")
+	}
+
+	mcpClientSession := GetDeviceMcpClient(deviceId)
+	if mcpClientSession == nil {
+		mcpClientSession = NewDeviceMCPSession(deviceId)
+		AddDeviceMcpClient(deviceId, mcpClientSession)
+	}
+
+	mcpClientSession.iotMux.RLock()
+	existing := mcpClientSession.iotOverMcpByTransport[transportType]
+	mcpClientSession.iotMux.RUnlock()
+	if existing != nil && existing.IsConnected() && existing.conn == conn {
+		return nil
+	}
+
+	iotOverMcpClient := NewIotOverMcpClient(deviceId, conn)
+	if iotOverMcpClient == nil {
+		return fmt.Errorf("创建IotOverMcp客户端失败")
+	}
+	mcpClientSession.SetIotOverMcp(transportType, iotOverMcpClient)
+	return nil
+}
+
+func HandleDeviceIotMcpMessage(deviceId string, transportType string, payload []byte) error {
+	mcpClientSession := GetDeviceMcpClient(deviceId)
+	if mcpClientSession == nil {
+		return nil
+	}
+	transportType = strings.TrimSpace(transportType)
+	if transportType == "" {
+		return fmt.Errorf("transportType 为空")
+	}
+
+	mcpClientSession.iotMux.RLock()
+	iotClient := mcpClientSession.iotOverMcpByTransport[transportType]
+	mcpClientSession.iotMux.RUnlock()
+	if iotClient == nil || iotClient.conn == nil {
+		return nil
+	}
+
+	inbound, ok := iotClient.conn.(interface {
+		HandleMcpMessage(payload []byte) error
+	})
+	if !ok {
+		return fmt.Errorf("transport 不支持HandleMcpMessage")
+	}
+	return inbound.HandleMcpMessage(payload)
+}
+
+func CloseDeviceIotOverMcp(deviceId string, conn ConnInterface) {
+	mcpClientSession := GetDeviceMcpClient(deviceId)
+	if mcpClientSession == nil {
+		return
+	}
+
+	mcpClientSession.iotMux.Lock()
+	defer mcpClientSession.iotMux.Unlock()
+
+	transportType := strings.TrimSpace(conn.GetMcpTransportType())
+	if transportType == "" {
+		return
+	}
+	iotClient := mcpClientSession.iotOverMcpByTransport[transportType]
+	if iotClient == nil {
+		return
+	}
+	if conn != nil && iotClient.conn != conn {
+		return
+	}
+
+	iotClient.connected = false
+	iotClient.cancel()
+	delete(mcpClientSession.iotOverMcpByTransport, transportType)
 }
 
 func GetToolsByDeviceId(deviceId string, agentId string, selectedMCPServiceNames string) (map[string]tool.InvokableTool, error) {

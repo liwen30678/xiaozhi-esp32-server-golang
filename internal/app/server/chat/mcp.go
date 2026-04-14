@@ -51,23 +51,19 @@ func (c *McpTransport) RecvMcpMsg(ctx context.Context, timeOut int) ([]byte, err
 	return c.ServerTransport.RecvMcpMsg(ctx, timeOut)
 }
 
-func initMcp(clientState *ClientState, serverTransport *ServerTransport) {
-	mcpClientSession := mcp.GetDeviceMcpClient(clientState.DeviceID)
-	if mcpClientSession == nil {
-		mcpClientSession = mcp.NewDeviceMCPSession(clientState.DeviceID)
-		mcp.AddDeviceMcpClient(clientState.DeviceID, mcpClientSession)
+func (c *McpTransport) GetMcpTransportType() string {
+	if c == nil || c.ServerTransport == nil {
+		return ""
 	}
+	return c.ServerTransport.GetTransportType()
+}
 
-	// 创建IotOverMcp客户端
-	mcpTransport := &McpTransport{
-		Client:          clientState,
-		ServerTransport: serverTransport,
-	}
-	iotOverMcpClient := mcp.NewIotOverMcpClient(clientState.DeviceID, mcpTransport)
-	if iotOverMcpClient == nil {
-		log.Errorf("创建IotOverMcp客户端失败")
-		serverTransport.transport.Close()
+func initMcp(deviceID string, mcpTransport *McpTransport) {
+	if err := mcp.EnsureDeviceIotOverMcp(deviceID, mcpTransport); err != nil {
+		log.Errorf("确保IotOverMcp客户端失败: %v", err)
+		if mcpTransport != nil && mcpTransport.ServerTransport != nil {
+			mcpTransport.ServerTransport.transport.Close()
+		}
 		return
 	}
-	mcpClientSession.SetIotOverMcp(iotOverMcpClient)
 }

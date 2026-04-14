@@ -91,16 +91,19 @@ func (p *McpClientPool) checkOffline() {
 			return true //continue
 		})
 
-		// 检查IoT over MCP连接
+		// 检查IoT over MCP连接（按 transportType）
 		hasActiveIotConnection := false
-		if client.iotOverMcp != nil {
-			if time.Since(client.iotOverMcp.lastPing) > 2*time.Minute {
-				client.iotOverMcp.connected = false
-				client.iotOverMcp.cancel()
+		client.iotMux.Lock()
+		for transportType, iotClient := range client.iotOverMcpByTransport {
+			if time.Since(iotClient.lastPing) > 2*time.Minute {
+				iotClient.connected = false
+				iotClient.cancel()
+				delete(client.iotOverMcpByTransport, transportType)
 			} else {
 				hasActiveIotConnection = true
 			}
 		}
+		client.iotMux.Unlock()
 
 		// 如果没有任何活跃连接，移除客户端
 		if !hasActiveWsConnections && !hasActiveIotConnection {

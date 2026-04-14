@@ -17,12 +17,12 @@ import (
 
 // DeviceMcpSession 代表一个设备的MCP会话，聚合了多种MCP连接
 type DeviceMcpSession struct {
-	deviceID      string
-	Ctx           context.Context
-	cancel        context.CancelFunc
-	wsEndPointMcp sync.Map
-	iotOverMcp    *McpClientInstance
-	iotMux        sync.RWMutex
+	deviceID              string
+	Ctx                   context.Context
+	cancel                context.CancelFunc
+	wsEndPointMcp         sync.Map
+	iotOverMcpByTransport map[string]*McpClientInstance
+	iotMux                sync.RWMutex
 }
 
 func (dcs *DeviceMcpSession) AddWsEndPointMcp(mcpClient *McpClientInstance) {
@@ -35,14 +35,18 @@ func (dcs *DeviceMcpSession) AddWsEndPointMcp(mcpClient *McpClientInstance) {
 }
 
 // todo
-func (dcs *DeviceMcpSession) SetIotOverMcp(mcpClient *McpClientInstance) {
+func (dcs *DeviceMcpSession) SetIotOverMcp(transportType string, mcpClient *McpClientInstance) {
 	dcs.iotMux.Lock()
 	defer dcs.iotMux.Unlock()
-	// 如果已经存在一个iotOverMcp，先关闭它
-	/*if dcs.iotOverMcp != nil {
-		dcs.iotOverMcp.Close()
-	}*/
-	dcs.iotOverMcp = mcpClient
+	if transportType == "" {
+		transportType = "unknown"
+	}
+	// 同 device + transportType 保持单实例
+	if old := dcs.iotOverMcpByTransport[transportType]; old != nil && old != mcpClient {
+		old.connected = false
+		old.cancel()
+	}
+	dcs.iotOverMcpByTransport[transportType] = mcpClient
 
 	// 设置关闭回调
 	mcpClient.SetOnCloseHandler(dcs.handleMcpClientClose)
@@ -95,10 +99,11 @@ func NewDeviceMCPSession(deviceID string) *DeviceMcpSession {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	deviceMcpClient := &DeviceMcpSession{
-		deviceID: deviceID,
-		Ctx:      ctx,
-		cancel:   cancel,
-		iotMux:   sync.RWMutex{},
+		deviceID:              deviceID,
+		Ctx:                   ctx,
+		cancel:                cancel,
+		iotOverMcpByTransport: make(map[string]*McpClientInstance),
+		iotMux:                sync.RWMutex{},
 		// wsEndPointMcp: make(map[string]*McpClientInstance),
 	}
 
@@ -154,6 +159,7 @@ func NewIotOverMcpClient(deviceID string, conn ConnInterface) *McpClientInstance
 		cancel:     cancel,
 		connected:  true,
 		lastPing:   time.Now(),
+		conn:       conn,
 	}
 	wsTransport.SetNotificationHandler(iotOverMcp.handleJSONRPCNotification)
 
@@ -215,7 +221,11 @@ func (dc *DeviceMcpSession) refreshToolsAndPing() {
 		return true
 	})
 
-	findTools(dc.iotOverMcp)
+	dc.iotMux.RLock()
+	for _, instance := range dc.iotOverMcpByTransport {
+		findTools(instance)
+	}
+	dc.iotMux.RUnlock()
 
 	// 每2分钟进行一次ping
 	pingTick := time.NewTicker(2 * time.Minute)
@@ -231,7 +241,11 @@ func (dc *DeviceMcpSession) refreshToolsAndPing() {
 				ping(mcpInstance.(*McpClientInstance))
 				return true
 			})
-			//ping(dc.iotOverMcp)
+			dc.iotMux.RLock()
+			for _, instance := range dc.iotOverMcpByTransport {
+				ping(instance)
+			}
+			dc.iotMux.RUnlock()
 		}
 	}
 }
@@ -351,12 +365,12 @@ func (dc *DeviceMcpSession) GetTools() map[string]tool.InvokableTool {
 	})
 
 	dc.iotMux.RLock()
-	if dc.iotOverMcp != nil {
-		dc.iotOverMcp.toolsMux.RLock()
-		for k, v := range dc.iotOverMcp.tools {
+	for _, iotClient := range dc.iotOverMcpByTransport {
+		iotClient.toolsMux.RLock()
+		for k, v := range iotClient.tools {
 			tools[k] = v
 		}
-		dc.iotOverMcp.toolsMux.RUnlock()
+		iotClient.toolsMux.RUnlock()
 	}
 	dc.iotMux.RUnlock()
 	return tools
@@ -392,14 +406,16 @@ func (dc *DeviceMcpSession) GetToolByName(toolName string) (tool tool.InvokableT
 		return tool, true
 	}
 
-	if dc.iotOverMcp != nil {
-		dc.iotOverMcp.toolsMux.RLock()
-		logger.Infof("iotOverMcp 工具列表: %+v", dc.iotOverMcp.tools)
-		if tool, ok = dc.iotOverMcp.tools[toolName]; ok {
-			dc.iotOverMcp.toolsMux.RUnlock()
+	dc.iotMux.RLock()
+	defer dc.iotMux.RUnlock()
+	for transportType, iotClient := range dc.iotOverMcpByTransport {
+		iotClient.toolsMux.RLock()
+		logger.Infof("iotOverMcp 工具列表(%s): %+v", transportType, iotClient.tools)
+		if tool, ok = iotClient.tools[toolName]; ok {
+			iotClient.toolsMux.RUnlock()
 			return tool, true
 		}
-		dc.iotOverMcp.toolsMux.RUnlock()
+		iotClient.toolsMux.RUnlock()
 	}
 	return nil, false
 }
