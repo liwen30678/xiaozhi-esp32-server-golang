@@ -128,22 +128,20 @@ func (s *UdpServer) processPacket(addr *net.UDPAddr, data []byte) {
 		return
 	}
 
-	var udpSession *UdpSession
-	//从addr
-	udpSession = s.getUdpSession(addr)
+	fullNonce := data[:16]
+	connID := fullNonce[4:8] // 取5-8字节作为连接id
+	strConnID := hex.EncodeToString(connID)
+	udpSession := s.getSessionByNonce(strConnID)
 	if udpSession == nil {
-		// 获取会话ID
-		fullNonce := data[:16]
-		connID := fullNonce[4:8] // 取5-8字节作为连接id
-		strConnID := hex.EncodeToString(connID)
-		//Debugf("收到数据包, fullNonce: %s, connID: %s", hex.EncodeToString(fullNonce), strConnID)
-		udpSession = s.getSessionByNonce(strConnID)
-		if udpSession == nil {
-			Warnf("session不存在 addr: %s", addr)
-			return
+		Warnf("session不存在 addr: %s, connID: %s", addr, strConnID)
+		return
+	}
+	addrSession := s.getUdpSession(addr)
+	if addrSession != udpSession {
+		if addrSession != nil {
+			s.removeUdpSession(addr)
 		}
-		udpSession.SetRemoteAddr(addr)
-		s.addUdpSession(addr, udpSession)
+		s.rebindSessionAddr(addr, udpSession)
 	}
 
 	if udpSession == nil {
@@ -278,13 +276,16 @@ func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 // CloseSession 关闭会话
 func (s *UdpServer) CloseSession(connID string) {
 	session := s.getSessionByNonce(connID)
-	if session != nil {
-		if remoteAddr := session.GetRemoteAddr(); remoteAddr != nil {
-			s.addr2Session.Delete(remoteAddr.String())
-		}
-		session.Destroy()
+	s.CloseSessionByRef(session)
+}
+
+// ClearSessionAddrBinding 清理 connID 对应会话的 UDP 地址绑定，不销毁会话本身
+func (s *UdpServer) ClearSessionAddrBinding(connID string) {
+	session := s.getSessionByNonce(connID)
+	if session == nil {
+		return
 	}
-	s.nonce2Session.Delete(connID)
+	s.clearSessionAddrBindings(session)
 }
 
 func (s *UdpServer) SetNonce2Session(connID string, session *UdpSession) {
@@ -322,4 +323,35 @@ func (s *UdpServer) addUdpSession(addr *net.UDPAddr, session *UdpSession) {
 
 func (s *UdpServer) removeUdpSession(addr *net.UDPAddr) {
 	s.addr2Session.Delete(addr.String())
+}
+
+func (s *UdpServer) CloseSessionByRef(session *UdpSession) {
+	if session == nil {
+		return
+	}
+	s.clearSessionAddrBindings(session)
+	s.nonce2Session.Delete(session.ConnId)
+	session.Destroy()
+}
+
+func (s *UdpServer) clearSessionAddrBindings(session *UdpSession) {
+	if session == nil {
+		return
+	}
+	s.addr2Session.Range(func(key, value interface{}) bool {
+		if value == session {
+			s.addr2Session.Delete(key)
+		}
+		return true
+	})
+	session.SetRemoteAddr(nil)
+}
+
+func (s *UdpServer) rebindSessionAddr(addr *net.UDPAddr, session *UdpSession) {
+	if addr == nil || session == nil {
+		return
+	}
+	s.clearSessionAddrBindings(session)
+	session.SetRemoteAddr(addr)
+	s.addUdpSession(addr, session)
 }

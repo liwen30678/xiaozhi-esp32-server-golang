@@ -175,6 +175,9 @@ func (s *UdpSession) SendAudioData(data []byte) (bool, error) {
 func (s *UdpSession) Destroy() {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
+	if s.Status == UdpSessionStatusClosed {
+		return
+	}
 	s.Status = UdpSessionStatusClosed
 	close(s.RecvChannel)
 	close(s.SendChannel)

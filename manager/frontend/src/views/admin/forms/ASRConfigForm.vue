@@ -224,7 +224,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref } from 'vue'
 import { InfoFilled } from '@element-plus/icons-vue'
 
 const props = defineProps({
@@ -234,14 +234,8 @@ const props = defineProps({
 
 const formRef = ref()
 
-watch(() => props.model?.provider, (provider) => {
-  if (provider === 'funasr' && props.model.funasr) {
-    props.model.funasr.mode = 'offline'
-  }
-}, { immediate: true })
-
 function onProviderChange() {
-  if (props.model.provider === 'funasr' && props.model.funasr) {
+  if (props.model.provider === 'funasr' && props.model.funasr && !props.model.funasr.mode) {
     props.model.funasr.mode = 'offline'
   }
 }

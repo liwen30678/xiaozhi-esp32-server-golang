@@ -317,10 +317,7 @@ func (s *MqttUdpAdapter) handleDisconnect(deviceId string) {
 		}
 		return
 	}
-	udpServer := s.getUdpServer()
-	if udpServer != nil {
-		udpServer.CloseSession(conn.UdpSession.ConnId)
-	}
+	conn.ReleaseUdpSession()
 	s.deviceId2Conn.Delete(deviceId)
 	if notifyOffline && s.onDeviceOffline != nil {
 		s.onDeviceOffline(deviceId)
@@ -494,13 +491,9 @@ func (s *MqttUdpAdapter) EnsureDeviceTransport(deviceId string) (*MqttUdpConn, e
 		return deviceSession, nil
 	}
 
-	udpServer := s.getUdpServer()
-	if udpServer == nil {
-		return nil, fmt.Errorf("udpServer is nil, deviceId: %s", deviceId)
-	}
-	udpSession := udpServer.CreateSession(deviceId, "")
-	if udpSession == nil {
-		return nil, fmt.Errorf("创建 udpSession 失败, deviceId: %s", deviceId)
+	udpServer, udpSession, err := s.createUdpSession(deviceId)
+	if err != nil {
+		return nil, fmt.Errorf("创建 udpSession 失败, deviceId: %s, err: %w", deviceId, err)
 	}
 
 	topicMacAddr := strings.ReplaceAll(deviceId, ":", "_")
@@ -508,15 +501,12 @@ func (s *MqttUdpAdapter) EnsureDeviceTransport(deviceId string) (*MqttUdpConn, e
 
 	mqttClient := s.getClient()
 	if mqttClient == nil {
-		udpServer.CloseSession(udpSession.ConnId)
+		udpServer.CloseSessionByRef(udpSession)
 		return nil, fmt.Errorf("mqtt client is nil, deviceId: %s", deviceId)
 	}
 
 	deviceSession = NewMqttUdpConn(deviceId, publicTopic, mqttClient, udpServer, udpSession)
-
-	strAesKey, strFullNonce := udpSession.GetAesKeyAndNonce()
-	deviceSession.SetData("aes_key", strAesKey)
-	deviceSession.SetData("full_nonce", strFullNonce)
+	s.bindUdpSessionData(deviceSession, udpSession)
 	deviceSession.MarkBrokerOnline()
 
 	s.SetDeviceSession(deviceId, deviceSession)
@@ -602,6 +592,7 @@ func (s *MqttUdpAdapter) processMessage() {
 				continue
 			}
 
+			existingSession := s.getDeviceSession(deviceId)
 			deviceSession, notifyOnline, err := s.promoteDeviceOnline(deviceId, time.Now().UnixMilli())
 			if err != nil {
 				Errorf("确保 MQTT transport 在线失败: device=%s err=%v", deviceId, err)
@@ -613,6 +604,14 @@ func (s *MqttUdpAdapter) processMessage() {
 			if notifyOnline && s.onTransportReady != nil {
 				s.onTransportReady(deviceId)
 			}
+			if existingSession != nil && clientMsg.Type == "hello" {
+				newUdpSession, err := s.rotateDeviceUdpSession(deviceSession, deviceId)
+				if err != nil {
+					Errorf("hello 重建 udpSession 失败, deviceId: %s, err: %v", deviceId, err)
+					continue
+				}
+				Debugf("hello 重建 udpSession 成功, deviceId: %s, connID: %s", deviceId, newUdpSession.ConnId)
+			}
 
 			if err := deviceSession.PushMsgToRecvCmd(mqttMsg.Payload()); err != nil {
 				Errorf("InternalRecvCmd失败: %v", err)
@@ -620,6 +619,44 @@ func (s *MqttUdpAdapter) processMessage() {
 			}
 		}
 	}
+}
+
+func (s *MqttUdpAdapter) createUdpSession(deviceId string) (*UdpServer, *UdpSession, error) {
+	udpServer := s.getUdpServer()
+	if udpServer == nil {
+		return nil, nil, fmt.Errorf("udpServer is nil")
+	}
+	udpSession := udpServer.CreateSession(deviceId, "")
+	if udpSession == nil {
+		return nil, nil, fmt.Errorf("udpSession is nil")
+	}
+	return udpServer, udpSession, nil
+}
+
+func (s *MqttUdpAdapter) bindUdpSessionData(deviceSession *MqttUdpConn, udpSession *UdpSession) {
+	if deviceSession == nil || udpSession == nil {
+		return
+	}
+	deviceSession.SetUdpSession(udpSession)
+	strAesKey, strFullNonce := udpSession.GetAesKeyAndNonce()
+	deviceSession.SetData("aes_key", strAesKey)
+	deviceSession.SetData("full_nonce", strFullNonce)
+}
+
+func (s *MqttUdpAdapter) rotateDeviceUdpSession(deviceSession *MqttUdpConn, deviceId string) (*UdpSession, error) {
+	if deviceSession == nil {
+		return nil, fmt.Errorf("deviceSession is nil")
+	}
+	udpServer, udpSession, err := s.createUdpSession(deviceId)
+	if err != nil {
+		return nil, err
+	}
+	oldSession := deviceSession.GetUdpSession()
+	s.bindUdpSessionData(deviceSession, udpSession)
+	if oldSession != nil {
+		udpServer.CloseSessionByRef(oldSession)
+	}
+	return udpSession, nil
 }
 
 func (s *MqttUdpAdapter) getDeviceIdByTopic(topic string) (string, string) {
