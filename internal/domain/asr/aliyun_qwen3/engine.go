@@ -158,6 +158,17 @@ func (a *AliyunQwen3ASR) StreamingRecognize(ctx context.Context, audioStream <-c
 	var finalResultReceived bool
 	finalResultChan := make(chan struct{}, 1)
 
+	recordSendErr := func(err error) {
+		if err == nil {
+			return
+		}
+		sendErrMu.Lock()
+		if sendErr == nil {
+			sendErr = err
+		}
+		sendErrMu.Unlock()
+	}
+
 	sendResult := func(r types.StreamingResult) {
 		if !r.IsFinal {
 			select {
@@ -180,6 +191,18 @@ func (a *AliyunQwen3ASR) StreamingRecognize(ctx context.Context, audioStream <-c
 			}
 		}
 	}
+
+	// ctx cancel 时主动关闭底层连接，确保 ReadMessage 及时返回，
+	// 这样旧会话一定会退出并释放 taskMu，避免下一轮重启卡死。
+	go func() {
+		select {
+		case <-ctx.Done():
+			recordSendErr(ctx.Err())
+			log.Debugf("[aliyun_qwen3] context cancelled, closing websocket to unblock receiver")
+			a.resetConn(conn)
+		case <-done:
+		}
+	}()
 
 	// Start receiver goroutine.
 	go func() {
@@ -410,9 +433,7 @@ func (a *AliyunQwen3ASR) StreamingRecognize(ctx context.Context, audioStream <-c
 		for {
 			select {
 			case <-ctx.Done():
-				sendErrMu.Lock()
-				sendErr = ctx.Err()
-				sendErrMu.Unlock()
+				recordSendErr(ctx.Err())
 				return
 
 			case pcm, ok := <-audioStream:
@@ -431,9 +452,7 @@ func (a *AliyunQwen3ASR) StreamingRecognize(ctx context.Context, audioStream <-c
 							}
 							if err := conn.WriteMessage(websocket.TextMessage, bytes); err != nil {
 								a.resetConn(conn)
-								sendErrMu.Lock()
-								sendErr = fmt.Errorf("send commit failed: %w", err)
-								sendErrMu.Unlock()
+								recordSendErr(fmt.Errorf("send commit failed: %w", err))
 								log.Debugf("[aliyun_qwen3] commit send failed: %v", err)
 							} else {
 								log.Debugf("[aliyun_qwen3] commit sent; waiting for input_audio_buffer.committed")
@@ -462,17 +481,13 @@ func (a *AliyunQwen3ASR) StreamingRecognize(ctx context.Context, audioStream <-c
 				// Send audio append event.
 				appendEvent := NewAudioAppendEvent(audioBytes)
 				if bytes, err := json.Marshal(appendEvent); err != nil {
-					sendErrMu.Lock()
-					sendErr = fmt.Errorf("marshal audio append failed: %w", err)
-					sendErrMu.Unlock()
+					recordSendErr(fmt.Errorf("marshal audio append failed: %w", err))
 					log.Debugf("[aliyun_qwen3] marshal audio append failed: %v", err)
 					return
 				} else {
 					if err := conn.WriteMessage(websocket.TextMessage, bytes); err != nil {
 						a.resetConn(conn)
-						sendErrMu.Lock()
-						sendErr = fmt.Errorf("send audio failed: %w", err)
-						sendErrMu.Unlock()
+						recordSendErr(fmt.Errorf("send audio failed: %w", err))
 						log.Debugf("[aliyun_qwen3] send audio failed: chunk #%d: %v", audioChunkCount, err)
 						return
 					}
