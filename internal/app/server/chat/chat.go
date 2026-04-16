@@ -41,6 +41,9 @@ type ChatManager struct {
 	sessionMu sync.RWMutex
 	session   *ChatSession
 
+	startingSession     *ChatSession
+	startingSessionDone chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -51,6 +54,7 @@ type ChatManager struct {
 	// Close 保护，防止多次关闭
 	closeOnce      sync.Once
 	managerClosing atomic.Bool
+	needFreshHello bool
 }
 
 type chatMcpInitState uint8
@@ -394,35 +398,49 @@ func (c *ChatManager) HandleHelloMessage(msg *ClientMessage) error {
 
 	clientState := c.clientState
 	clientState.InputAudioFormat = *msg.AudioParams
-
+	isFirstHello := !c.helloInited
+	requiresFreshHello := c.requiresFreshHello()
 	if c.helloInited {
 		prevAgentID := clientState.AgentID
 		if err := c.refreshDeviceConfigOnHello(); err != nil {
 			log.Warnf("设备 %s duplicate hello 刷新配置失败，降级继续: %v", clientState.DeviceID, err)
 		}
 		c.resetOpenClawModeOnHello(prevAgentID, clientState.AgentID)
-		if _, err := c.ensureSession(); err != nil {
-			return err
+	} else {
+		c.resetOpenClawModeOnHello(clientState.AgentID)
+	}
+
+	if isFirstHello || requiresFreshHello {
+		session, err := auth.A().CreateSession(msg.DeviceID)
+		if err != nil {
+			return fmt.Errorf("创建会话失败: %v", err)
 		}
-		c.scheduleMcpInitOnHelloLocked(msg)
-		log.Infof("设备 %s 收到重复hello，跳过重复初始化", clientState.DeviceID)
-		return c.sendHelloResponse(msg)
+		clientState.SessionID = session.ID
+		c.helloInited = true
 	}
 
-	c.resetOpenClawModeOnHello(clientState.AgentID)
-	session, err := auth.A().CreateSession(msg.DeviceID)
+	chatSession, err := c.ensureSessionForHello()
 	if err != nil {
-		return fmt.Errorf("创建会话失败: %v", err)
+		if isFirstHello || requiresFreshHello {
+			c.setNeedFreshHello(true)
+		}
+		return err
 	}
-	clientState.SessionID = session.ID
-	c.helloInited = true
-
-	if _, err := c.ensureSession(); err != nil {
+	if err := c.sendHelloResponse(msg); err != nil {
+		if isFirstHello || requiresFreshHello {
+			c.setNeedFreshHello(true)
+			if chatSession != nil {
+				chatSession.CloseWithReason(chatSessionCloseReasonFatalError)
+			}
+		}
 		return err
 	}
 	c.scheduleMcpInitOnHelloLocked(msg)
+	if !isFirstHello && !requiresFreshHello {
+		log.Infof("设备 %s 收到重复hello，跳过重复初始化", clientState.DeviceID)
+	}
 
-	return c.sendHelloResponse(msg)
+	return nil
 }
 
 func (c *ChatManager) scheduleMcpInitOnHelloLocked(msg *ClientMessage) {
@@ -569,51 +587,155 @@ func (c *ChatManager) HandleGoodByeMessage(msg *ClientMessage) error {
 }
 
 func (c *ChatManager) ensureSession() (*ChatSession, error) {
-	c.sessionMu.RLock()
-	if c.session != nil {
-		session := c.session
-		c.sessionMu.RUnlock()
-		return session, nil
-	}
-	c.sessionMu.RUnlock()
-
-	c.sessionMu.Lock()
-	defer c.sessionMu.Unlock()
-
-	if c.session != nil {
-		return c.session, nil
-	}
-	if !c.helloInited {
-		return nil, fmt.Errorf("hello尚未初始化，无法创建ChatSession")
-	}
-
-	session := NewChatSession(
-		c.clientState,
-		c.serverTransport,
-		c.hookHub,
-		c.transformRegistry,
-		WithChatSessionCloseHandler(c.handleSessionClosed),
-	)
-	if err := session.Start(c.ctx); err != nil {
-		return nil, err
-	}
-
-	c.session = session
-	return session, nil
+	return c.ensureSessionInternal(false)
 }
 
-func (c *ChatManager) handleSessionClosed(reason string) {
+func (c *ChatManager) ensureSessionForHello() (*ChatSession, error) {
+	return c.ensureSessionInternal(true)
+}
+
+func (c *ChatManager) ensureSessionInternal(allowFreshHello bool) (*ChatSession, error) {
+	for {
+		c.sessionMu.Lock()
+		if c.session != nil {
+			session := c.session
+			c.sessionMu.Unlock()
+			if session.IsClosing() {
+				return nil, fmt.Errorf("ChatSession 正在关闭，稍后再试")
+			}
+			return session, nil
+		}
+		if c.startingSession != nil {
+			waitCh := c.startingSessionDone
+			c.sessionMu.Unlock()
+			if waitCh == nil {
+				return nil, fmt.Errorf("ChatSession 正在启动，稍后再试")
+			}
+			<-waitCh
+			continue
+		}
+		if !c.helloInited {
+			c.sessionMu.Unlock()
+			return nil, fmt.Errorf("hello尚未初始化，无法创建ChatSession")
+		}
+		if c.needFreshHello && !allowFreshHello {
+			c.sessionMu.Unlock()
+			return nil, fmt.Errorf("ChatSession 已退出，请先重新发送hello")
+		}
+
+		session := NewChatSession(
+			c.clientState,
+			c.serverTransport,
+			c.hookHub,
+			c.transformRegistry,
+			WithChatSessionCloseHandler(c.handleSessionClosed),
+		)
+		c.startingSession = session
+		c.startingSessionDone = make(chan struct{})
+		c.sessionMu.Unlock()
+
+		err := session.Start(c.ctx)
+		if err != nil {
+			session.CloseWithReason(chatSessionCloseReasonFatalError)
+		}
+		c.finishSessionStart(session, allowFreshHello, err)
+		if err != nil {
+			return nil, err
+		}
+		if session.IsClosing() {
+			return nil, fmt.Errorf("ChatSession 正在关闭，稍后再试")
+		}
+		return session, nil
+	}
+}
+
+func (c *ChatManager) requiresFreshHello() bool {
+	c.sessionMu.RLock()
+	defer c.sessionMu.RUnlock()
+	return c.needFreshHello
+}
+
+func (c *ChatManager) setNeedFreshHello(required bool) {
 	c.sessionMu.Lock()
-	c.session = nil
+	c.needFreshHello = required
 	c.sessionMu.Unlock()
+}
+
+func (c *ChatManager) finishSessionStart(session *ChatSession, allowFreshHello bool, startErr error) {
+	var waitCh chan struct{}
+
+	c.sessionMu.Lock()
+	if c.startingSession == session {
+		waitCh = c.startingSessionDone
+		c.startingSession = nil
+		c.startingSessionDone = nil
+		if startErr == nil && !session.IsClosing() {
+			c.session = session
+			if allowFreshHello {
+				c.needFreshHello = false
+			}
+		}
+	}
+	c.sessionMu.Unlock()
+
+	if waitCh != nil {
+		close(waitCh)
+	}
+}
+
+func (c *ChatManager) handleSessionClosed(session *ChatSession, reason string) {
+	var waitCh chan struct{}
+
+	c.sessionMu.Lock()
+	switch {
+	case c.session == session:
+		c.session = nil
+		if c.serverTransport != nil &&
+			c.serverTransport.GetTransportType() == types_conn.TransportTypeMqttUdp &&
+			reason == chatSessionCloseReasonExplicitExit {
+			c.needFreshHello = true
+		}
+	case c.startingSession == session:
+		waitCh = c.startingSessionDone
+		c.startingSession = nil
+		c.startingSessionDone = nil
+	default:
+		c.sessionMu.Unlock()
+		log.Debugf("设备 %s 收到过期 ChatSession close 回调，忽略后续清理", c.DeviceID)
+		return
+	}
+	c.sessionMu.Unlock()
+
+	if waitCh != nil {
+		close(waitCh)
+		log.Debugf("设备 %s ChatSession 在启动阶段关闭，已清理启动状态", c.DeviceID)
+		return
+	}
 
 	if reason == chatSessionCloseReasonManagerShutdown {
 		return
 	}
 
-	if c.serverTransport != nil && c.serverTransport.GetTransportType() == types_conn.TransportTypeWebsocket {
+	if c.serverTransport == nil {
+		return
+	}
+
+	switch c.serverTransport.GetTransportType() {
+	case types_conn.TransportTypeWebsocket:
 		if err := c.shutdown(true); err != nil {
 			log.Warnf("关闭 websocket transport 失败: %v", err)
+		}
+	case types_conn.TransportTypeMqttUdp:
+		if reason != chatSessionCloseReasonExplicitExit {
+			return
+		}
+		if err := c.serverTransport.SendMqttGoodbye(); err != nil {
+			log.Warnf("发送 mqtt goodbye 失败: %v", err)
+		}
+		if c.transport != nil {
+			if err := c.transport.CloseAudioChannel(); err != nil {
+				log.Warnf("关闭 mqtt udp 音频通道失败: %v", err)
+			}
 		}
 	}
 }
@@ -626,9 +748,16 @@ func (c *ChatManager) shutdown(closeTransport bool) error {
 			log.Infof("关闭 ChatManager, 设备 %s", c.clientState.DeviceID)
 		}
 
-		session := c.GetSession()
+		c.sessionMu.RLock()
+		session := c.session
+		startingSession := c.startingSession
+		c.sessionMu.RUnlock()
+
 		if session != nil {
 			session.CloseWithReason(chatSessionCloseReasonManagerShutdown)
+		}
+		if startingSession != nil && startingSession != session {
+			startingSession.CloseWithReason(chatSessionCloseReasonManagerShutdown)
 		}
 
 		if c.clientState != nil && c.mcpTransport != nil {
