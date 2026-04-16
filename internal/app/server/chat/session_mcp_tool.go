@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -226,10 +227,12 @@ func controlMusicPlayback(ctx context.Context, session *ChatSession, params *Mus
 		if err := session.mediaPlayer.Pause(); err != nil {
 			return nil, err
 		}
+		flushQueuedMediaAudio(session, action)
 	case "stop":
 		if err := session.mediaPlayer.Stop(ctx); err != nil {
 			return nil, err
 		}
+		flushQueuedMediaAudio(session, action)
 	case "prev":
 		if err := session.mediaPlayer.Prev(ctx); err != nil {
 			return nil, err
@@ -261,6 +264,25 @@ func controlMusicPlayback(ctx context.Context, session *ChatSession, params *Mus
 	result.CurrentSource = string(state.CurrentSourceType)
 	result.PositionMs = state.PositionMs
 	return result, nil
+}
+
+func flushQueuedMediaAudio(session *ChatSession, action string) {
+	if session == nil || session.ttsManager == nil {
+		return
+	}
+
+	interruptCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	if err := session.ttsManager.InterruptAndClearQueueSync(interruptCtx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Warnf("媒体控制后清理音频发送队列超时: action=%s", action)
+			return
+		}
+		if !errors.Is(err, context.Canceled) {
+			log.Warnf("媒体控制后清理音频发送队列失败: action=%s, err=%v", action, err)
+		}
+	}
 }
 
 func normalizeMusicPlaybackAction(action string) string {
