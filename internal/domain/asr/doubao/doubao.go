@@ -275,13 +275,29 @@ func (d *DoubaoV2ASR) receiveStreamResults(ctx context.Context, streamID string,
 					errMsg,
 					retryReason,
 				)
+				// 错误分支 fallback：如果之前有识别到的中间结果，优先使用
+				fallbackText := ""
+				if lastNonEmptyText != "" {
+					fallbackText = lastNonEmptyText
+				} else if lastNonEmptyUtterance != "" {
+					fallbackText = lastNonEmptyUtterance
+				}
+				if fallbackText != "" {
+					log.Warnf(
+						"[doubao-asr:%s] 错误分支使用 fallback 文本: fallback_text=%q, last_non_empty=%q, err=%s",
+						streamID,
+						previewDoubaoText(fallbackText, 24),
+						previewDoubaoText(lastNonEmptyText, 24),
+						errMsg,
+					)
+				}
 				// 使用 select 避免向已关闭的 channel 发送（如果 ctx 已取消，优先选择 ctx.Done()）
 				select {
 				case <-ctx.Done():
 					log.Debugf("[doubao-asr:%s] 发送错误结果时上下文已取消，跳过发送", streamID)
 					return
 				case resultChan <- types.StreamingResult{
-					Text:        "",
+					Text:        fallbackText,
 					IsFinal:     true,
 					Error:       fmt.Errorf("%s", errMsg),
 					RetryReason: retryReason,

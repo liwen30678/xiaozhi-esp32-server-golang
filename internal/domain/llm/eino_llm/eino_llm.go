@@ -27,6 +27,7 @@ type EinoLLMProvider struct {
 	modelName        string
 	maxTokens        int
 	streamable       bool
+	supportTools     bool // 是否向LLM发送tools参数，默认true
 	config           map[string]interface{}
 	providerType     string // "openai" 或 "ollama"
 	reasoningTracker *reasoningContentTracker
@@ -40,7 +41,8 @@ type EinoConfig struct {
 	BaseURL    string                 `json:"base_url"`
 	MaxTokens  int                    `json:"max_tokens"`
 	Parameters map[string]interface{} `json:"parameters,omitempty"`
-	Streamable bool                   `json:"streamable,omitempty"`
+	Streamable   bool                   `json:"streamable,omitempty"`
+	SupportTools *bool                  `json:"support_tools,omitempty"` // 是否向LLM发送tools参数，默认true
 }
 
 // 连接池配置
@@ -121,6 +123,11 @@ func NewEinoLLMProvider(config map[string]interface{}) (*EinoLLMProvider, error)
 		streamable = *parsedConfig.Streamable
 	}
 
+	supportTools := true
+	if parsedConfig.SupportTools != nil {
+		supportTools = *parsedConfig.SupportTools
+	}
+
 	var chatModel model.ToolCallingChatModel
 
 	// 根据类型创建不同的ChatModel实现
@@ -144,6 +151,7 @@ func NewEinoLLMProvider(config map[string]interface{}) (*EinoLLMProvider, error)
 		modelName:        modelName,
 		maxTokens:        maxTokens,
 		streamable:       streamable,
+		supportTools:     supportTools,
 		config:           config,
 		providerType:     providerType,
 		reasoningTracker: tracker,
@@ -304,6 +312,14 @@ func (p *EinoLLMProvider) EinoResponseWithTools(ctx context.Context, sessionID s
 		log.Infof("[Eino-LLM] 开始处理Eino工具请求 - SessionID: %s, tools: %+v", sessionID, tools)
 
 		// 如果有工具，需要绑定工具到ChatModel
+		if len(tools) > 0 {
+			// 如果配置不支持tools，清空tools列表
+			if !p.supportTools {
+				log.Infof("[Eino-LLM] support_tools=false, 跳过工具绑定")
+				tools = nil
+			}
+		}
+
 		if len(tools) > 0 {
 			p.chatModel, err = p.chatModel.WithTools(tools)
 			if err != nil {
