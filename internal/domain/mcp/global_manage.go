@@ -57,6 +57,8 @@ type MCPServerConnection struct {
 	client        *client.Client
 	tools         map[string]tool.InvokableTool
 	connected     bool
+	refreshing    bool
+	refreshQueued bool
 	mu            sync.RWMutex
 	lastError     error
 	retryCount    int
@@ -69,6 +71,8 @@ var (
 	globalManager *GlobalMCPManager
 	once          sync.Once
 )
+
+var buildGlobalMCPTransport = buildMCPTransport
 
 // GetGlobalMCPManager 获取全局MCP管理器单例
 func GetGlobalMCPManager() *GlobalMCPManager {
@@ -230,17 +234,42 @@ func (g *GlobalMCPManager) connectToServer(config MCPServerConfig) error {
 }
 
 // connect 连接到MCP服务器
-func (conn *MCPServerConnection) connect() error {
+func (conn *MCPServerConnection) connect() (retErr error) {
 	// 使用背景上下文，不设置超时，让SSE连接长期保持
 	ctx := context.Background()
 
-	transportInstance, endpoint, err := buildMCPTransport(conn.config)
+	transportInstance, endpoint, err := buildGlobalMCPTransport(conn.config)
 	if err != nil {
 		return err
 	}
 
 	// 使用 client.NewClient 创建 MCP 客户端
 	mcpClient := client.NewClient(transportInstance)
+	serverName := conn.config.Name
+	defer func() {
+		if retErr == nil {
+			return
+		}
+
+		conn.mu.Lock()
+		conn.client = nil
+		conn.connected = false
+		conn.refreshing = false
+		conn.refreshQueued = false
+		conn.tools = make(map[string]tool.InvokableTool)
+		conn.lastError = retErr
+		conn.mu.Unlock()
+
+		if globalManager != nil {
+			globalManager.removeGlobalTools(serverName)
+		}
+
+		if closeErr := mcpClient.Close(); closeErr != nil {
+			log.Errorf("关闭MCP客户端失败: %v", closeErr)
+		}
+	}()
+
+	mcpClient.OnNotification(conn.handleJSONRPCNotification)
 	conn.mu.Lock()
 	conn.client = mcpClient
 	conn.mu.Unlock()
@@ -250,7 +279,8 @@ func (conn *MCPServerConnection) connect() error {
 	// 启动客户端
 	if err := mcpClient.Start(ctx); err != nil {
 		log.Errorf("启动MCP客户端失败，服务器: %s, 错误: %v", conn.config.Name, err)
-		return fmt.Errorf("启动客户端失败: %v", err)
+		retErr = fmt.Errorf("启动客户端失败: %v", err)
+		return retErr
 	}
 
 	log.Infof("MCP客户端启动成功: %s", conn.config.Name)
@@ -273,15 +303,17 @@ func (conn *MCPServerConnection) connect() error {
 	initResult, err := mcpClient.Initialize(ctx, initRequest)
 	if err != nil {
 		log.Errorf("初始化MCP服务器失败，服务器: %s, 错误: %v", conn.config.Name, err)
-		return fmt.Errorf("初始化失败: %v", err)
+		retErr = fmt.Errorf("初始化失败: %v", err)
+		return retErr
 	}
 
 	log.Infof("MCP服务器初始化成功: %s, 结果: %+v", conn.config.Name, initResult)
 
 	// 获取工具列表
-	if err := conn.refreshTools(ctx); err != nil {
-		log.Errorf("获取工具列表失败: %v", err)
-		// 不直接返回错误，因为工具列表获取失败不应该阻止连接建立
+	if refreshErr := conn.refreshTools(ctx); refreshErr != nil {
+		log.Errorf("获取工具列表失败: %v", refreshErr)
+		retErr = fmt.Errorf("获取工具列表失败: %v", refreshErr)
+		return retErr
 	}
 
 	conn.mu.Lock()
@@ -292,6 +324,55 @@ func (conn *MCPServerConnection) connect() error {
 
 	log.Infof("MCP服务器连接建立完成: %s", conn.config.Name)
 	return nil
+}
+
+func (conn *MCPServerConnection) handleJSONRPCNotification(notification mcp.JSONRPCNotification) {
+	switch notification.Method {
+	case mcp.MethodNotificationToolsListChanged, "notifications/tools/updated":
+		log.Infof("MCP服务器 %s 收到工具列表更新通知，准备刷新工具列表", conn.config.Name)
+		conn.scheduleToolsRefresh()
+	}
+}
+
+func (conn *MCPServerConnection) scheduleToolsRefresh() {
+	conn.mu.Lock()
+	if conn.refreshing {
+		conn.refreshQueued = true
+		conn.mu.Unlock()
+		return
+	}
+	conn.refreshing = true
+	conn.mu.Unlock()
+
+	go conn.runScheduledToolsRefresh()
+}
+
+func (conn *MCPServerConnection) runScheduledToolsRefresh() {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := conn.refreshTools(ctx)
+		cancel()
+		if err != nil {
+			log.Warnf("MCP服务器 %s 基于通知刷新工具列表失败: %v", conn.config.Name, err)
+		}
+
+		conn.mu.Lock()
+		if err != nil {
+			conn.lastError = err
+		} else {
+			conn.lastError = nil
+		}
+
+		if conn.refreshQueued {
+			conn.refreshQueued = false
+			conn.mu.Unlock()
+			continue
+		}
+
+		conn.refreshing = false
+		conn.mu.Unlock()
+		return
+	}
 }
 
 func normalizeMCPTransportType(t string) string {
@@ -543,15 +624,27 @@ func (g *GlobalMCPManager) GetToolByName(name string) (tool.InvokableTool, bool)
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	//所有的server
-	for _, conn := range g.servers {
-		sname := fmt.Sprintf("%s_%s", conn.config.Name, name)
-		mcpToolInterface, exists := g.tools[sname]
-		if exists {
-			return mcpToolInterface, true
-		}
+	if invokable, exists := g.tools[name]; exists {
+		return invokable, true
 	}
-	return nil, false
+
+	var matched tool.InvokableTool
+	matchCount := 0
+	for _, invokable := range g.tools {
+		mcpToolInstance, ok := invokable.(*McpTool)
+		if !ok || mcpToolInstance.info == nil || mcpToolInstance.info.Name != name {
+			continue
+		}
+		matchCount++
+		if matchCount == 1 {
+			matched = invokable
+			continue
+		}
+
+		log.Warnf("全局MCP工具名 %s 存在多个同名提供方，请显式指定 server 名称", name)
+		return nil, false
+	}
+	return matched, matchCount == 1
 }
 
 func GetServerClientByName(serverName string) *client.Client {
@@ -607,6 +700,36 @@ func isSessionClosedError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "session closed")
+}
+
+func isRetryableRemoteCallError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isSessionClosedError(err) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	retryableIndicators := []string{
+		"unexpected end of json input",
+		"invalid character",
+		"eof",
+		"broken pipe",
+		"connection reset",
+		"connection refused",
+		"connection aborted",
+		"timeout",
+		"bad gateway",
+		"502",
+		"temporarily unavailable",
+	}
+	for _, indicator := range retryableIndicators {
+		if strings.Contains(message, indicator) {
+			return true
+		}
+	}
+	return false
 }
 
 // monitorConnections 监控连接状态

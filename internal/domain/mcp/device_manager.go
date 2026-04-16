@@ -216,6 +216,9 @@ func NewIotOverMcpClient(deviceID string, transportType string, conn ConnInterfa
 	iotOverMcp.setConnected(true)
 	iotOverMcp.setLastPing(time.Now())
 	wsTransport.SetNotificationHandler(iotOverMcp.handleJSONRPCNotification)
+	wsTransport.SetActivityHandler(func() {
+		iotOverMcp.setLastPing(time.Now())
+	})
 
 	// 设置transport的关闭回调
 	wsTransport.SetOnCloseHandler(iotOverMcp.handleTransportClose)
@@ -250,6 +253,7 @@ func (dc *McpClientInstance) refreshTools() error {
 	convertedTools := ConvertMcpToolListToInvokableToolList(tools.Tools, dc.serverName, dc.mcpClient)
 
 	dc.storeToolsSnapshot(convertedTools)
+	dc.setLastPing(time.Now())
 
 	logger.Infof("刷新工具列表成功: %s 获取到 %d 个工具", dc.serverName, len(convertedTools))
 	return nil
@@ -426,6 +430,10 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	if err := mcpInstance.refreshTools(); err != nil {
 		logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
 		mcpInstance.closeWithReason("refresh_tools_failed")
+		return
+	}
+	if mcpInstance.conn != nil {
+		logger.Debugf("设备 %s 通过 tools/list 心跳维持 IoT MCP 存活", mcpInstance.serverName)
 		return
 	}
 	err := mcpInstance.mcpClient.Ping(mcpInstance.Ctx)

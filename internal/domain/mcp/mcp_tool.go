@@ -12,6 +12,14 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+var callRemoteMCPTool = func(ctx context.Context, cli *client.Client, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return cli.CallTool(ctx, request)
+}
+
+var reconnectGlobalMCPServer = func(serverName string) (*client.Client, error) {
+	return GetGlobalMCPManager().reconnectServer(serverName)
+}
+
 // LocalToolHandler 本地工具处理函数类型
 type LocalToolHandler func(ctx context.Context, argumentsInJSON string) (string, error)
 
@@ -84,26 +92,27 @@ func (t *McpTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts
 		},
 	}
 
-	// 第一次尝试调用
-	result, err := t.client.CallTool(ctx, callRequest)
-	if err != nil && isSessionClosedError(err) {
-		log.Warnf("工具 %s 调用失败(session closed): %v，尝试重连后重试", t.info.Name, err)
-
-		// 重连并获取新的client
-		newClient, err := GetGlobalMCPManager().reconnectServer(t.serverName)
-		if err != nil {
-			return retContent, fmt.Errorf("重连服务器失败: %v", err)
+	result, err := callRemoteMCPTool(ctx, t.client, callRequest)
+	if err != nil {
+		if !isRetryableRemoteCallError(err) {
+			return retContent, fmt.Errorf("调用工具失败: %v", err)
 		}
 
-		// 更新工具的client引用
-		t.client = newClient
+		log.Warnf("工具 %s 调用失败，准备重连服务器 %s 后重试: %v", t.info.Name, t.serverName, err)
 
-		// 重试调用
-		result, err = t.client.CallTool(ctx, callRequest)
+		newClient, reconnectErr := reconnectGlobalMCPServer(t.serverName)
+		if reconnectErr != nil {
+			return retContent, fmt.Errorf("调用工具失败: %v，且重连服务器失败: %v", err, reconnectErr)
+		}
+
+		t.client = newClient
+		result, err = callRemoteMCPTool(ctx, t.client, callRequest)
 		if err != nil {
 			return retContent, fmt.Errorf("重连后调用仍然失败: %v", err)
 		}
-	} else if err != nil {
+	}
+
+	if err != nil {
 		return retContent, fmt.Errorf("调用工具失败: %v", err)
 	}
 

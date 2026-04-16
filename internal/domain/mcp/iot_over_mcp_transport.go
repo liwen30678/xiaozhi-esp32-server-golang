@@ -45,6 +45,7 @@ type IotOverMcpTransport struct {
 	conn ConnInterface
 
 	notifyHandler func(notification mcp.JSONRPCNotification)
+	activityHandler func()
 	// 添加关闭回调
 	onCloseHandler func(reason string)
 
@@ -146,6 +147,10 @@ func (t *IotOverMcpTransport) readMessages() {
 }
 
 func (t *IotOverMcpTransport) handleMessage(message []byte) {
+	if t.activityHandler != nil {
+		t.activityHandler()
+	}
+
 	method, hasID, err := classifyJSONRPCMessage(message)
 	if err != nil {
 		log.Warnf("Received unrecognized IoT MCP message: %s", string(message))
@@ -253,6 +258,10 @@ func (t *IotOverMcpTransport) SendNotification(ctx context.Context, notification
 
 func (t *IotOverMcpTransport) SetNotificationHandler(handler func(notification mcp.JSONRPCNotification)) {
 	t.notifyHandler = handler
+}
+
+func (t *IotOverMcpTransport) SetActivityHandler(handler func()) {
+	t.activityHandler = handler
 }
 
 // SetOnCloseHandler 设置连接关闭回调

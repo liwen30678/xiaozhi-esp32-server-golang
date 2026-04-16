@@ -11,6 +11,7 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/viper"
@@ -117,6 +118,38 @@ func TestGlobalMCPManager_GetToolByName(t *testing.T) {
 	assert.Nil(t, tool)
 }
 
+func TestGlobalMCPManager_GetToolByNameRejectsAmbiguousMatches(t *testing.T) {
+	manager := GetGlobalMCPManager()
+
+	manager.mu.Lock()
+	originalTools := manager.tools
+	manager.tools = map[string]einotool.InvokableTool{
+		"server_a_shared_tool": &McpTool{
+			info:       &schema.ToolInfo{Name: "shared_tool"},
+			serverName: "server_a",
+		},
+		"server_b_shared_tool": &McpTool{
+			info:       &schema.ToolInfo{Name: "shared_tool"},
+			serverName: "server_b",
+		},
+	}
+	manager.mu.Unlock()
+
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		manager.tools = originalTools
+		manager.mu.Unlock()
+	})
+
+	tool, exists := manager.GetToolByName("shared_tool")
+	assert.False(t, exists)
+	assert.Nil(t, tool)
+
+	tool, exists = manager.GetToolByName("server_a_shared_tool")
+	assert.True(t, exists)
+	assert.NotNil(t, tool)
+}
+
 func TestMCPServerConfig_Structure(t *testing.T) {
 	config := MCPServerConfig{
 		Name:    "test_server",
@@ -137,6 +170,125 @@ func TestReconnectConfig_Structure(t *testing.T) {
 
 	assert.Equal(t, 5*time.Second, config.Interval)
 	assert.Equal(t, 10, config.MaxAttempts)
+}
+
+func TestGlobalMCPConnectionRefreshesToolsOnStandardNotification(t *testing.T) {
+	manager := GetGlobalMCPManager()
+	transportInstance := &mockGlobalTransport{
+		listResponses: []mockGlobalTransportListResponse{
+			{
+				result: &mcp.ListToolsResult{
+					Tools: []mcp.Tool{
+						mcp.NewTool("weather", mcp.WithDescription("weather v1")),
+					},
+				},
+			},
+			{
+				result: &mcp.ListToolsResult{
+					Tools: []mcp.Tool{
+						mcp.NewTool("weather", mcp.WithDescription("weather v1")),
+						mcp.NewTool("forecast", mcp.WithDescription("forecast v2")),
+					},
+				},
+			},
+		},
+	}
+
+	originalBuildTransport := buildGlobalMCPTransport
+	buildGlobalMCPTransport = func(config MCPServerConfig) (transport.Interface, string, error) {
+		return transportInstance, "mock://global", nil
+	}
+	t.Cleanup(func() {
+		buildGlobalMCPTransport = originalBuildTransport
+	})
+
+	manager.mu.Lock()
+	originalTools := manager.tools
+	manager.tools = make(map[string]einotool.InvokableTool)
+	manager.mu.Unlock()
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		manager.tools = originalTools
+		manager.mu.Unlock()
+	})
+
+	conn := &MCPServerConnection{
+		config: MCPServerConfig{
+			Name:    "mock_server",
+			Type:    "streamablehttp",
+			Url:     "mock://global",
+			Enabled: true,
+		},
+		tools: make(map[string]einotool.InvokableTool),
+	}
+
+	require.NoError(t, conn.connect())
+
+	initialTools := manager.GetAllTools()
+	require.Contains(t, initialTools, "mock_server_weather")
+	require.NotContains(t, initialTools, "mock_server_forecast")
+
+	transportInstance.emitNotification(mcp.JSONRPCNotification{
+		JSONRPC: mcp.JSONRPC_VERSION,
+		Notification: mcp.Notification{
+			Method: mcp.MethodNotificationToolsListChanged,
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		tools := manager.GetAllTools()
+		_, exists := tools["mock_server_forecast"]
+		return exists
+	}, time.Second, 20*time.Millisecond)
+}
+
+func TestGlobalMCPConnectionFailsWhenInitialToolsListFails(t *testing.T) {
+	manager := GetGlobalMCPManager()
+	transportInstance := &mockGlobalTransport{
+		listResponses: []mockGlobalTransportListResponse{
+			{
+				err: fmt.Errorf("tools/list failed"),
+			},
+		},
+	}
+
+	originalBuildTransport := buildGlobalMCPTransport
+	buildGlobalMCPTransport = func(config MCPServerConfig) (transport.Interface, string, error) {
+		return transportInstance, "mock://global", nil
+	}
+	t.Cleanup(func() {
+		buildGlobalMCPTransport = originalBuildTransport
+	})
+
+	manager.mu.Lock()
+	originalTools := manager.tools
+	manager.tools = make(map[string]einotool.InvokableTool)
+	manager.mu.Unlock()
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		manager.tools = originalTools
+		manager.mu.Unlock()
+	})
+
+	conn := &MCPServerConnection{
+		config: MCPServerConfig{
+			Name:    "broken_server",
+			Type:    "streamablehttp",
+			Url:     "mock://global",
+			Enabled: true,
+		},
+		tools: make(map[string]einotool.InvokableTool),
+	}
+
+	err := conn.connect()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "获取工具列表失败")
+	assert.False(t, conn.connected)
+	assert.Nil(t, conn.client)
+	assert.Empty(t, manager.GetAllTools())
+	conn.mu.RLock()
+	assert.Error(t, conn.lastError)
+	conn.mu.RUnlock()
 }
 
 // TestMCPGoStructures 测试 mcp-go 库结构体的使用
@@ -203,6 +355,59 @@ func TestMCPTool_InvokableRun_NewTool(t *testing.T) {
 	assert.Error(t, err) // 预期会有网络错误
 }
 
+func TestIsRetryableRemoteCallError(t *testing.T) {
+	assert.True(t, isRetryableRemoteCallError(fmt.Errorf("session closed")))
+	assert.True(t, isRetryableRemoteCallError(fmt.Errorf("failed to unmarshal response: unexpected end of JSON input")))
+	assert.True(t, isRetryableRemoteCallError(fmt.Errorf("upstream bad gateway: 502")))
+	assert.False(t, isRetryableRemoteCallError(fmt.Errorf("tool validation failed")))
+}
+
+func TestMCPToolInvokableRunReconnectsOnRetryableRemoteCallError(t *testing.T) {
+	originalCallRemoteMCPTool := callRemoteMCPTool
+	originalReconnectGlobalMCPServer := reconnectGlobalMCPServer
+	t.Cleanup(func() {
+		callRemoteMCPTool = originalCallRemoteMCPTool
+		reconnectGlobalMCPServer = originalReconnectGlobalMCPServer
+	})
+
+	initialClient := new(client.Client)
+	reconnectedClient := new(client.Client)
+	callCount := 0
+	reconnectCount := 0
+
+	callRemoteMCPTool = func(ctx context.Context, cli *client.Client, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		callCount++
+		assert.Equal(t, "maps_weather", request.Params.Name)
+		if callCount == 1 {
+			assert.Same(t, initialClient, cli)
+			return nil, fmt.Errorf("failed to unmarshal response: unexpected end of JSON input")
+		}
+
+		assert.Same(t, reconnectedClient, cli)
+		require.Equal(t, map[string]interface{}{"city": "北京"}, request.Params.Arguments)
+		return mcp.NewToolResultText("weather ok"), nil
+	}
+
+	reconnectGlobalMCPServer = func(serverName string) (*client.Client, error) {
+		reconnectCount++
+		assert.Equal(t, "高德地图", serverName)
+		return reconnectedClient, nil
+	}
+
+	testTool := &McpTool{
+		info:       &schema.ToolInfo{Name: "maps_weather", Desc: "天气查询"},
+		serverName: "高德地图",
+		client:     initialClient,
+	}
+
+	result, err := testTool.InvokableRun(context.Background(), `{"city":"北京"}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, "weather ok")
+	assert.Equal(t, 2, callCount)
+	assert.Equal(t, 1, reconnectCount)
+	assert.Same(t, reconnectedClient, testTool.client)
+}
+
 func TestFilterMCPToolsByAllowList(t *testing.T) {
 	tools := []mcp.Tool{
 		{Name: "alerts"},
@@ -232,6 +437,85 @@ type testIotConn struct {
 type capturedJSONRPCRequest struct {
 	Method string          `json:"method"`
 	ID     json.RawMessage `json:"id"`
+}
+
+type mockGlobalTransportListResponse struct {
+	result *mcp.ListToolsResult
+	err    error
+}
+
+type mockGlobalTransport struct {
+	mu                  sync.Mutex
+	notificationHandler func(notification mcp.JSONRPCNotification)
+	listResponses       []mockGlobalTransportListResponse
+	defaultListResult   *mcp.ListToolsResult
+}
+
+func (t *mockGlobalTransport) Start(ctx context.Context) error {
+	return nil
+}
+
+func (t *mockGlobalTransport) SendRequest(ctx context.Context, request transport.JSONRPCRequest) (*transport.JSONRPCResponse, error) {
+	switch request.Method {
+	case string(mcp.MethodInitialize):
+		return buildJSONRPCTransportSuccessResponse(request.ID, mcp.InitializeResult{
+			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+			Capabilities:    mcp.ServerCapabilities{},
+			ServerInfo: mcp.Implementation{
+				Name:    "mock-global-mcp",
+				Version: "1.0.0",
+			},
+		})
+	case string(mcp.MethodToolsList):
+		t.mu.Lock()
+		var response mockGlobalTransportListResponse
+		if len(t.listResponses) > 0 {
+			response = t.listResponses[0]
+			t.listResponses = t.listResponses[1:]
+		} else {
+			response = mockGlobalTransportListResponse{result: t.defaultListResult}
+		}
+		t.mu.Unlock()
+
+		if response.err != nil {
+			return nil, response.err
+		}
+		if response.result == nil {
+			response.result = &mcp.ListToolsResult{}
+		}
+		return buildJSONRPCTransportSuccessResponse(request.ID, response.result)
+	case string(mcp.MethodPing):
+		return buildJSONRPCTransportSuccessResponse(request.ID, map[string]any{})
+	default:
+		return nil, fmt.Errorf("unexpected method: %s", request.Method)
+	}
+}
+
+func (t *mockGlobalTransport) SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error {
+	return nil
+}
+
+func (t *mockGlobalTransport) SetNotificationHandler(handler func(notification mcp.JSONRPCNotification)) {
+	t.mu.Lock()
+	t.notificationHandler = handler
+	t.mu.Unlock()
+}
+
+func (t *mockGlobalTransport) Close() error {
+	return nil
+}
+
+func (t *mockGlobalTransport) GetSessionId() string {
+	return "mock-session"
+}
+
+func (t *mockGlobalTransport) emitNotification(notification mcp.JSONRPCNotification) {
+	t.mu.Lock()
+	handler := t.notificationHandler
+	t.mu.Unlock()
+	if handler != nil {
+		handler(notification)
+	}
 }
 
 func newTestIotConn(transportType string) *testIotConn {
@@ -698,6 +982,67 @@ func TestHeartbeatRefreshToolsFailure_DestroysRuntime(t *testing.T) {
 	assert.Nil(t, session)
 }
 
+func buildJSONRPCTransportSuccessResponse(id mcp.RequestId, result any) (*transport.JSONRPCResponse, error) {
+	resultBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &transport.JSONRPCResponse{
+		JSONRPC: mcp.JSONRPC_VERSION,
+		ID:      id,
+		Result:  resultBytes,
+	}, nil
+}
+
+func TestHeartbeatIotRuntimeSkipsPingAndRefreshesLastPing(t *testing.T) {
+	deviceID := fmt.Sprintf("heartbeat-iot-skip-ping-%d", time.Now().UnixNano())
+	conn := newTestIotConn("websocket")
+	conn.deviceID = deviceID
+	conn.autoRespond = true
+
+	var methodsMu sync.Mutex
+	methods := make([]string, 0, 4)
+	conn.onRequest = func(request capturedJSONRPCRequest, _ []byte) {
+		methodsMu.Lock()
+		methods = append(methods, request.Method)
+		methodsMu.Unlock()
+	}
+
+	t.Cleanup(func() {
+		if session := GetDeviceMcpClient(deviceID); session != nil && session.cancel != nil {
+			session.cancel()
+		}
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	require.NoError(t, EnsureDeviceIotOverMcp(deviceID, conn))
+
+	session := GetDeviceMcpClient(deviceID)
+	require.NotNil(t, session)
+
+	session.iotMux.RLock()
+	instance := session.iotOverMcpByTransport[normalizeDeviceTransportType(conn.transportType)]
+	session.iotMux.RUnlock()
+	require.NotNil(t, instance)
+
+	oldPing := time.Unix(100, 0)
+	instance.setLastPing(oldPing)
+
+	methodsMu.Lock()
+	methods = methods[:0]
+	methodsMu.Unlock()
+
+	session.heartbeatMcpInstance(instance)
+
+	assert.True(t, instance.LastPing().After(oldPing))
+
+	methodsMu.Lock()
+	defer methodsMu.Unlock()
+	assert.Contains(t, methods, string(mcp.MethodToolsList))
+	assert.NotContains(t, methods, string(mcp.MethodPing))
+}
+
 func TestGetToolByNameWithTransport_PrefersCurrentTransport(t *testing.T) {
 	deviceID := fmt.Sprintf("transport-device-%d", time.Now().UnixNano())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -987,6 +1332,40 @@ func TestRawCallReportedToolByDeviceID_UsesResolvedTransport(t *testing.T) {
 	require.True(t, rawCalled)
 	require.NoError(t, err)
 	assert.Contains(t, result, "raw device call ok")
+}
+
+func TestHandleDeviceIotMcpMessageMarksIotRuntimeActive(t *testing.T) {
+	deviceID := fmt.Sprintf("iot-message-activity-%d", time.Now().UnixNano())
+	conn := newTestIotConn("websocket")
+	conn.deviceID = deviceID
+	conn.autoRespond = true
+
+	t.Cleanup(func() {
+		if session := GetDeviceMcpClient(deviceID); session != nil && session.cancel != nil {
+			session.cancel()
+		}
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	require.NoError(t, EnsureDeviceIotOverMcp(deviceID, conn))
+
+	session := GetDeviceMcpClient(deviceID)
+	require.NotNil(t, session)
+
+	session.iotMux.RLock()
+	instance := session.iotOverMcpByTransport[normalizeDeviceTransportType(conn.transportType)]
+	session.iotMux.RUnlock()
+	require.NotNil(t, instance)
+
+	oldPing := time.Unix(100, 0)
+	instance.setLastPing(oldPing)
+
+	err := HandleDeviceIotMcpMessage(deviceID, conn.transportType, []byte(`{"jsonrpc":"2.0","id":999,"result":{"ok":true}}`))
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return instance.LastPing().After(oldPing)
+	}, time.Second, 20*time.Millisecond)
 }
 
 func TestRawCallReportedToolByAgentID_UsesWsEndpointRuntime(t *testing.T) {
