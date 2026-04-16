@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1125,6 +1126,14 @@ func (t *TTSManager) processTTSQueue(ctx context.Context) {
 			continue
 		}
 
+		// 过滤 emoji 字符，避免 TTS 合成失败（豆包等引擎不支持 emoji）
+		item.llmResponse.Text = stripEmoji(item.llmResponse.Text)
+		if item.llmResponse.Text == "" {
+			log.Debugf("processTTSQueue skip: text is empty after stripping emoji")
+			cancel()
+			continue
+		}
+
 		// 非流式：由 handleTts 生成并推送 SentenceStart → Frame… → SentenceEnd
 		log.Debugf("processTTSQueue start, text: %s", item.llmResponse.Text)
 		itemErr = t.handleTts(item.ctx, item.generation, item.metricCycle, item.llmResponse, item.onStartFunc, item.onEndFunc)
@@ -1961,4 +1970,11 @@ func (t *TTSManager) GetAndClearAudioHistory() [][]byte {
 	data := t.audioHistoryBuffer
 	t.audioHistoryBuffer = nil
 	return data
+}
+
+// stripEmoji 移除文本中的 emoji 和其他不可合成字符
+var emojiRegex = regexp.MustCompile(`[\x{1F600}-\x{1F64F}\x{1F300}-\x{1F5FF}\x{1F680}-\x{1F6FF}\x{1F1E0}-\x{1F1FF}\x{2600}-\x{26FF}\x{2700}-\x{27BF}\x{FE00}-\x{FE0F}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FA6F}\x{1FA70}-\x{1FAFF}\x{200D}\x{FE0F}]`)
+
+func stripEmoji(text string) string {
+	return emojiRegex.ReplaceAllString(text, "")
 }
