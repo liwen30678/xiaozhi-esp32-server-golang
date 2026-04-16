@@ -74,6 +74,7 @@ type ChatSession struct {
 
 	// Close 保护，防止多次关闭
 	closeOnce sync.Once
+	closing   atomic.Bool
 
 	// stopSpeaking 保护，防止与 AddAsrResultToQueue/HandleWelcome 并发冲突
 	stopSpeakingMu sync.Mutex
@@ -85,12 +86,12 @@ type ChatSession struct {
 	openClawWarmup   *openClawWarmupTask
 
 	hookHub      *chathooks.Hub
-	closeHandler func(reason string)
+	closeHandler func(session *ChatSession, reason string)
 }
 
 type ChatSessionOption func(*ChatSession)
 
-func WithChatSessionCloseHandler(handler func(reason string)) ChatSessionOption {
+func WithChatSessionCloseHandler(handler func(session *ChatSession, reason string)) ChatSessionOption {
 	return func(s *ChatSession) {
 		s.closeHandler = handler
 	}
@@ -1103,7 +1104,15 @@ func (s *ChatSession) Close() {
 	s.CloseWithReason(chatSessionCloseReasonManagerShutdown)
 }
 
+func (s *ChatSession) IsClosing() bool {
+	if s == nil {
+		return true
+	}
+	return s.closing.Load()
+}
+
 func (s *ChatSession) CloseWithReason(reason string) {
+	s.closing.Store(true)
 	s.closeOnce.Do(func() {
 		// 清理ASR资源（资源管理在 ASRManager 内部）
 		if s.asrManager != nil {
@@ -1144,7 +1153,7 @@ func (s *ChatSession) CloseWithReason(reason string) {
 		log.Debugf("ChatSession.Close() 会话资源清理完成, 设备 %s", deviceID)
 
 		if s.closeHandler != nil {
-			s.closeHandler(reason)
+			s.closeHandler(s, reason)
 		}
 	})
 }

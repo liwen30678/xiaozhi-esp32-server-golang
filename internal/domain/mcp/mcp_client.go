@@ -186,13 +186,17 @@ func EnsureDeviceIotOverMcp(deviceId string, conn ConnInterface) error {
 		mcpClientSession.iotMux.Unlock()
 		return fmt.Errorf("创建IotOverMcp客户端失败")
 	}
-	if old := mcpClientSession.iotOverMcpByTransport[transportType]; old != nil && old != iotOverMcpClient {
-		old.connected = false
-		old.cancel()
+	var old *McpClientInstance
+	if existing := mcpClientSession.iotOverMcpByTransport[transportType]; existing != nil && existing != iotOverMcpClient {
+		old = existing
 	}
 	mcpClientSession.iotOverMcpByTransport[transportType] = iotOverMcpClient
 	iotOverMcpClient.SetOnCloseHandler(mcpClientSession.handleMcpClientClose)
 	mcpClientSession.iotMux.Unlock()
+	if old != nil {
+		old.setConnected(false)
+		old.cancel()
+	}
 
 	if err := iotOverMcpClient.startIotOverMcp(); err != nil {
 		iotOverMcpClient.setInitState(mcpClientInitStateIdle)
@@ -233,20 +237,21 @@ func CloseDeviceIotOverMcp(deviceId string, conn ConnInterface) {
 	}
 
 	mcpClientSession.iotMux.Lock()
-	defer mcpClientSession.iotMux.Unlock()
-
 	transportType := normalizeDeviceTransportType(conn.GetMcpTransportType())
 	iotClient := mcpClientSession.iotOverMcpByTransport[transportType]
 	if iotClient == nil {
+		mcpClientSession.iotMux.Unlock()
 		return
 	}
 	if conn != nil && iotClient.conn != conn {
+		mcpClientSession.iotMux.Unlock()
 		return
 	}
-
-	iotClient.connected = false
-	iotClient.cancel()
 	delete(mcpClientSession.iotOverMcpByTransport, transportType)
+	mcpClientSession.iotMux.Unlock()
+
+	iotClient.setConnected(false)
+	iotClient.cancel()
 }
 
 func GetToolsByDeviceId(deviceId string, agentId string, selectedMCPServiceNames string) (map[string]tool.InvokableTool, error) {
@@ -299,11 +304,13 @@ func GetToolsByDeviceIdWithTransport(deviceId string, agentId string, transportT
 		}
 		log.Infof("从设备 %s 获取到 %d 个工具", deviceId, len(deviceTools))
 	} else if agentId != "" && agentId != deviceId {
+		log.Debugf("开始从智能体 %s 获取 ws endpoint MCP 工具, device=%s, transport=%s", agentId, deviceId, transportType)
 		agentTools, err := mcpClientPool.GetWsEndpointMcpTools(agentId)
 		if err != nil {
 			log.Errorf("获取智能体 %s 的工具失败: %v", agentId, err)
 			return retTools, nil
 		}
+		log.Debugf("从智能体 %s 获取到 %d 个 ws endpoint MCP 工具, device=%s", agentId, len(agentTools), deviceId)
 		for toolName, tool := range agentTools {
 			if _, exists := retTools[toolName]; !exists {
 				retTools[toolName] = tool

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,55 @@ const (
 	// DefaultCloseTimeout 默认关闭超时时间
 	DefaultCloseTimeout = 5 * time.Second
 )
+
+type pendingResponseResult struct {
+	response *transport.JSONRPCResponse
+	err      error
+}
+
+type pendingResponse struct {
+	resultCh chan pendingResponseResult
+	once     sync.Once
+}
+
+func newPendingResponse() *pendingResponse {
+	return &pendingResponse{
+		resultCh: make(chan pendingResponseResult, 1),
+	}
+}
+
+func (p *pendingResponse) resolve(response *transport.JSONRPCResponse, err error) {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		p.resultCh <- pendingResponseResult{
+			response: response,
+			err:      err,
+		}
+	})
+}
+
+type jsonRPCMessageEnvelope struct {
+	Method string           `json:"method"`
+	ID     *json.RawMessage `json:"id"`
+}
+
+func classifyJSONRPCMessage(message []byte) (method string, hasID bool, err error) {
+	var envelope jsonRPCMessageEnvelope
+	if err := json.Unmarshal(message, &envelope); err != nil {
+		return "", false, err
+	}
+	return envelope.Method, envelope.ID != nil, nil
+}
+
+func isTransportTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowerErr := strings.ToLower(err.Error())
+	return strings.Contains(lowerErr, "timeout") || strings.Contains(err.Error(), "超时")
+}
 
 /**
 // Interface for the transport layer.
@@ -51,7 +101,7 @@ type WebsocketTransport struct {
 	onCloseHandler func(reason string)
 
 	// 响应通道管理
-	respChans    map[string]chan *transport.JSONRPCResponse
+	respChans    map[string]*pendingResponse
 	respChansMux sync.RWMutex
 
 	// 消息监听控制
@@ -92,7 +142,7 @@ func NewWebsocketTransport(conn *websocket.Conn) (*WebsocketTransport, error) {
 
 	wst := &WebsocketTransport{
 		conn:           conn,
-		respChans:      make(map[string]chan *transport.JSONRPCResponse),
+		respChans:      make(map[string]*pendingResponse),
 		readDone:       make(chan struct{}),
 		ctx:            ctx,
 		cancel:         cancel,
@@ -110,6 +160,31 @@ func (t *WebsocketTransport) Start(ctx context.Context) error {
 	return nil
 }
 
+func (t *WebsocketTransport) popPending(id string) *pendingResponse {
+	t.respChansMux.Lock()
+	defer t.respChansMux.Unlock()
+
+	pending := t.respChans[id]
+	if pending != nil {
+		delete(t.respChans, id)
+	}
+	return pending
+}
+
+func (t *WebsocketTransport) failAllPending(err error) {
+	t.respChansMux.Lock()
+	pending := make([]*pendingResponse, 0, len(t.respChans))
+	for id, pendingResp := range t.respChans {
+		pending = append(pending, pendingResp)
+		delete(t.respChans, id)
+	}
+	t.respChansMux.Unlock()
+
+	for _, pendingResp := range pending {
+		pendingResp.resolve(nil, err)
+	}
+}
+
 // readMessages 持续监听 WebSocket 消息
 func (t *WebsocketTransport) readMessages() {
 	defer close(t.readDone)
@@ -122,6 +197,11 @@ func (t *WebsocketTransport) readMessages() {
 			// 使用 Go 语言级别的超时控制
 			_, message, err := t.conn.ReadMessage()
 			if err != nil {
+				t.closedMux.Lock()
+				t.closed = true
+				t.closedMux.Unlock()
+				t.failAllPending(fmt.Errorf("connection is closed"))
+
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					log.Errorf("WebSocket read error: %v", err)
 				}
@@ -148,19 +228,34 @@ func (t *WebsocketTransport) readMessages() {
 
 // handleMessage 处理接收到的消息
 func (t *WebsocketTransport) handleMessage(message []byte) {
-	// 尝试解析为 JSON-RPC 响应
-	var response transport.JSONRPCResponse
-	if err := json.Unmarshal(message, &response); err == nil {
-		// 这是一个 JSON-RPC 响应
-		t.handleResponse(&response)
+	method, hasID, err := classifyJSONRPCMessage(message)
+	if err != nil {
+		log.Warnf("Received unrecognized message: %s", string(message))
 		return
 	}
 
-	// 尝试解析为 JSON-RPC 通知
-	var notification mcp.JSONRPCNotification
-	if err := json.Unmarshal(message, &notification); err == nil && notification.Method != "" {
-		// 这是一个 JSON-RPC 通知
+	if method != "" {
+		if hasID {
+			log.Warnf("Received unsupported JSON-RPC request: %s", method)
+			return
+		}
+
+		var notification mcp.JSONRPCNotification
+		if err := json.Unmarshal(message, &notification); err != nil {
+			log.Warnf("Received malformed JSON-RPC notification: %s", string(message))
+			return
+		}
 		t.handleNotification(&notification)
+		return
+	}
+
+	if hasID {
+		var response transport.JSONRPCResponse
+		if err := json.Unmarshal(message, &response); err != nil {
+			log.Warnf("Received malformed JSON-RPC response: %s", string(message))
+			return
+		}
+		t.handleResponse(&response)
 		return
 	}
 
@@ -174,25 +269,12 @@ func (t *WebsocketTransport) handleResponse(response *transport.JSONRPCResponse)
 	// 将 ID 转换为字符串作为键
 	idStr := response.ID.String()
 
-	t.respChansMux.RLock()
-	respChan, exists := t.respChans[idStr]
-	t.respChansMux.RUnlock()
-
-	if exists {
-		// 发送响应到对应的通道
-		select {
-		case respChan <- response:
-			// 响应已发送，清理通道
-			t.respChansMux.Lock()
-			delete(t.respChans, idStr)
-			t.respChansMux.Unlock()
-			close(respChan)
-		case <-time.After(t.requestTimeout):
-			log.Warnf("websocket mcp handleResponse timeout for ID: %s, response: %+v", idStr, string(respByte))
-		}
-	} else {
+	pending := t.popPending(idStr)
+	if pending == nil {
 		log.Warnf("No response channel found for ID: %s, response: %+v", idStr, string(respByte))
+		return
 	}
+	pending.resolve(response, nil)
 }
 
 // handleNotification 处理 JSON-RPC 通知
@@ -213,12 +295,11 @@ func (t *WebsocketTransport) SendRequest(ctx context.Context, request transport.
 
 	// 创建响应通道
 	idStr := request.ID.String()
-
-	respChan := make(chan *transport.JSONRPCResponse, 1)
+	pending := newPendingResponse()
 
 	// 注册响应通道
 	t.respChansMux.Lock()
-	t.respChans[idStr] = respChan
+	t.respChans[idStr] = pending
 	t.respChansMux.Unlock()
 
 	// 发送请求（使用互斥锁保护写入操作）
@@ -227,30 +308,24 @@ func (t *WebsocketTransport) SendRequest(ctx context.Context, request transport.
 	t.writeMux.Unlock()
 	if err != nil {
 		// 发送失败，清理通道
-		t.respChansMux.Lock()
-		delete(t.respChans, idStr)
-		t.respChansMux.Unlock()
-		close(respChan)
+		t.popPending(idStr)
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
 	// 使用 Go 语言级别的超时控制等待响应
 	select {
-	case response := <-respChan:
-		return response, nil
+	case result := <-pending.resultCh:
+		if result.err != nil {
+			return nil, result.err
+		}
+		return result.response, nil
 	case <-ctx.Done():
 		// 上下文取消，清理通道
-		t.respChansMux.Lock()
-		delete(t.respChans, idStr)
-		t.respChansMux.Unlock()
-		close(respChan)
+		t.popPending(idStr)
 		return nil, ctx.Err()
 	case <-time.After(t.requestTimeout):
 		// Go 语言级别的超时控制
-		t.respChansMux.Lock()
-		delete(t.respChans, idStr)
-		t.respChansMux.Unlock()
-		close(respChan)
+		t.popPending(idStr)
 		return nil, fmt.Errorf("request timeout")
 	}
 }
@@ -285,6 +360,7 @@ func (t *WebsocketTransport) Close() error {
 	t.closedMux.Lock()
 	t.closed = true
 	t.closedMux.Unlock()
+	t.failAllPending(fmt.Errorf("connection is closed"))
 
 	// 通知client层连接即将关闭
 	if t.onCloseHandler != nil {
@@ -300,14 +376,6 @@ func (t *WebsocketTransport) Close() error {
 	case <-time.After(t.closeTimeout):
 		log.Warnf("Timeout waiting for read goroutine to finish")
 	}
-
-	// 清理所有响应通道
-	t.respChansMux.Lock()
-	for idStr, respChan := range t.respChans {
-		close(respChan)
-		delete(t.respChans, idStr)
-	}
-	t.respChansMux.Unlock()
 
 	// 关闭 WebSocket 连接
 	return t.conn.Close()

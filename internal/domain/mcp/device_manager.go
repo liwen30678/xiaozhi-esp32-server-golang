@@ -57,18 +57,25 @@ func (dcs *DeviceMcpSession) AddWsEndPointMcp(mcpClient *McpClientInstance) {
 }
 
 func (dcs *DeviceMcpSession) SetIotOverMcp(transportType string, mcpClient *McpClientInstance) {
-	dcs.iotMux.Lock()
-	defer dcs.iotMux.Unlock()
 	transportType = normalizeDeviceTransportType(transportType)
+	if mcpClient != nil {
+		mcpClient.SetOnCloseHandler(dcs.handleMcpClientClose)
+	}
+
+	var old *McpClientInstance
+	dcs.iotMux.Lock()
 	// 同 device + transportType 保持单实例
-	if old := dcs.iotOverMcpByTransport[transportType]; old != nil && old != mcpClient {
-		old.connected = false
-		old.cancel()
+	if existing := dcs.iotOverMcpByTransport[transportType]; existing != nil && existing != mcpClient {
+		old = existing
 	}
 	dcs.iotOverMcpByTransport[transportType] = mcpClient
+	dcs.iotMux.Unlock()
 
-	// 设置关闭回调
-	mcpClient.SetOnCloseHandler(dcs.handleMcpClientClose)
+	// 锁外关闭旧实例，避免在会话锁里执行取消逻辑。
+	if old != nil {
+		old.setConnected(false)
+		old.cancel()
+	}
 }
 
 func (dcs *DeviceMcpSession) RemoveWsEndPointMcp(mcpClient *McpClientInstance) {
@@ -125,14 +132,14 @@ type McpClientInstance struct {
 	serverName string
 	mcpClient  *client.Client // 是从ws endpoint连上来的mcp server
 	tools      map[string]tool.InvokableTool
-	toolsMux   sync.RWMutex // 保护工具列表的互斥锁
+	toolsState atomic.Value // map[string]tool.InvokableTool，刷新时整体替换，读路径走快照
 	serverInfo *mcp.InitializeResult
-	lastPing   time.Time
 	Ctx        context.Context
 	cancel     context.CancelFunc
-	connected  bool
 	conn       ConnInterface
 	initState  uint32
+	lastPing   atomic.Int64
+	connected  atomic.Bool
 
 	// 添加关闭回调
 	onCloseHandler func(instance *McpClientInstance, reason string)
@@ -170,13 +177,13 @@ func NewWsEndPointMcpClient(ctx context.Context, deviceID string, conn *websocke
 	wsEndPointMcp := &McpClientInstance{
 		serverName: fmt.Sprintf("ws_endpoint_mcp_%s_%s", deviceID, conn.RemoteAddr().String()),
 		mcpClient:  mcpClient,
-		tools:      make(map[string]tool.InvokableTool),
 		Ctx:        ctx,
 		cancel:     cancel,
-		connected:  true,
-		lastPing:   time.Now(),
 		initState:  uint32(mcpClientInitStateReady),
 	}
+	wsEndPointMcp.storeToolsSnapshot(make(map[string]tool.InvokableTool))
+	wsEndPointMcp.setConnected(true)
+	wsEndPointMcp.setLastPing(time.Now())
 	mcpClient.OnNotification(wsEndPointMcp.handleJSONRPCNotification)
 
 	// 设置transport的关闭回调
@@ -200,14 +207,14 @@ func NewIotOverMcpClient(deviceID string, transportType string, conn ConnInterfa
 	iotOverMcp := &McpClientInstance{
 		serverName: buildIotServerName(deviceID, transportType),
 		mcpClient:  mcpClient,
-		tools:      make(map[string]tool.InvokableTool),
 		Ctx:        ctx,
 		cancel:     cancel,
-		connected:  true,
-		lastPing:   time.Now(),
 		conn:       conn,
 		initState:  uint32(mcpClientInitStateInitializing),
 	}
+	iotOverMcp.storeToolsSnapshot(make(map[string]tool.InvokableTool))
+	iotOverMcp.setConnected(true)
+	iotOverMcp.setLastPing(time.Now())
 	wsTransport.SetNotificationHandler(iotOverMcp.handleJSONRPCNotification)
 
 	// 设置transport的关闭回调
@@ -239,12 +246,12 @@ func (dc *McpClientInstance) refreshTools() error {
 		return err
 	}
 
-	// 使用互斥锁保护工具列表的更新
-	dc.toolsMux.Lock()
-	dc.tools = ConvertMcpToolListToInvokableToolList(tools.Tools, dc.serverName, dc.mcpClient)
-	dc.toolsMux.Unlock()
+	// 工具转换可能比较重，先在锁外完成，避免阻塞读工具列表的路径。
+	convertedTools := ConvertMcpToolListToInvokableToolList(tools.Tools, dc.serverName, dc.mcpClient)
 
-	logger.Infof("刷新工具列表成功: %s 获取到 %d 个工具", dc.serverName, len(dc.tools))
+	dc.storeToolsSnapshot(convertedTools)
+
+	logger.Infof("刷新工具列表成功: %s 获取到 %d 个工具", dc.serverName, len(convertedTools))
 	return nil
 }
 
@@ -254,6 +261,77 @@ func (dc *McpClientInstance) GetServerName() string {
 
 func (dc *McpClientInstance) IsInitialized() bool {
 	return dc != nil && dc.serverInfo != nil
+}
+
+func (dc *McpClientInstance) storeToolsSnapshot(tools map[string]tool.InvokableTool) {
+	if dc == nil {
+		return
+	}
+	if tools == nil {
+		tools = make(map[string]tool.InvokableTool)
+	}
+	dc.tools = tools
+	dc.toolsState.Store(tools)
+}
+
+func (dc *McpClientInstance) loadToolsSnapshot() map[string]tool.InvokableTool {
+	if dc == nil {
+		return nil
+	}
+	if snapshot := dc.toolsState.Load(); snapshot != nil {
+		if tools, ok := snapshot.(map[string]tool.InvokableTool); ok {
+			return tools
+		}
+	}
+	return dc.tools
+}
+
+func (dc *McpClientInstance) copyToolsInto(dst map[string]tool.InvokableTool) {
+	if dc == nil {
+		return
+	}
+	for name, invokable := range dc.loadToolsSnapshot() {
+		dst[name] = invokable
+	}
+}
+
+func (dc *McpClientInstance) toolCount() int {
+	return len(dc.loadToolsSnapshot())
+}
+
+func (dc *McpClientInstance) getToolByName(toolName string) (tool.InvokableTool, bool) {
+	tools := dc.loadToolsSnapshot()
+	invokable, ok := tools[toolName]
+	return invokable, ok
+}
+
+func (dc *McpClientInstance) setConnected(connected bool) {
+	if dc == nil {
+		return
+	}
+	dc.connected.Store(connected)
+}
+
+func (dc *McpClientInstance) setLastPing(ts time.Time) {
+	if dc == nil {
+		return
+	}
+	if ts.IsZero() {
+		dc.lastPing.Store(0)
+		return
+	}
+	dc.lastPing.Store(ts.UnixNano())
+}
+
+func (dc *McpClientInstance) LastPing() time.Time {
+	if dc == nil {
+		return time.Time{}
+	}
+	unixNano := dc.lastPing.Load()
+	if unixNano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, unixNano)
 }
 
 func (dc *McpClientInstance) getInitState() mcpClientInitState {
@@ -285,7 +363,7 @@ func (dc *McpClientInstance) closeWithReason(reason string) {
 	dc.closeOnce.Do(func() {
 		logger.Infof("MCP客户端 %s 关闭，原因: %s", dc.serverName, reason)
 
-		dc.connected = false
+		dc.setConnected(false)
 		dc.setInitState(mcpClientInitStateIdle)
 		dc.cancel()
 
@@ -293,6 +371,52 @@ func (dc *McpClientInstance) closeWithReason(reason string) {
 			dc.onCloseHandler(dc, reason)
 		}
 	})
+}
+
+func (dc *DeviceMcpSession) snapshotWsEndpointClients() []*McpClientInstance {
+	clients := make([]*McpClientInstance, 0)
+	dc.wsEndPointMcp.Range(func(_, value interface{}) bool {
+		mcpInstance, ok := value.(*McpClientInstance)
+		if ok && mcpInstance != nil {
+			clients = append(clients, mcpInstance)
+		}
+		return true
+	})
+	return clients
+}
+
+func (dc *DeviceMcpSession) snapshotIotClients() []*McpClientInstance {
+	dc.iotMux.RLock()
+	defer dc.iotMux.RUnlock()
+
+	clients := make([]*McpClientInstance, 0, len(dc.iotOverMcpByTransport))
+	for _, instance := range dc.iotOverMcpByTransport {
+		if instance != nil {
+			clients = append(clients, instance)
+		}
+	}
+	return clients
+}
+
+type iotTransportClientSnapshot struct {
+	transportType string
+	client        *McpClientInstance
+}
+
+func (dc *DeviceMcpSession) snapshotIotTransports() []iotTransportClientSnapshot {
+	dc.iotMux.RLock()
+	defer dc.iotMux.RUnlock()
+
+	clients := make([]iotTransportClientSnapshot, 0, len(dc.iotOverMcpByTransport))
+	for transportType, instance := range dc.iotOverMcpByTransport {
+		if instance != nil {
+			clients = append(clients, iotTransportClientSnapshot{
+				transportType: transportType,
+				client:        instance,
+			})
+		}
+	}
+	return clients
 }
 
 func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance) {
@@ -306,7 +430,7 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	}
 	err := mcpInstance.mcpClient.Ping(mcpInstance.Ctx)
 	if err == nil {
-		mcpInstance.lastPing = time.Now()
+		mcpInstance.setLastPing(time.Now())
 		logger.Debugf("设备 %s ping成功", mcpInstance.serverName)
 	} else {
 		logger.Warnf("设备 %s ping失败: %v", mcpInstance.serverName, err)
@@ -323,16 +447,13 @@ func (dc *DeviceMcpSession) refreshToolsAndPing() {
 	}
 
 	// 初始化时获取工具列表
-	dc.wsEndPointMcp.Range(func(_, mcpInstance interface{}) bool {
-		findTools(mcpInstance.(*McpClientInstance))
-		return true
-	})
-
-	dc.iotMux.RLock()
-	for _, instance := range dc.iotOverMcpByTransport {
+	for _, instance := range dc.snapshotWsEndpointClients() {
 		findTools(instance)
 	}
-	dc.iotMux.RUnlock()
+
+	for _, instance := range dc.snapshotIotClients() {
+		findTools(instance)
+	}
 
 	// 每2分钟进行一次ping
 	pingTick := time.NewTicker(2 * time.Minute)
@@ -344,15 +465,12 @@ func (dc *DeviceMcpSession) refreshToolsAndPing() {
 			logger.Infof("设备 %s 会话已取消，停止ping", dc.deviceID)
 			return
 		case <-pingTick.C:
-			dc.wsEndPointMcp.Range(func(_, mcpInstance interface{}) bool {
-				dc.heartbeatMcpInstance(mcpInstance.(*McpClientInstance))
-				return true
-			})
-			dc.iotMux.RLock()
-			for _, instance := range dc.iotOverMcpByTransport {
+			for _, instance := range dc.snapshotWsEndpointClients() {
 				dc.heartbeatMcpInstance(instance)
 			}
-			dc.iotMux.RUnlock()
+			for _, instance := range dc.snapshotIotClients() {
+				dc.heartbeatMcpInstance(instance)
+			}
 		}
 	}
 }
@@ -430,7 +548,10 @@ func (dc *McpClientInstance) SetOnCloseHandler(handler func(instance *McpClientI
 
 // IsConnected 检查连接是否仍然活跃
 func (dc *McpClientInstance) IsConnected() bool {
-	return dc.connected
+	if dc == nil {
+		return false
+	}
+	return dc.connected.Load()
 }
 
 func (dc *DeviceMcpSession) ShouldScheduleIotInit(transportType string, conn ConnInterface) bool {
@@ -459,9 +580,7 @@ func (dc *DeviceMcpSession) ShouldScheduleIotInit(transportType string, conn Con
 
 // GetConnectionStatus 获取连接状态信息
 func (dc *McpClientInstance) GetConnectionStatus() map[string]interface{} {
-	dc.toolsMux.RLock()
-	toolsCount := len(dc.tools)
-	dc.toolsMux.RUnlock()
+	toolsCount := dc.toolCount()
 
 	initState := "idle"
 	switch dc.getInitState() {
@@ -473,9 +592,9 @@ func (dc *McpClientInstance) GetConnectionStatus() map[string]interface{} {
 
 	return map[string]interface{}{
 		"server_name": dc.serverName,
-		"connected":   dc.connected,
+		"connected":   dc.IsConnected(),
 		"init_state":  initState,
-		"last_ping":   dc.lastPing,
+		"last_ping":   dc.LastPing(),
 		"tools_count": toolsCount,
 	}
 }
@@ -511,48 +630,27 @@ func (dc *McpClientInstance) RawCallTool(ctx context.Context, toolName string, a
 // GetTools 获取工具列表
 func (dc *DeviceMcpSession) GetTools() map[string]tool.InvokableTool {
 	tools := make(map[string]tool.InvokableTool)
-	dc.wsEndPointMcp.Range(func(_, value interface{}) bool {
-		mcpInstance := value.(*McpClientInstance)
-		mcpInstance.toolsMux.RLock()
-		for k, v := range mcpInstance.tools {
-			tools[k] = v
-		}
-		mcpInstance.toolsMux.RUnlock()
-		return true
-	})
-
-	dc.iotMux.RLock()
-	for _, iotClient := range dc.iotOverMcpByTransport {
-		iotClient.toolsMux.RLock()
-		for k, v := range iotClient.tools {
-			tools[k] = v
-		}
-		iotClient.toolsMux.RUnlock()
+	for _, mcpInstance := range dc.snapshotWsEndpointClients() {
+		mcpInstance.copyToolsInto(tools)
 	}
-	dc.iotMux.RUnlock()
+
+	for _, iotClient := range dc.snapshotIotClients() {
+		iotClient.copyToolsInto(tools)
+	}
 	return tools
 }
 
 func (dc *DeviceMcpSession) GetWsEndpointMcpTools() map[string]tool.InvokableTool {
 	tools := make(map[string]tool.InvokableTool)
-	dc.wsEndPointMcp.Range(func(_, value interface{}) bool {
-		mcpInstance := value.(*McpClientInstance)
-		mcpInstance.toolsMux.RLock()
-		for k, v := range mcpInstance.tools {
-			tools[k] = v
-		}
-		mcpInstance.toolsMux.RUnlock()
-		return true
-	})
+	for _, mcpInstance := range dc.snapshotWsEndpointClients() {
+		mcpInstance.copyToolsInto(tools)
+	}
 	return tools
 }
 
 // GetPreferredIotTransportType 返回当前设备最适合用于设备维度 MCP 查询/调用的 transport。
 // 优先选择仍处于 connected 状态且最近有心跳的 transport；如果都不活跃，则退回最近一次存在的 transport。
 func (dc *DeviceMcpSession) GetPreferredIotTransportType() string {
-	dc.iotMux.RLock()
-	defer dc.iotMux.RUnlock()
-
 	preferredTransport := ""
 	var preferredClient *McpClientInstance
 	isSupportedTransport := func(transportType string) bool {
@@ -567,7 +665,9 @@ func (dc *DeviceMcpSession) GetPreferredIotTransportType() string {
 	selectPreferred := func(connectedOnly bool) string {
 		preferredTransport = ""
 		preferredClient = nil
-		for transportType, iotClient := range dc.iotOverMcpByTransport {
+		for _, snapshot := range dc.snapshotIotTransports() {
+			transportType := snapshot.transportType
+			iotClient := snapshot.client
 			transportType = normalizeDeviceTransportType(transportType)
 			if iotClient == nil {
 				continue
@@ -583,12 +683,14 @@ func (dc *DeviceMcpSession) GetPreferredIotTransportType() string {
 				preferredClient = iotClient
 				continue
 			}
-			if iotClient.lastPing.After(preferredClient.lastPing) {
+			currentLastPing := iotClient.LastPing()
+			preferredLastPing := preferredClient.LastPing()
+			if currentLastPing.After(preferredLastPing) {
 				preferredTransport = transportType
 				preferredClient = iotClient
 				continue
 			}
-			if iotClient.lastPing.Equal(preferredClient.lastPing) && transportType < preferredTransport {
+			if currentLastPing.Equal(preferredLastPing) && transportType < preferredTransport {
 				preferredTransport = transportType
 				preferredClient = iotClient
 			}
@@ -616,11 +718,7 @@ func (dc *DeviceMcpSession) GetIotToolsByTransport(transportType string) map[str
 		return tools
 	}
 
-	iotClient.toolsMux.RLock()
-	for k, v := range iotClient.tools {
-		tools[k] = v
-	}
-	iotClient.toolsMux.RUnlock()
+	iotClient.copyToolsInto(tools)
 
 	return tools
 }
@@ -638,10 +736,7 @@ func (dc *DeviceMcpSession) GetIotToolByTransportAndName(transportType, toolName
 		return nil, false
 	}
 
-	iotClient.toolsMux.RLock()
-	defer iotClient.toolsMux.RUnlock()
-	invokable, ok := iotClient.tools[toolName]
-	return invokable, ok
+	return iotClient.getToolByName(toolName)
 }
 
 func (dc *DeviceMcpSession) RawCallIotToolByTransport(ctx context.Context, transportType, toolName string, arguments map[string]interface{}) (string, bool, error) {
@@ -663,14 +758,13 @@ func (dc *DeviceMcpSession) RawCallIotToolByTransport(ctx context.Context, trans
 
 func (dc *DeviceMcpSession) RawCallWsEndpointTool(ctx context.Context, toolName string, arguments map[string]interface{}) (string, bool, error) {
 	var selected *McpClientInstance
-	dc.wsEndPointMcp.Range(func(_, value interface{}) bool {
-		mcpInstance := value.(*McpClientInstance)
+	for _, mcpInstance := range dc.snapshotWsEndpointClients() {
 		if mcpInstance == nil || !mcpInstance.IsConnected() || !mcpInstance.IsInitialized() {
-			return true
+			continue
 		}
 		selected = mcpInstance
-		return false
-	})
+		break
+	}
 	if selected == nil {
 		return "", false, nil
 	}
@@ -680,31 +774,19 @@ func (dc *DeviceMcpSession) RawCallWsEndpointTool(ctx context.Context, toolName 
 }
 
 func (dc *DeviceMcpSession) GetToolByName(toolName string) (tool tool.InvokableTool, ok bool) {
-	dc.wsEndPointMcp.Range(func(_, value interface{}) bool {
-		mcpInstance := value.(*McpClientInstance)
-		mcpInstance.toolsMux.RLock()
-		logger.Infof("wsEndPointMcp 工具列表: %+v", mcpInstance.tools)
-		if tool, ok = mcpInstance.tools[toolName]; ok {
-			mcpInstance.toolsMux.RUnlock()
-			return false
+	for _, mcpInstance := range dc.snapshotWsEndpointClients() {
+		if tool, ok = mcpInstance.getToolByName(toolName); ok {
+			return tool, true
 		}
-		mcpInstance.toolsMux.RUnlock()
-		return true
-	})
+	}
 	if ok {
 		return tool, true
 	}
 
-	dc.iotMux.RLock()
-	defer dc.iotMux.RUnlock()
-	for transportType, iotClient := range dc.iotOverMcpByTransport {
-		iotClient.toolsMux.RLock()
-		logger.Infof("iotOverMcp 工具列表(%s): %+v", transportType, iotClient.tools)
-		if tool, ok = iotClient.tools[toolName]; ok {
-			iotClient.toolsMux.RUnlock()
+	for _, iotClient := range dc.snapshotIotClients() {
+		if tool, ok = iotClient.getToolByName(toolName); ok {
 			return tool, true
 		}
-		iotClient.toolsMux.RUnlock()
 	}
 	return nil, false
 }
