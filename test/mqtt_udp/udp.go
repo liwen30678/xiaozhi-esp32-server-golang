@@ -146,6 +146,7 @@ func (c *UDPClient) SendAudioData(audioData []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to send UDP packet: %v", err)
 	}
+	markUDPTraffic()
 
 	//fmt.Printf("发送数据: nonce=%s, seq=%d, dataLen=%d\n", nonceHex, c.localSeq, len(audioData))
 

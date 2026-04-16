@@ -536,19 +536,25 @@ type Llm struct {
 	LLmRecvChannel chan llm_common.LLMResponseStruct
 }
 
+type SpeakReadyUDPConfig struct {
+	Ready         bool `json:"ready"`
+	ReuseExisting bool `json:"reuse_existing,omitempty"`
+}
+
 // ClientMessage 表示客户端消息
 type ClientMessage struct {
-	Type        string          `json:"type"`
-	DeviceID    string          `json:"device_id,omitempty"`
-	SessionID   string          `json:"session_id,omitempty"`
-	Text        string          `json:"text,omitempty"`
-	Mode        string          `json:"mode,omitempty"`
-	State       string          `json:"state,omitempty"`
-	Token       string          `json:"token,omitempty"`
-	DeviceMac   string          `json:"device_mac,omitempty"`
-	Version     int             `json:"version,omitempty"`
-	Transport   string          `json:"transport,omitempty"`
-	Features    map[string]bool `json:"features,omitempty"`
-	AudioParams *AudioFormat    `json:"audio_params,omitempty"`
-	PayLoad     json.RawMessage `json:"payload,omitempty"`
+	Type           string               `json:"type"`
+	DeviceID       string               `json:"device_id,omitempty"`
+	SessionID      string               `json:"session_id,omitempty"`
+	Text           string               `json:"text,omitempty"`
+	Mode           string               `json:"mode,omitempty"`
+	State          string               `json:"state,omitempty"`
+	Token          string               `json:"token,omitempty"`
+	DeviceMac      string               `json:"device_mac,omitempty"`
+	Version        int                  `json:"version,omitempty"`
+	Transport      string               `json:"transport,omitempty"`
+	Features       map[string]bool      `json:"features,omitempty"`
+	AudioParams    *AudioFormat         `json:"audio_params,omitempty"`
+	SpeakUDPConfig *SpeakReadyUDPConfig `json:"udp_config,omitempty"`
+	PayLoad        json.RawMessage      `json:"payload,omitempty"`
 }

@@ -24,23 +24,25 @@ const (
 
 // 消息类型常量
 const (
-	MessageTypeHello   = "hello"   // 握手消息
-	MessageTypeAbort   = "abort"   // 中止消息
-	MessageTypeListen  = "listen"  // 监听消息
-	MessageTypeIot     = "iot"     // 物联网消息
-	MessageTypeMcp     = "mcp"     // MCP消息
-	MessageTypeGoodBye = "goodbye" // 再见消息
+	MessageTypeHello      = "hello"       // 握手消息
+	MessageTypeAbort      = "abort"       // 中止消息
+	MessageTypeListen     = "listen"      // 监听消息
+	MessageTypeIot        = "iot"         // 物联网消息
+	MessageTypeMcp        = "mcp"         // MCP消息
+	MessageTypeGoodBye    = "goodbye"     // 再见消息
+	MessageTypeSpeakReady = "speak_ready" // 设备已准备好接收主动播报
 )
 
 // 服务器消息类型常量
 const (
-	ServerMessageTypeHello   = "hello"   // 握手消息
-	ServerMessageTypeStt     = "stt"     // 语音转文本
-	ServerMessageTypeTts     = "tts"     // 文本转语音
-	ServerMessageTypeIot     = "iot"     // 物联网消息
-	ServerMessageTypeLlm     = "llm"     // 大语言模型
-	ServerMessageTypeText    = "text"    // 文本消息
-	ServerMessageTypeGoodBye = "goodbye" // 再见消息
+	ServerMessageTypeHello        = "hello"         // 握手消息
+	ServerMessageTypeStt          = "stt"           // 语音转文本
+	ServerMessageTypeTts          = "tts"           // 文本转语音
+	ServerMessageTypeIot          = "iot"           // 物联网消息
+	ServerMessageTypeLlm          = "llm"           // 大语言模型
+	ServerMessageTypeText         = "text"          // 文本消息
+	ServerMessageTypeGoodBye      = "goodbye"       // 再见消息
+	ServerMessageTypeSpeakRequest = "speak_request" // 主动播报请求
 )
 
 // 消息状态常量
@@ -52,6 +54,7 @@ const (
 	MessageStateDetect        = "detect"         // 检测状态
 	MessageStateAbort         = "abort"          // 中止状态
 	MessageStateSuccess       = "success"        // 成功状态
+	MessageStateReady         = "ready"          // 设备已准备好
 )
 
 type UdpConfig struct {
@@ -79,6 +82,7 @@ type ServerMessage struct {
 	Transport   string                   `json:"transport,omitempty"`
 	AudioFormat *types_audio.AudioFormat `json:"audio_params,omitempty"`
 	Emotion     string                   `json:"emotion,omitempty"`
+	AutoListen  *bool                    `json:"auto_listen,omitempty"`
 	Udp         *UdpConfig               `json:"udp,omitempty"`
 	PayLoad     json.RawMessage          `json:"payload,omitempty"`
 }

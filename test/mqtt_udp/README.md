@@ -13,6 +13,7 @@ stt 166ms，llm 300ms左右，首帧音频642ms
 ### 拾音模式说明
 - **manual 模式**：需要手动发送 listen stop 消息来停止拾音
 - **auto 模式**：自动检测语音结束并停止拾音
+- 当前测试程序已支持 MQTT 下发 `speak_request`，设备侧会按协议回 `speak_ready`（即主动播报响应消息）
 
 ### 使用示例
 ```bash

@@ -51,10 +51,49 @@ type ChatManager struct {
 	helloInited  bool
 	mcpInitState chatMcpInitState
 
+	speakRequestMu      sync.Mutex
+	pendingSpeakRequest *pendingSpeakRequest
+	lastSpeakPathWarmAt atomic.Int64
+	speakReadyTimeout   time.Duration
+
 	// Close 保护，防止多次关闭
 	closeOnce      sync.Once
 	managerClosing atomic.Bool
 	needFreshHello bool
+}
+
+type pendingSpeakRequest struct {
+	sessionID string
+	done      chan struct{}
+	timer     *time.Timer
+
+	once sync.Once
+	mu   sync.Mutex
+	err  error
+}
+
+func (p *pendingSpeakRequest) resolve(err error) {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		if p.timer != nil {
+			p.timer.Stop()
+		}
+		p.mu.Lock()
+		p.err = err
+		p.mu.Unlock()
+		close(p.done)
+	})
+}
+
+func (p *pendingSpeakRequest) Err() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
 }
 
 type chatMcpInitState uint8
@@ -63,6 +102,11 @@ const (
 	chatMcpInitStateIdle chatMcpInitState = iota
 	chatMcpInitStateInFlight
 	chatMcpInitStateReady
+)
+
+const (
+	defaultSpeakRequestReuseWindow = 60 * time.Second
+	defaultSpeakReadyTimeout       = 5 * time.Second
 )
 
 type brokerOnlineAwareTransport interface {
@@ -122,8 +166,9 @@ func chatHookBuiltinOverrides() map[string]chathooks.BuiltinPluginConfig {
 
 func NewChatManager(deviceID string, transport types_conn.IConn, options ...ChatManagerOption) (*ChatManager, error) {
 	cm := &ChatManager{
-		DeviceID:  deviceID,
-		transport: transport,
+		DeviceID:          deviceID,
+		transport:         transport,
+		speakReadyTimeout: defaultSpeakReadyTimeout,
 	}
 
 	for _, option := range options {
@@ -373,6 +418,8 @@ func (c *ChatManager) handleTextMessage(message []byte) error {
 	switch clientMsg.Type {
 	case MessageTypeHello:
 		return c.HandleHelloMessage(&clientMsg)
+	case MessageTypeSpeakReady:
+		return c.HandleSpeakReadyMessage(&clientMsg)
 	case MessageTypeListen:
 		return c.HandleListenMessage(&clientMsg)
 	case MessageTypeAbort:
@@ -435,11 +482,11 @@ func (c *ChatManager) HandleHelloMessage(msg *ClientMessage) error {
 		}
 		return err
 	}
+	c.refreshSpeakPathWarmFromTransport()
 	c.scheduleMcpInitOnHelloLocked(msg)
 	if !isFirstHello && !requiresFreshHello {
 		log.Infof("设备 %s 收到重复hello，跳过重复初始化", clientState.DeviceID)
 	}
-
 	return nil
 }
 
@@ -584,6 +631,45 @@ func (c *ChatManager) HandleMcpMessage(msg *ClientMessage) error {
 
 func (c *ChatManager) HandleGoodByeMessage(msg *ClientMessage) error {
 	return c.transport.CloseAudioChannel()
+}
+
+func (c *ChatManager) HandleSpeakReadyMessage(msg *ClientMessage) error {
+	if msg == nil {
+		return nil
+	}
+	if c.serverTransport == nil || c.serverTransport.GetTransportType() != types_conn.TransportTypeMqttUdp {
+		return nil
+	}
+	if msg.State != "" && msg.State != MessageStateReady {
+		log.Debugf("设备 %s speak_ready 状态不是 ready，忽略: %+v", c.DeviceID, msg)
+		return nil
+	}
+	if msg.SpeakUDPConfig != nil && !msg.SpeakUDPConfig.Ready {
+		log.Warnf("设备 %s speak_ready udp_config.ready=false，忽略", c.DeviceID)
+		return nil
+	}
+
+	c.speakRequestMu.Lock()
+	pending := c.pendingSpeakRequest
+	c.speakRequestMu.Unlock()
+	if pending == nil {
+		log.Debugf("设备 %s 收到无待处理请求的 speak_ready，忽略", c.DeviceID)
+		return nil
+	}
+	if pending.sessionID != "" && strings.TrimSpace(msg.SessionID) != pending.sessionID {
+		log.Warnf("设备 %s speak_ready session_id 不匹配: got=%s want=%s", c.DeviceID, msg.SessionID, pending.sessionID)
+		return nil
+	}
+
+	c.markSpeakPathWarm(time.Now())
+	c.finishPendingSpeakRequest(pending, nil)
+
+	reuseExisting := false
+	if msg.SpeakUDPConfig != nil {
+		reuseExisting = msg.SpeakUDPConfig.ReuseExisting
+	}
+	log.Infof("设备 %s speak_ready 已就绪，reuse_existing=%v", c.DeviceID, reuseExisting)
+	return nil
 }
 
 func (c *ChatManager) ensureSession() (*ChatSession, error) {
@@ -846,10 +932,218 @@ func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
 	if err != nil {
 		return err
 	}
-	if skipLlm {
-		return session.AddTextToTTSQueue(message)
+	if err := c.prepareSpeakPathForInjectedSpeech(message); err != nil {
+		return err
 	}
-	return session.AddAsrResultToQueue(message, nil)
+	options := llmResponseChannelOptions{
+		onTTSPlaybackStart: c.newInjectedSpeechStartHook(),
+	}
+	if skipLlm {
+		return session.AddTextToTTSQueueWithOptions(message, options)
+	}
+	return session.AddAsrResultToQueueWithOptions(message, nil, options)
+}
+
+func (c *ChatManager) prepareSpeakPathForInjectedSpeech(previewText string) error {
+	if c == nil || c.serverTransport == nil {
+		return nil
+	}
+	if c.serverTransport.GetTransportType() != types_conn.TransportTypeMqttUdp {
+		log.Debugf("设备 %s 注入消息跳过 speak_request: transport=%s", c.DeviceID, c.serverTransport.GetTransportType())
+		return nil
+	}
+	if !c.shouldSendSpeakRequest(time.Now()) {
+		log.Debugf("设备 %s 注入消息复用现有播报链路，跳过 speak_request", c.DeviceID)
+		return nil
+	}
+
+	pending, created := c.getOrCreatePendingSpeakRequest()
+	if created {
+		if err := c.serverTransport.SendSpeakRequest(previewText, false); err != nil {
+			c.finishPendingSpeakRequest(pending, err)
+			return err
+		}
+		log.Infof("设备 %s 已发送 speak_request，session_id=%s", c.DeviceID, pending.sessionID)
+	}
+
+	waitCtx := c.ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	if err := c.waitPendingSpeakRequest(waitCtx, pending); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *ChatManager) shouldSendSpeakRequest(now time.Time) bool {
+	if c == nil || c.serverTransport == nil {
+		return false
+	}
+	if c.serverTransport.GetTransportType() != types_conn.TransportTypeMqttUdp {
+		log.Debugf("设备 %s speak_request 判定: transport=%s，无需发送", c.DeviceID, c.serverTransport.GetTransportType())
+		return false
+	}
+	if c.isConversationActive() {
+		log.Debugf("设备 %s speak_request 判定: 当前处于会话中，跳过发送", c.DeviceID)
+		return false
+	}
+
+	warmAt := c.currentSpeakPathWarmAt()
+	if warmAt <= 0 {
+		log.Debugf("设备 %s speak_request 判定: 无可复用热链路，需发送", c.DeviceID)
+		return true
+	}
+	reuseWindow := speakRequestReuseWindow()
+	idleFor := now.Sub(time.UnixMilli(warmAt))
+	if idleFor <= reuseWindow {
+		log.Debugf("设备 %s speak_request 判定: 热链路仍有效 idle_for=%s reuse_window=%s，跳过发送", c.DeviceID, idleFor, reuseWindow)
+		return false
+	}
+	log.Debugf("设备 %s speak_request 判定: 热链路已过期 idle_for=%s reuse_window=%s，需发送", c.DeviceID, idleFor, reuseWindow)
+	return true
+}
+
+func (c *ChatManager) isConversationActive() bool {
+	if c == nil || c.clientState == nil {
+		return false
+	}
+	if phase := c.clientState.GetListenPhase(); phase != "" && phase != ListenPhaseIdle {
+		return true
+	}
+	switch c.clientState.GetStatus() {
+	case ClientStatusListening, ClientStatusLLMStart, ClientStatusTTSStart:
+		return true
+	}
+	session := c.GetSession()
+	return session != nil && session.IsTTSActive()
+}
+
+func (c *ChatManager) getOrCreatePendingSpeakRequest() (*pendingSpeakRequest, bool) {
+	c.speakRequestMu.Lock()
+	defer c.speakRequestMu.Unlock()
+
+	if c.pendingSpeakRequest != nil {
+		return c.pendingSpeakRequest, false
+	}
+
+	sessionID := ""
+	if c.clientState != nil {
+		sessionID = strings.TrimSpace(c.clientState.SessionID)
+	}
+	pending := &pendingSpeakRequest{
+		sessionID: sessionID,
+		done:      make(chan struct{}),
+	}
+	timeout := c.speakReadyTimeout
+	if timeout <= 0 {
+		timeout = defaultSpeakReadyTimeout
+	}
+	pending.timer = time.AfterFunc(timeout, func() {
+		c.finishPendingSpeakRequest(pending, fmt.Errorf("等待 speak_ready 超时"))
+	})
+	c.pendingSpeakRequest = pending
+	return pending, true
+}
+
+func (c *ChatManager) waitPendingSpeakRequest(ctx context.Context, pending *pendingSpeakRequest) error {
+	if pending == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-pending.done:
+		return pending.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *ChatManager) finishPendingSpeakRequest(pending *pendingSpeakRequest, err error) {
+	if pending == nil {
+		return
+	}
+	c.speakRequestMu.Lock()
+	if c.pendingSpeakRequest == pending {
+		c.pendingSpeakRequest = nil
+	}
+	c.speakRequestMu.Unlock()
+	pending.resolve(err)
+}
+
+func (c *ChatManager) refreshSpeakPathWarmFromTransport() {
+	if c == nil || c.serverTransport == nil || !c.serverTransport.HasActiveUDPBinding() {
+		return
+	}
+	if ts := c.serverTransport.GetUDPLastActiveTs(); ts > 0 {
+		c.updateSpeakPathWarmAt(ts)
+		return
+	}
+	c.markSpeakPathWarm(time.Now())
+}
+
+func (c *ChatManager) currentSpeakPathWarmAt() int64 {
+	if c == nil {
+		return 0
+	}
+	latest := c.lastSpeakPathWarmAt.Load()
+	if c.serverTransport != nil {
+		if transportTs := c.serverTransport.GetUDPLastActiveTs(); transportTs > latest {
+			latest = transportTs
+		}
+	}
+	return latest
+}
+
+func (c *ChatManager) markSpeakPathWarm(ts time.Time) {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	c.updateSpeakPathWarmAt(ts.UnixMilli())
+}
+
+func (c *ChatManager) updateSpeakPathWarmAt(ts int64) {
+	if c == nil || ts <= 0 {
+		return
+	}
+	for {
+		current := c.lastSpeakPathWarmAt.Load()
+		if current >= ts {
+			return
+		}
+		if c.lastSpeakPathWarmAt.CompareAndSwap(current, ts) {
+			return
+		}
+	}
+}
+
+func speakRequestReuseWindow() time.Duration {
+	if !viper.IsSet("chat.speak_request_reuse_window_ms") {
+		return defaultSpeakRequestReuseWindow
+	}
+	ms := viper.GetInt64("chat.speak_request_reuse_window_ms")
+	if ms <= 0 {
+		return defaultSpeakRequestReuseWindow
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func (c *ChatManager) newInjectedSpeechStartHook() func() {
+	if c == nil {
+		return nil
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if c.serverTransport == nil || c.serverTransport.GetTransportType() != types_conn.TransportTypeMqttUdp {
+				return
+			}
+			c.markSpeakPathWarm(time.Now())
+		})
+	}
 }
 
 func (c *ChatManager) InjectOpenClawResponse(event openclaw.ResponseDelivery) error {

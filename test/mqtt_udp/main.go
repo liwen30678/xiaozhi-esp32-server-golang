@@ -7,11 +7,13 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -24,6 +26,8 @@ import (
 var sendAudioEndTs int64
 var firstTts bool
 var firstAudio bool
+var awaitFirstTTSAudio bool
+var awaitFirstTTSAudioTs int64
 var opusData [][]byte
 
 var audioRate = 16000
@@ -31,6 +35,14 @@ var frameDuration = 60
 
 var allowChat = make(chan struct{}, 1)
 var ttsProviderName = constants.TtsTypeCosyvoice
+
+const (
+	deviceStateIdle         = "idle"
+	deviceStateConnecting   = "connecting"
+	deviceStateConversation = "conversation"
+	deviceStateSpeaking     = "speaking"
+	speakRequestReuseWindow = 60 * time.Second
+)
 
 // ServerMessage 表示服务器消息
 type ServerMessage struct {
@@ -42,6 +54,7 @@ type ServerMessage struct {
 	Transport   string      `json:"transport,omitempty"`
 	AudioFormat AudioFormat `json:"audio_params,omitempty"`
 	Emotion     string      `json:"emotion,omitempty"`
+	AutoListen  *bool       `json:"auto_listen,omitempty"`
 }
 
 type AudioFormat struct {
@@ -74,6 +87,181 @@ type UDPConfig struct {
 
 var globalChannel chan *UDPConfig
 var serverConfig *ServerResponse
+var helloResponseMu sync.Mutex
+var pendingHelloResponse chan *UDPConfig
+var runtimeMu sync.RWMutex
+var currentUDPConfig *UDPConfig
+var currentUDPClient *UDPClient
+var currentSessionID string
+var currentDeviceState = deviceStateConnecting
+var lastUDPTrafficAt time.Time
+
+func releaseAllowChat() {
+	select {
+	case allowChat <- struct{}{}:
+	default:
+	}
+}
+
+func setDeviceState(state string) {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	currentDeviceState = state
+}
+
+func getDeviceState() string {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return currentDeviceState
+}
+
+func getCurrentSessionID() string {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return currentSessionID
+}
+
+func getCurrentUDPClient() *UDPClient {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return currentUDPClient
+}
+
+func markUDPTraffic() {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	lastUDPTrafficAt = time.Now()
+}
+
+func shouldReuseExistingUDP() bool {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+
+	if currentUDPClient == nil || currentUDPConfig == nil {
+		return false
+	}
+	if lastUDPTrafficAt.IsZero() {
+		return false
+	}
+	return time.Since(lastUDPTrafficAt) <= speakRequestReuseWindow
+}
+
+func setPendingHelloResponse(ch chan *UDPConfig) {
+	helloResponseMu.Lock()
+	defer helloResponseMu.Unlock()
+	pendingHelloResponse = ch
+}
+
+func clearPendingHelloResponse(ch chan *UDPConfig) {
+	helloResponseMu.Lock()
+	defer helloResponseMu.Unlock()
+	if pendingHelloResponse == ch {
+		pendingHelloResponse = nil
+	}
+}
+
+func dispatchHelloResponse(cfg *UDPConfig) {
+	helloResponseMu.Lock()
+	ch := pendingHelloResponse
+	if ch != nil {
+		pendingHelloResponse = nil
+	}
+	helloResponseMu.Unlock()
+
+	if ch != nil {
+		select {
+		case ch <- cfg:
+		default:
+			fmt.Println("⚠️ speak_request hello 响应通道已满，丢弃本次 hello 响应")
+		}
+		return
+	}
+
+	select {
+	case globalChannel <- cfg:
+	default:
+		fmt.Println("⚠️ 无等待方处理 hello 响应，丢弃本次配置")
+	}
+}
+
+func startUDPReceiver(udpClient *UDPClient, udpConfig *UDPConfig) error {
+	hexKey, err := hex.DecodeString(udpConfig.UDP.Key)
+	if err != nil {
+		return fmt.Errorf("解析 UDP key 失败: %w", err)
+	}
+
+	return udpClient.ReceiveAudioData(hexKey, func(key []byte, audioData []byte) {
+		markUDPTraffic()
+
+		decryptedData, err := udpClient.decryptAudioData(key, audioData)
+		if err != nil {
+			fmt.Println("解密失败:", err)
+			return
+		}
+		if len(decryptedData) == 0 {
+			fmt.Println("ℹ️ 收到空 UDP 音频包，忽略")
+			return
+		}
+		if awaitFirstTTSAudio {
+			fmt.Printf("发送音频结束至收到首帧耗时: %d ms\n", time.Now().UnixMilli()-awaitFirstTTSAudioTs)
+			awaitFirstTTSAudio = false
+			_ = os.WriteFile("mqtt_output_first_frame.wav", decryptedData, 0644)
+		}
+		if !firstAudio {
+			firstAudio = true
+			fmt.Printf("收到第一条音频消息, 耗时: %d ms\n", time.Now().UnixMilli()-sendAudioEndTs)
+		}
+
+		opusData = append(opusData, decryptedData)
+	})
+}
+
+func replaceUDPClient(udpConfig *UDPConfig) (*UDPClient, error) {
+	if udpConfig == nil {
+		return nil, errors.New("udp 配置为空")
+	}
+
+	udpClient, err := NewUDPClient(udpConfig.UDP.Server, udpConfig.UDP.Port, udpConfig.UDP.Key, udpConfig.UDP.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	if err := startUDPReceiver(udpClient, udpConfig); err != nil {
+		udpClient.Close()
+		return nil, err
+	}
+
+	runtimeMu.Lock()
+	oldClient := currentUDPClient
+	currentUDPClient = udpClient
+	currentUDPConfig = udpConfig
+	currentSessionID = udpConfig.SessionID
+	lastUDPTrafficAt = time.Now()
+	runtimeMu.Unlock()
+
+	if oldClient != nil {
+		oldClient.Close()
+	}
+
+	fmt.Printf("✅ UDP 音频通道已就绪, session_id=%s, server=%s:%d\n", udpConfig.SessionID, udpConfig.UDP.Server, udpConfig.UDP.Port)
+	return udpClient, nil
+}
+
+func waitForHelloResponse(mqttClient mqtt.Client, timeout time.Duration) (*UDPConfig, error) {
+	ch := make(chan *UDPConfig, 1)
+	setPendingHelloResponse(ch)
+	defer clearPendingHelloResponse(ch)
+
+	if err := publicHello(serverConfig.MQTT.PublishTopic, mqttClient); err != nil {
+		return nil, err
+	}
+
+	select {
+	case cfg := <-ch:
+		return cfg, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("等待重复 hello 响应超时")
+	}
+}
 
 func test_aes_encrypt(plainText string) []byte {
 	md5Data := md5.Sum([]byte(plainText))
@@ -313,7 +501,6 @@ func publicHello(publishTopic string, client mqtt.Client) error {
 		return token.Error()
 	}
 	fmt.Println("✅ 发布消息成功")
-	allowChat <- struct{}{}
 	return nil
 }
 
@@ -341,6 +528,8 @@ func onMessage(client mqtt.Client, msg mqtt.Message) {
 	switch msgType {
 	case "hello":
 		handleHello(client, msg)
+	case "speak_request":
+		handleSpeakRequest(client, msg)
 	case "tts":
 		handleTTS(client, msg)
 	case "llm":
@@ -363,10 +552,75 @@ func handleHello(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	globalChannel <- &helloMessage
+	dispatchHelloResponse(&helloMessage)
 
-	fmt.Printf("处理 hello 消息: %s\n", helloMessage)
+	fmt.Printf("处理 hello 消息: %+v\n", helloMessage)
 
+}
+
+type SpeakReadyUDPConfig struct {
+	Ready         bool `json:"ready"`
+	ReuseExisting bool `json:"reuse_existing,omitempty"`
+}
+
+func handleSpeakRequest(mqttClient mqtt.Client, msg mqtt.Message) {
+	var request ServerMessage
+	if err := json.Unmarshal(msg.Payload(), &request); err != nil {
+		fmt.Printf("❌ speak_request 解析失败: %v\n", err)
+		return
+	}
+
+	if request.SessionID == "" {
+		fmt.Println("❌ speak_request 缺少 session_id，忽略")
+		return
+	}
+	if getDeviceState() != deviceStateIdle {
+		fmt.Printf("⚠️ 当前设备状态=%s，忽略 speak_request\n", getDeviceState())
+		return
+	}
+
+	autoListen := true
+	if request.AutoListen != nil {
+		autoListen = *request.AutoListen
+	}
+	fmt.Printf("🔔 收到 speak_request: session_id=%s auto_listen=%v preview=%q\n", request.SessionID, autoListen, request.Text)
+
+	setDeviceState(deviceStateConnecting)
+	reuseExisting := shouldReuseExistingUDP()
+	if !reuseExisting {
+		fmt.Println("ℹ️ UDP 链路已冷却，发送重复 hello 重新获取 UDP 配置")
+		udpConfig, err := waitForHelloResponse(mqttClient, 10*time.Second)
+		if err != nil {
+			fmt.Printf("❌ speak_request 重复 hello 失败: %v\n", err)
+			setDeviceState(deviceStateIdle)
+			releaseAllowChat()
+			return
+		}
+		if _, err := replaceUDPClient(udpConfig); err != nil {
+			fmt.Printf("❌ speak_request 重建 UDP 客户端失败: %v\n", err)
+			setDeviceState(deviceStateIdle)
+			releaseAllowChat()
+			return
+		}
+	} else {
+		fmt.Println("ℹ️ 复用现有 UDP 链路响应 speak_request")
+	}
+
+	setDeviceState(deviceStateSpeaking)
+	if err := sendSpeakReady(mqttClient, request.SessionID, reuseExisting); err != nil {
+		fmt.Printf("❌ 发送 speak_ready 失败: %v\n", err)
+		setDeviceState(deviceStateIdle)
+		releaseAllowChat()
+		return
+	}
+	firstAudio = false
+	firstTts = false
+	opusData = make([][]byte, 0)
+	sendAudioEndTs = time.Now().UnixMilli()
+
+	if autoListen {
+		fmt.Println("ℹ️ speak_request.auto_listen=true，但测试程序仍按控制台输入模式工作")
+	}
 }
 
 func handleLLM(client mqtt.Client, msg mqtt.Message) {
@@ -397,6 +651,10 @@ func handleTTS(client mqtt.Client, msg mqtt.Message) {
 		}
 	}
 
+	if ttsState.State == "start" || ttsState.State == "sentence_start" {
+		setDeviceState(deviceStateSpeaking)
+	}
+
 	if ttsState.State == "stop" {
 		//pcmDataList, err := OpusToWav(opusData, audioRate, 1, "output_16000.wav")
 		saveOpusData()
@@ -406,6 +664,8 @@ func handleTTS(client mqtt.Client, msg mqtt.Message) {
 			return
 		}
 		fmt.Printf("TTS 结束, 音频数据长度: %d\n", len(pcmDataList))
+		setDeviceState(deviceStateIdle)
+		releaseAllowChat()
 	}
 }
 
@@ -427,19 +687,19 @@ func saveOpusData() error {
 
 func handleGoodbye(client mqtt.Client, msg mqtt.Message) {
 	fmt.Printf("处理 goodbye 消息: %s\n", string(msg.Payload()))
-	// TODO: 实现会话清理
+	setDeviceState(deviceStateIdle)
+	releaseAllowChat()
 }
 
 func connectUdqAndSendAudio(udpConfig *UDPConfig, mqttClient mqtt.Client) error {
-	udpInstance, err := NewUDPClient(udpConfig.UDP.Server, udpConfig.UDP.Port, udpConfig.UDP.Key, udpConfig.UDP.Nonce)
-	if err != nil {
+	if _, err := replaceUDPClient(udpConfig); err != nil {
 		fmt.Println(err)
 		return err
 	}
 
-	sessionId := "b23a56y8" //29f15278
-
-	sendTextToSpeech(mqttClient, sessionId, udpInstance, udpConfig)
+	setDeviceState(deviceStateIdle)
+	releaseAllowChat()
+	sendTextToSpeech(mqttClient)
 
 	/*
 
@@ -510,18 +770,19 @@ func sendWavFileWithOpusEncoding(udpInstance *UDPClient, filePath string) error 
 
 // ClientMessage 表示客户端消息
 type ClientMessage struct {
-	Type        string   `json:"type"`
-	DeviceID    string   `json:"device_id,omitempty"`
-	SessionID   string   `json:"session_id"`
-	Text        string   `json:"text,omitempty"`
-	Mode        string   `json:"mode,omitempty"`
-	State       string   `json:"state,omitempty"`
-	Token       string   `json:"token,omitempty"`
-	DeviceMac   string   `json:"device_mac,omitempty"`
-	Version     int      `json:"version,omitempty"`
-	Transport   string   `json:"transport,omitempty"`
-	Descriptors []string `json:"descriptors,omitempty"`
-	States      []string `json:"states,omitempty"`
+	Type           string               `json:"type"`
+	DeviceID       string               `json:"device_id,omitempty"`
+	SessionID      string               `json:"session_id"`
+	Text           string               `json:"text,omitempty"`
+	Mode           string               `json:"mode,omitempty"`
+	State          string               `json:"state,omitempty"`
+	Token          string               `json:"token,omitempty"`
+	DeviceMac      string               `json:"device_mac,omitempty"`
+	Version        int                  `json:"version,omitempty"`
+	Transport      string               `json:"transport,omitempty"`
+	SpeakUDPConfig *SpeakReadyUDPConfig `json:"udp_config,omitempty"`
+	Descriptors    []string             `json:"descriptors,omitempty"`
+	States         []string             `json:"states,omitempty"`
 }
 
 // ClientMessage 表示客户端消息
@@ -577,7 +838,29 @@ func sendListenStop(mqttClient mqtt.Client, sessionID string) error {
 	if token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-	allowChat <- struct{}{}
+	return nil
+}
+
+func sendSpeakReady(mqttClient mqtt.Client, sessionID string, reuseExisting bool) error {
+	message := ClientMessage{
+		Type:      "speak_ready",
+		State:     "ready",
+		SessionID: sessionID,
+		SpeakUDPConfig: &SpeakReadyUDPConfig{
+			Ready:         true,
+			ReuseExisting: reuseExisting,
+		},
+	}
+	jsonData, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+	fmt.Println("📤 发布 speak_ready 到 topic:", serverConfig.MQTT.PublishTopic, string(jsonData))
+
+	token := mqttClient.Publish(serverConfig.MQTT.PublishTopic, byte(0), false, jsonData)
+	if token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
 	return nil
 }
 
@@ -700,7 +983,7 @@ func getTTSProviderConfig() (string, map[string]interface{}, error) {
 }
 
 // 调用tts服务生成语音, 并编码至opus发送至服务端
-func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDPClient, udpConfig *UDPConfig) error {
+func sendTextToSpeech(mqttClient mqtt.Client) error {
 	providerName, providerConfig, err := getTTSProviderConfig()
 	if err != nil {
 		return err
@@ -721,40 +1004,32 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 		}
 	*/
 
-	hexKey, _ := hex.DecodeString(udpConfig.UDP.Key)
 	opusData = make([][]byte, 0)
-
-	var isStart bool
-	var startTs int64
-
-	udpInstance.ReceiveAudioData(hexKey, func(key []byte, audioData []byte) {
-		decryptedData, err := udpInstance.decryptAudioData(key, audioData)
-		if err != nil {
-			fmt.Println("解密失败:", err)
-			return
-		}
-		if isStart {
-			fmt.Printf("发送音频结束至收到首帧耗时: %d ms\n", time.Now().UnixMilli()-startTs)
-			isStart = false
-			os.WriteFile("mqtt_output_first_frame.wav", decryptedData, 0644)
-		}
-
-		//fmt.Printf("收到音频数据, 长度: %d\n", len(decryptedData))
-		opusData = append(opusData, decryptedData)
-		//fmt.Println("收到音频数据", len(decryptedData))
-	})
 
 	var audioCtx context.Context
 	var audioCancel context.CancelFunc
 
 	genAndSendAudio := func(ctx context.Context, msg string, count int) error {
+		sessionID := getCurrentSessionID()
+		if sessionID == "" {
+			return fmt.Errorf("当前 session_id 为空，无法发送音频")
+		}
+		udpInstance := getCurrentUDPClient()
+		if udpInstance == nil {
+			return fmt.Errorf("当前 UDP 客户端未初始化")
+		}
+
+		firstAudio = false
+		firstTts = false
+		opusData = make([][]byte, 0)
+		setDeviceState(deviceStateConversation)
 		sendListenStart(mqttClient, sessionID)
 		defer func() {
-			isStart = true
+			awaitFirstTTSAudio = true
 			if listenMode == "manual" {
 				sendListenStop(mqttClient, sessionID)
 			}
-			startTs = time.Now().UnixMilli()
+			awaitFirstTTSAudioTs = time.Now().UnixMilli()
 		}()
 		audioChan, err := ttsProvider.TextToSpeechStream(context.Background(), msg, 16000, 1, 60)
 		if err != nil {
@@ -769,7 +1044,9 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 			default:
 			}
 			fmt.Printf("生成语音数据长度: %d\n", len(audioData))
-			udpInstance.SendAudioData(audioData)
+			if err := udpInstance.SendAudioData(audioData); err != nil {
+				return fmt.Errorf("发送 UDP 音频失败: %v", err)
+			}
 			time.Sleep(60 * time.Millisecond)
 		}
 
@@ -794,13 +1071,25 @@ func sendTextToSpeech(mqttClient mqtt.Client, sessionID string, udpInstance *UDP
 		}
 		input = strings.TrimSpace(input)
 		if input == "" {
-			sendAbort(mqttClient, sessionID)
-			audioCancel()
+			sessionID := getCurrentSessionID()
+			if sessionID != "" {
+				sendAbort(mqttClient, sessionID)
+			}
+			if audioCancel != nil {
+				audioCancel()
+			}
+			setDeviceState(deviceStateIdle)
+			releaseAllowChat()
 			return false
 		}
 
 		audioCtx, audioCancel = context.WithCancel(context.Background())
-		genAndSendAudio(audioCtx, input, 50)
+		if err := genAndSendAudio(audioCtx, input, 50); err != nil {
+			fmt.Printf("❌ 发送测试音频失败: %v\n", err)
+			setDeviceState(deviceStateIdle)
+			releaseAllowChat()
+			return false
+		}
 		return true
 	}
 	for {

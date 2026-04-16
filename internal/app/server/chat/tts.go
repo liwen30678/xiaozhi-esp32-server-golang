@@ -1320,10 +1320,10 @@ func (t *TTSManager) waitForSync(ctx context.Context, done <-chan struct{}) erro
 //   - 不支持双流式：每次 Push 一个单条 TTSQueueItem（与原逻辑一致）。
 //   - 支持双流式：IsStart 时创建内部 StreamChan 并 Push 一个流式 item，后续调用写入该 channel，IsEnd 时 close。
 func (t *TTSManager) handleTextResponse(ctx context.Context, llmResponse llm_common.LLMResponseStruct, isSync bool) error {
-	return t.handleTextResponseWithHooks(ctx, llmResponse, isSync, nil)
+	return t.handleTextResponseWithHooks(ctx, llmResponse, isSync, nil, nil)
 }
 
-func (t *TTSManager) handleTextResponseWithHooks(ctx context.Context, llmResponse llm_common.LLMResponseStruct, isSync bool, onTTSItemEnqueued func() func(error)) error {
+func (t *TTSManager) handleTextResponseWithHooks(ctx context.Context, llmResponse llm_common.LLMResponseStruct, isSync bool, onTTSItemEnqueued func() func(error), onTTSPlaybackStart func()) error {
 	hasText := strings.TrimSpace(llmResponse.Text) != ""
 	if !hasText && !llmResponse.IsEnd && !llmResponse.IsStart {
 		return nil
@@ -1367,6 +1367,7 @@ func (t *TTSManager) handleTextResponseWithHooks(ctx context.Context, llmRespons
 			llmResponse: llmResponse,
 			generation:  gen,
 			metricCycle: metricCycle,
+			onStartFunc: onTTSPlaybackStart,
 			onEndFunc:   onEndFunc,
 		}); err != nil {
 			if onEndFunc != nil {
@@ -1406,6 +1407,7 @@ func (t *TTSManager) handleTextResponseWithHooks(ctx context.Context, llmRespons
 			StreamChan:  streamChan,
 			generation:  t.currentAudioGeneration(),
 			metricCycle: t.currentTtsMetricCycle(),
+			onStartFunc: onTTSPlaybackStart,
 			onEndFunc:   onEndFunc,
 		}); err != nil {
 			safeCloseLLMResponseStream(streamChan)
@@ -1455,6 +1457,7 @@ func (t *TTSManager) handleTextResponseWithHooks(ctx context.Context, llmRespons
 			llmResponse: llmResponse,
 			generation:  gen,
 			metricCycle: t.currentTtsMetricCycle(),
+			onStartFunc: onTTSPlaybackStart,
 			onEndFunc:   onEndFunc,
 		}); err != nil {
 			if onEndFunc != nil {

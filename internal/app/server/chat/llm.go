@@ -40,6 +40,7 @@ const (
 	fullTextKey          contextKey    = iota
 	toolRoundMessagesKey
 	ttsTurnTrackerKey
+	ttsPlaybackStartHookKey
 )
 
 const (
@@ -85,6 +86,33 @@ type llmResponseChannelOptions struct {
 	disableTTSCommands bool
 	onStartFunc        func(args ...any)
 	onEndFunc          func(err error, args ...any)
+	onTTSPlaybackStart func()
+}
+
+type ttsPlaybackStartHook func()
+
+func withTTSPlaybackStartHook(ctx context.Context, hook func()) context.Context {
+	if ctx == nil || hook == nil {
+		return ctx
+	}
+
+	var once sync.Once
+	return context.WithValue(ctx, ttsPlaybackStartHookKey, ttsPlaybackStartHook(func() {
+		once.Do(hook)
+	}))
+}
+
+func ttsPlaybackStartHookFromContext(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	hook, ok := ctx.Value(ttsPlaybackStartHookKey).(ttsPlaybackStartHook)
+	if !ok || hook == nil {
+		return nil
+	}
+	return func() {
+		hook()
+	}
 }
 
 type ttsTurnTracker struct {
@@ -461,6 +489,10 @@ func (l *LLMManager) ClearLLMResponseQueue() {
 }
 
 func (l *LLMManager) AddTextToTTSQueue(text string) error {
+	return l.AddTextToTTSQueueWithOptions(text, llmResponseChannelOptions{})
+}
+
+func (l *LLMManager) AddTextToTTSQueueWithOptions(text string, options llmResponseChannelOptions) error {
 	log.Debugf("AddTextToTTSQueue text: %s", text)
 	msg := &schema.Message{
 		Role:    schema.User,
@@ -476,7 +508,8 @@ func (l *LLMManager) AddTextToTTSQueue(text string) error {
 
 	sessionCtx := l.clientState.SessionCtx.Get(l.clientState.Ctx)
 	ctx := l.clientState.AfterAsrSessionCtx.Get(sessionCtx)
-	if err := l.HandleLLMResponseChannelAsync(ctx, msg, llmResponseChan); err != nil {
+	ctx = withTTSPlaybackStartHook(ctx, options.onTTSPlaybackStart)
+	if err := l.HandleLLMResponseChannelAsyncWithOptions(ctx, msg, llmResponseChan, options); err != nil {
 		log.Warnf("AddTextToTTSQueue enqueue failed: %v", err)
 		return err
 	}
@@ -528,6 +561,7 @@ func (l *LLMManager) HandleLLMResponseChannelAsyncWithOptions(ctx context.Contex
 
 func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMessage *schema.Message, responseChan chan llm_common.LLMResponseStruct, options llmResponseChannelOptions) error {
 	ctx = ensureTTSTurnTrackerInContext(ctx)
+	ctx = withTTSPlaybackStartHook(ctx, options.onTTSPlaybackStart)
 
 	needSendTtsCmd := true
 	val := ctx.Value("nest")
@@ -749,11 +783,15 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 	var toolCalls []schema.ToolCall
 	toolExecCtx := context.WithValue(ctx, "nest", 2)
 	toolExecCtx = context.WithValue(toolExecCtx, fullTextKey, fullText)
+	if speechStartHook := ttsPlaybackStartHookFromContext(ctx); speechStartHook != nil {
+		toolExecCtx = withTTSPlaybackStartHook(toolExecCtx, speechStartHook)
+	}
 	if l.clientState.GetMemoryMode() == MemoryModeNone && userMessage != nil {
 		toolExecCtx = appendToolRoundMessagesToContext(toolExecCtx, []*schema.Message{userMessage})
 	}
 	ttsTracker := ttsTurnTrackerFromContext(ctx)
 	var onTTSItemEnqueued func() func(error)
+	onTTSPlaybackStart := ttsPlaybackStartHookFromContext(ctx)
 	if ttsTracker != nil {
 		onTTSItemEnqueued = ttsTracker.Add
 	}
@@ -822,7 +860,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 				hasText := strings.TrimSpace(llmResponse.Text) != ""
 				if hasText || llmResponse.IsStart || llmResponse.IsEnd {
 					// 双流式收尾依赖空文本的 IsEnd 信号，不能只在有文本时才传给 TTS。
-					if err := l.ttsManager.handleTextResponseWithHooks(ctx, llmResponse, false, onTTSItemEnqueued); err != nil {
+					if err := l.ttsManager.handleTextResponseWithHooks(ctx, llmResponse, false, onTTSItemEnqueued, onTTSPlaybackStart); err != nil {
 						result.ok = true
 						return result, err
 					}
@@ -873,7 +911,7 @@ func (l *LLMManager) handleLLMResponse(ctx context.Context, userMessage *schema.
 						}
 						result.suppressProtocolTtsStop = toolSummary.hasMediaOutput
 						if !toolSummary.invokeToolSuccess && strings.TrimSpace(llmResponse.Text) != "" {
-							if err := l.ttsManager.handleTextResponse(ctx, llmResponse, false); err != nil {
+							if err := l.ttsManager.handleTextResponseWithHooks(ctx, llmResponse, false, nil, onTTSPlaybackStart); err != nil {
 								result.ok = true
 								return result, err
 							}

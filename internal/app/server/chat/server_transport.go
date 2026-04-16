@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"xiaozhi-esp32-server-golang/internal/app/server/mqtt_udp"
 	types_conn "xiaozhi-esp32-server-golang/internal/app/server/types"
 	types_audio "xiaozhi-esp32-server-golang/internal/data/audio"
 	. "xiaozhi-esp32-server-golang/internal/data/client"
@@ -21,6 +22,10 @@ type ServerTransport struct {
 	McpRecvMsgChan chan []byte
 	closed         bool
 	mu             sync.Mutex
+}
+
+type udpSessionProvider interface {
+	GetUdpSession() *mqtt_udp.UdpSession
 }
 
 func NewServerTransport(transport types_conn.IConn, clientState *ClientState) *ServerTransport {
@@ -66,7 +71,22 @@ func (s *ServerTransport) SendTtsStop() error {
 	s.clientState.IsWelcomePlaying = false
 	// 一轮对话播报结束后，回到可触发下一轮对话的状态。
 	s.clientState.SetStatus(ClientStatusListenStop)
+	s.clientState.SetTtsStart(false)
 	return nil
+}
+
+func (s *ServerTransport) SendSpeakRequest(text string, autoListen bool) error {
+	msg := ServerMessage{
+		Type:       ServerMessageTypeSpeakRequest,
+		Text:       text,
+		SessionID:  s.clientState.SessionID,
+		AutoListen: &autoListen,
+	}
+	bytes, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return s.transport.SendCmd(bytes)
 }
 
 func (s *ServerTransport) SendMqttGoodbye() error {
@@ -193,6 +213,30 @@ func (s *ServerTransport) GetTransportType() string {
 
 func (s *ServerTransport) GetData(key string) (interface{}, error) {
 	return s.transport.GetData(key)
+}
+
+func (s *ServerTransport) HasActiveUDPBinding() bool {
+	provider, ok := s.transport.(udpSessionProvider)
+	if !ok {
+		return false
+	}
+	session := provider.GetUdpSession()
+	if session == nil {
+		return false
+	}
+	return session.GetRemoteAddr() != nil
+}
+
+func (s *ServerTransport) GetUDPLastActiveTs() int64 {
+	provider, ok := s.transport.(udpSessionProvider)
+	if !ok {
+		return 0
+	}
+	session := provider.GetUdpSession()
+	if session == nil || session.GetRemoteAddr() == nil {
+		return 0
+	}
+	return session.LastActive.UnixMilli()
 }
 
 func (s *ServerTransport) SendMcpMsg(payload []byte) error {

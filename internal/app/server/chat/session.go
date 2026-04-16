@@ -637,6 +637,17 @@ func (s *ChatSession) AddTextToTTSQueue(text string) error {
 	return s.llmManager.AddTextToTTSQueue(text)
 }
 
+func (s *ChatSession) AddTextToTTSQueueWithOptions(text string, options llmResponseChannelOptions) error {
+	return s.llmManager.AddTextToTTSQueueWithOptions(text, options)
+}
+
+func (s *ChatSession) IsTTSActive() bool {
+	if s == nil || s.ttsManager == nil {
+		return false
+	}
+	return s.ttsManager.ttsActive.Load()
+}
+
 func (s *ChatSession) getOrCreateOpenClawStream(correlationID string) (chan llm_common.LLMResponseStruct, bool, error) {
 	correlationID = strings.TrimSpace(correlationID)
 	if correlationID == "" {
@@ -992,6 +1003,10 @@ func (s *ChatSession) OnListenStart(startSeq uint64) error {
 
 // startChat 开始对话
 func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.IdentifyResult) error {
+	return s.AddAsrResultToQueueWithOptions(text, speakerResult, llmResponseChannelOptions{})
+}
+
+func (s *ChatSession) AddAsrResultToQueueWithOptions(text string, speakerResult *speaker.IdentifyResult, options llmResponseChannelOptions) error {
 	log.Debugf("AddAsrResultToQueue text: %s", text)
 	if speakerResult != nil && speakerResult.Identified {
 		log.Debugf("AddAsrResultToQueue speaker: %s (confidence: %.2f)", speakerResult.SpeakerName, speakerResult.Confidence)
@@ -1011,9 +1026,11 @@ func (s *ChatSession) AddAsrResultToQueue(text string, speakerResult *speaker.Id
 		log.Debugf("AddAsrResultToQueue sessionCtx 已取消，丢弃消息")
 		return nil
 	}
+	ctx := s.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	ctx = withTTSPlaybackStartHook(ctx, options.onTTSPlaybackStart)
 
 	item := AsrResponseChannelItem{
-		ctx:           s.clientState.AfterAsrSessionCtx.Get(sessionCtx),
+		ctx:           ctx,
 		text:          text,
 		speakerResult: speakerResult,
 	}
