@@ -39,6 +39,16 @@ type AsrResponseChannelItem struct {
 	speakerResult *speaker.IdentifyResult
 }
 
+const listenCommandHistoryTTL = 2 * time.Second
+
+type detectAction string
+
+const (
+	detectActionSilent  detectAction = "silent"
+	detectActionWelcome detectAction = "welcome"
+	detectActionLLM     detectAction = "llm"
+)
+
 const (
 	chatSessionCloseReasonManagerShutdown = "manager_shutdown"
 	chatSessionCloseReasonExplicitExit    = "explicit_exit"
@@ -472,6 +482,43 @@ func (s *ChatSession) isCurrentListenStart(startSeq uint64) bool {
 	return startSeq == s.listenStartSeq.Load()
 }
 
+func (s *ChatSession) shouldIgnoreListenStartError(startSeq uint64, ctx context.Context, err error) bool {
+	if !s.isCurrentListenStart(startSeq) {
+		return true
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	if s.clientState.Ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
+
+func isWithinCommandTTL(at time.Time, now time.Time) bool {
+	return !at.IsZero() && now.Sub(at) <= listenCommandHistoryTTL
+}
+
+func isRecentCommand(prev CommandHistorySnapshot, cmdType string, now time.Time) bool {
+	return prev.LastCmdType == cmdType && isWithinCommandTTL(prev.LastCmdAt, now)
+}
+
+func resolveDetectAction(text string, enableGreeting bool, welcomeAlreadySpoken bool, recentListenStart bool) detectAction {
+	if text == "" {
+		return detectActionSilent
+	}
+	if enableGreeting && isWakeupWord(text) {
+		if welcomeAlreadySpoken {
+			if recentListenStart {
+				return detectActionSilent
+			}
+			return detectActionLLM
+		}
+		return detectActionWelcome
+	}
+	return detectActionLLM
+}
+
 func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 	// 检查设备激活状态
 	if msg.Text != "" {
@@ -485,24 +532,40 @@ func (s *ChatSession) HandleListenDetect(msg *ClientMessage) error {
 		}
 	}
 
-	// 停止当前播放
-	s.StopSpeaking(false)
+	now := time.Now()
+	prevHistory := s.clientState.GetCommandHistorySnapshot()
+	s.clientState.RecordCommandArrival(CommandTypeDetect, now)
 
 	// 如果有文本，处理
 	if msg.Text != "" {
 		text := removePunctuation(msg.Text)
-
 		enableGreeting := viper.GetBool("enable_greeting")
-		// 唤醒词 + 启用 greeting -> 走欢迎模式
-		if isWakeupWord(text) && enableGreeting {
-			if !s.clientState.IsWelcomeSpeaking {
-				s.HandleWelcome()
-			}
+		recentListenStart := isRecentCommand(prevHistory, CommandTypeListenStart, now)
+		action := resolveDetectAction(text, enableGreeting, s.clientState.IsWelcomeSpeaking, recentListenStart)
+
+		log.Debugf(
+			"Detect recv: device=%s text=%q action=%s recentListenStart=%v history={%s} welcomeSpeaking=%v welcomePlaying=%v",
+			msg.DeviceID,
+			text,
+			action,
+			recentListenStart,
+			prevHistory.DebugString(now),
+			s.clientState.IsWelcomeSpeaking,
+			s.clientState.IsWelcomePlaying,
+		)
+
+		if action == detectActionSilent {
 			return nil
 		}
 
-		if enableGreeting {
-			// 默认兜底走 AddAsrResultToQueue
+		s.StopSpeaking(false)
+
+		if action == detectActionWelcome {
+			s.HandleWelcome()
+			return nil
+		}
+
+		if action == detectActionLLM {
 			if err := s.AddAsrResultToQueue(text, nil); err != nil {
 				log.Errorf("开始对话失败: %v", err)
 			}
@@ -852,12 +915,30 @@ func (s *ChatSession) HandleListenStart(msg *ClientMessage) error {
 		return nil
 	}
 
+	now := time.Now()
+	prevHistory := s.clientState.GetCommandHistorySnapshot()
+	recentDetect := isRecentCommand(prevHistory, CommandTypeDetect, now)
+
+	if recentDetect && s.clientState.IsWelcomePlaying {
+		log.Infof("设备 %s 欢迎语播放中，忽略 listen start: history={%s}", msg.DeviceID, prevHistory.DebugString(now))
+		return nil
+	}
+
+	log.Debugf(
+		"ListenStart recv: device=%s mode=%s recentDetect=%v history={%s} welcomeSpeaking=%v welcomePlaying=%v phase=%s",
+		msg.DeviceID,
+		msg.Mode,
+		recentDetect,
+		prevHistory.DebugString(now),
+		s.clientState.IsWelcomeSpeaking,
+		s.clientState.IsWelcomePlaying,
+		s.clientState.GetListenPhase(),
+	)
+
 	// realtime 模式首次启动：跳过欢迎语判断和 Destroy，直接进入监听
 	if msg.Mode == "realtime" {
-
-		if !s.clientState.IsWelcomePlaying {
-			s.StopSpeaking(false)
-		}
+		s.clientState.RecordCommandArrival(CommandTypeListenStart, now)
+		s.StopSpeaking(false)
 
 		s.clientState.ListenMode = msg.Mode
 		log.Infof("设备 %s 拾音模式: %s", msg.DeviceID, msg.Mode)
@@ -871,15 +952,12 @@ func (s *ChatSession) HandleListenStart(msg *ClientMessage) error {
 		return nil
 	}
 
-	if s.clientState.IsWelcomePlaying {
-		log.Infof("设备 %s 欢迎语播放中，忽略 listen start", msg.DeviceID)
-		return nil
-	}
-
 	if s.clientState.GetListenPhase() == ListenPhaseStarting {
 		log.Infof("设备 %s listen start 正在启动中，忽略重复 listen start", msg.DeviceID)
 		return nil
 	}
+
+	s.clientState.RecordCommandArrival(CommandTypeListenStart, now)
 
 	// 处理拾音模式
 	s.clientState.ListenMode = msg.Mode
@@ -899,6 +977,7 @@ func (s *ChatSession) HandleListenStart(msg *ClientMessage) error {
 }
 
 func (s *ChatSession) HandleListenStop() error {
+	s.clientState.RecordCommandArrival(CommandTypeListenStop, time.Now())
 	/*if s.clientState.ListenMode == "auto" {
 		s.clientState.CancelSessionCtx()
 	}*/
@@ -957,6 +1036,14 @@ func (s *ChatSession) OnListenStart(startSeq uint64) error {
 	}
 	err := s.asrManager.RestartAsrRecognition(ctx)
 	if err != nil {
+		if s.shouldIgnoreListenStartError(startSeq, ctx, err) {
+			log.Infof("OnListenStart interrupted during ASR restart, ignore err: %v", err)
+			if s.isCurrentListenStart(startSeq) {
+				s.clientState.SetListenPhase(ListenPhaseIdle)
+			}
+			return nil
+		}
+
 		log.Errorf("asr流式识别失败: %v", err)
 		if s.isCurrentListenStart(startSeq) {
 			s.clientState.SetListenPhase(ListenPhaseIdle)
