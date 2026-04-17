@@ -4,6 +4,7 @@
       <div>
         <h2>API Token 管理</h2>
         <p class="page-subtitle">用于访问 /api/open/v1 对外接口，明文仅在创建时展示一次。</p>
+        <router-link class="doc-link" to="/openapi-docs">文档链接：查看公开 OpenAPI 接口说明</router-link>
       </div>
       <el-button type="primary" @click="openCreateDialog">
         <el-icon><Plus /></el-icon>
@@ -169,6 +170,14 @@ onMounted(loadTokens)
   margin-bottom: 12px;
 }
 .page-subtitle { margin: 4px 0 0; color: #909399; }
+.doc-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #409EFF;
+  text-decoration: none;
+  font-size: 13px;
+}
+.doc-link:hover { text-decoration: underline; }
 .table-card { margin-top: 12px; }
 .form-tip { color: #909399; font-size: 12px; margin-top: 6px; }
 .token-input { margin-top: 12px; }

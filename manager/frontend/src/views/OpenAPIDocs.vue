@@ -261,7 +261,7 @@ const nav = [
 .method.post { background: #3b82f6; }
 .method.put { background: #f59e0b; }
 .method.delete { background: #ef4444; }
-pre { margin: 6px 0; background: #0f172a; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+pre { margin: 6px 0; background: #ffffff; color: #111827; border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
 code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }

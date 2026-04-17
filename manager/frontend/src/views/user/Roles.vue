@@ -72,6 +72,7 @@
       v-model="showCreateDialog"
       :title="editingRole ? '编辑角色' : '创建角色'"
       width="800px"
+      class="role-dialog"
       @close="handleDialogClose"
     >
       <el-form
@@ -641,5 +642,45 @@ onMounted(() => {
 
 :deep(.dialog-sections .el-divider--horizontal) {
   margin: 8px 0 16px;
+}
+
+:deep(.role-dialog .el-dialog) {
+  width: min(800px, calc(100vw - 24px));
+  margin-top: 4vh;
+}
+
+:deep(.role-dialog .el-dialog__body) {
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+:deep(.role-dialog .el-dialog__footer) {
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  border-top: 1px solid #ebeef5;
+  z-index: 1;
+}
+
+@media (max-width: 768px) {
+  :deep(.role-dialog .el-dialog) {
+    width: calc(100vw - 16px);
+    margin-top: 2vh;
+  }
+
+  :deep(.role-dialog .el-dialog__body) {
+    max-height: calc(100vh - 180px);
+  }
+
+  :deep(.role-dialog .el-dialog__footer) {
+    padding: 12px 16px;
+    display: flex;
+    gap: 8px;
+  }
+
+  :deep(.role-dialog .el-dialog__footer .el-button) {
+    flex: 1;
+  }
 }
 </style>

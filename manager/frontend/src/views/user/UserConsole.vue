@@ -103,17 +103,6 @@
               
               <div class="device-features">
                 <div class="feature-item">
-                  <el-icon class="feature-icon"><Microphone /></el-icon>
-                  <span class="feature-label">语音识别</span>
-                  <el-switch 
-                    v-model="device.vad_status" 
-                    @change="toggleVAD(device)"
-                    :loading="device.loading"
-                    size="small"
-                  />
-                </div>
-                
-                <div class="feature-item">
                   <el-icon class="feature-icon"><User /></el-icon>
                   <span class="feature-label">智能体</span>
                   <span class="feature-value">{{ device.agent_name || '未绑定' }}</span>
@@ -268,12 +257,6 @@
             <el-form label-width="100px">
               <el-form-item label="音量">
                 <el-slider v-model="currentDevice.volume" :max="100" />
-              </el-form-item>
-              <el-form-item label="语音识别">
-                <el-switch 
-                  v-model="currentDevice.vad_status"
-                  @change="toggleVAD(currentDevice)"
-                />
               </el-form-item>
             </el-form>
           </div>
@@ -436,7 +419,6 @@ import {
   Connection,
   Plus,
   Setting,
-  Microphone,
   VideoPlay,
   VideoPause,
   Refresh,
@@ -467,7 +449,6 @@ const loadDevices = async () => {
     // 保存所有设备数据
     allDevicesData.value = allDevices.map(device => ({
       ...device,
-      loading: false,
       volume: device.volume || 80
     }))
     // 限制显示最多6个设备
@@ -493,22 +474,6 @@ const loadAgents = async () => {
     console.error('加载智能体失败:', error)
     ElMessage.error('加载智能体失败')
     agents.value = []
-  }
-}
-
-// 切换语音识别状态
-const toggleVAD = async (device) => {
-  device.loading = true
-  try {
-    // 模拟API调用
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    device.vad_status = !device.vad_status
-    ElMessage.success(`${device.vad_status ? '启用' : '禁用'}语音识别成功`)
-  } catch (error) {
-    console.error('切换语音识别失败:', error)
-    ElMessage.error('操作失败')
-  } finally {
-    device.loading = false
   }
 }
 

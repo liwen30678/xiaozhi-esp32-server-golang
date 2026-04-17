@@ -80,9 +80,6 @@
           </el-form>
         </el-tab-pane>
       </el-tabs>
-      <div class="public-links">
-        <router-link to="/openapi-docs">查看公开 OpenAPI 接口说明</router-link>
-      </div>
     </el-card>
   </div>
 </template>
@@ -206,19 +203,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
- .public-links {
-  margin-top: 8px;
-  text-align: center;
-  font-size: 13px;
-}
-.public-links a {
-  color: #409EFF;
-  text-decoration: none;
-}
-.public-links a:hover {
-  text-decoration: underline;
-}
-
 .login-container {
   display: flex;
   justify-content: center;
