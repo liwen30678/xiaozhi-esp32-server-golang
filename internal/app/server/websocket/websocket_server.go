@@ -3,6 +3,7 @@ package websocket
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -144,12 +145,14 @@ func (s *WebSocketServer) handleMqttUdpChat(w http.ResponseWriter, r *http.Reque
 
 // handleWebSocket 处理 WebSocket 连接
 func (s *WebSocketServer) internalHandleChat(w http.ResponseWriter, r *http.Request, isMqttUdp bool) {
-	// 验证请求头
-	deviceID := r.Header.Get("Device-Id")
+	deviceID, clientID := extractDeviceAndClientID(r)
 	if deviceID == "" {
-		log.Warn("缺少 Device-Id 请求头")
-		http.Error(w, "缺少 Device-Id 请求头", http.StatusBadRequest)
+		log.Warn("缺少 device-id，请从 Header 或 URL 参数传入")
+		http.Error(w, "缺少 device-id（支持 Header 或 URL 参数）", http.StatusBadRequest)
 		return
+	}
+	if clientID == "" {
+		log.Debugf("连接未提供 client-id, device_id: %s", deviceID)
 	}
 
 	/*isAuth := viper.GetBool("auth.enable")
@@ -182,6 +185,50 @@ func (s *WebSocketServer) internalHandleChat(w http.ResponseWriter, r *http.Requ
 		s.onNewConnection(wsConn)
 	}
 
+}
+
+func extractDeviceAndClientID(r *http.Request) (string, string) {
+	deviceKeys := []string{"Device-Id", "device-id", "DEVICE-ID", "device_id", "Device_Id", "deviceId"}
+	clientKeys := []string{"Client-Id", "client-id", "CLIENT-ID", "client_id", "Client_Id", "clientId"}
+
+	headerDeviceID, headerDeviceKey := findHeaderValue(r.Header, deviceKeys)
+	queryDeviceID, queryDeviceKey := findQueryValue(r.URL.Query(), deviceKeys)
+	headerClientID, headerClientKey := findHeaderValue(r.Header, clientKeys)
+	queryClientID, queryClientKey := findQueryValue(r.URL.Query(), clientKeys)
+
+	deviceID := headerDeviceID
+	if deviceID == "" {
+		deviceID = queryDeviceID
+	} else if queryDeviceID != "" && queryDeviceID != headerDeviceID {
+		log.Warnf("device-id 在 Header(%s) 与 URL 参数(%s) 不一致，优先使用 Header 值", headerDeviceKey, queryDeviceKey)
+	}
+
+	clientID := headerClientID
+	if clientID == "" {
+		clientID = queryClientID
+	} else if queryClientID != "" && queryClientID != headerClientID {
+		log.Warnf("client-id 在 Header(%s) 与 URL 参数(%s) 不一致，优先使用 Header 值", headerClientKey, queryClientKey)
+	}
+
+	return deviceID, clientID
+}
+
+func findHeaderValue(header http.Header, keys []string) (string, string) {
+	for _, key := range keys {
+		if value := header.Get(key); value != "" {
+			return value, key
+		}
+	}
+	return "", ""
+}
+
+func findQueryValue(values url.Values, keys []string) (string, string) {
+	for _, key := range keys {
+		if value := values.Get(key); value != "" {
+			return value, key
+		}
+	}
+	return "", ""
 }
 
 func (s *WebSocketServer) handleInjectMsg(w http.ResponseWriter, r *http.Request) {
