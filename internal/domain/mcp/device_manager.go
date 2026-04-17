@@ -17,6 +17,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+const (
+	deviceMCPPingInterval          = 2 * time.Minute
+	wsEndpointToolsRefreshInterval = 10 * time.Minute
+)
+
 // DeviceMcpSession 代表一个设备的MCP会话，聚合了多种MCP连接
 type DeviceMcpSession struct {
 	deviceID              string
@@ -129,17 +134,18 @@ func (dcs *DeviceMcpSession) hasAnyClient() bool {
 
 // McpClientInstance 代表一个具体的MCP客户端连接
 type McpClientInstance struct {
-	serverName string
-	mcpClient  *client.Client // 是从ws endpoint连上来的mcp server
-	tools      map[string]tool.InvokableTool
-	toolsState atomic.Value // map[string]tool.InvokableTool，刷新时整体替换，读路径走快照
-	serverInfo *mcp.InitializeResult
-	Ctx        context.Context
-	cancel     context.CancelFunc
-	conn       ConnInterface
-	initState  uint32
-	lastPing   atomic.Int64
-	connected  atomic.Bool
+	serverName       string
+	mcpClient        *client.Client // 是从ws endpoint连上来的mcp server
+	tools            map[string]tool.InvokableTool
+	toolsState       atomic.Value // map[string]tool.InvokableTool，刷新时整体替换，读路径走快照
+	serverInfo       *mcp.InitializeResult
+	Ctx              context.Context
+	cancel           context.CancelFunc
+	conn             ConnInterface
+	initState        uint32
+	lastPing         atomic.Int64
+	lastToolsRefresh atomic.Int64
+	connected        atomic.Bool
 
 	// 添加关闭回调
 	onCloseHandler func(instance *McpClientInstance, reason string)
@@ -254,6 +260,7 @@ func (dc *McpClientInstance) refreshTools() error {
 
 	dc.storeToolsSnapshot(convertedTools)
 	dc.setLastPing(time.Now())
+	dc.setLastToolsRefresh(time.Now())
 
 	logger.Infof("刷新工具列表成功: %s 获取到 %d 个工具", dc.serverName, len(convertedTools))
 	return nil
@@ -327,11 +334,33 @@ func (dc *McpClientInstance) setLastPing(ts time.Time) {
 	dc.lastPing.Store(ts.UnixNano())
 }
 
+func (dc *McpClientInstance) setLastToolsRefresh(ts time.Time) {
+	if dc == nil {
+		return
+	}
+	if ts.IsZero() {
+		dc.lastToolsRefresh.Store(0)
+		return
+	}
+	dc.lastToolsRefresh.Store(ts.UnixNano())
+}
+
 func (dc *McpClientInstance) LastPing() time.Time {
 	if dc == nil {
 		return time.Time{}
 	}
 	unixNano := dc.lastPing.Load()
+	if unixNano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, unixNano)
+}
+
+func (dc *McpClientInstance) LastToolsRefresh() time.Time {
+	if dc == nil {
+		return time.Time{}
+	}
+	unixNano := dc.lastToolsRefresh.Load()
 	if unixNano == 0 {
 		return time.Time{}
 	}
@@ -427,14 +456,21 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	if mcpInstance == nil || !mcpInstance.IsInitialized() {
 		return
 	}
-	if err := mcpInstance.refreshTools(); err != nil {
-		logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
-		mcpInstance.closeWithReason("refresh_tools_failed")
-		return
-	}
 	if mcpInstance.conn != nil {
+		if err := mcpInstance.refreshTools(); err != nil {
+			logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
+			mcpInstance.closeWithReason("refresh_tools_failed")
+			return
+		}
 		logger.Debugf("设备 %s 通过 tools/list 心跳维持 IoT MCP 存活", mcpInstance.serverName)
 		return
+	}
+	if lastRefresh := mcpInstance.LastToolsRefresh(); lastRefresh.IsZero() || time.Since(lastRefresh) >= wsEndpointToolsRefreshInterval {
+		if err := mcpInstance.refreshTools(); err != nil {
+			logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
+			mcpInstance.closeWithReason("refresh_tools_failed")
+			return
+		}
 	}
 	err := mcpInstance.mcpClient.Ping(mcpInstance.Ctx)
 	if err == nil {
@@ -463,8 +499,8 @@ func (dc *DeviceMcpSession) refreshToolsAndPing() {
 		findTools(instance)
 	}
 
-	// 每2分钟进行一次ping
-	pingTick := time.NewTicker(2 * time.Minute)
+	// 每2分钟进行一次心跳
+	pingTick := time.NewTicker(deviceMCPPingInterval)
 	defer pingTick.Stop()
 
 	for {

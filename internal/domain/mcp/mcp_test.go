@@ -242,6 +242,78 @@ func TestGlobalMCPConnectionRefreshesToolsOnStandardNotification(t *testing.T) {
 	}, time.Second, 20*time.Millisecond)
 }
 
+func TestGlobalMCPManagerSchedulePeriodicToolsRefreshUpdatesGlobalTools(t *testing.T) {
+	manager := GetGlobalMCPManager()
+	transportInstance := &mockGlobalTransport{
+		listResponses: []mockGlobalTransportListResponse{
+			{
+				result: &mcp.ListToolsResult{
+					Tools: []mcp.Tool{
+						mcp.NewTool("weather", mcp.WithDescription("weather v1")),
+					},
+				},
+			},
+			{
+				result: &mcp.ListToolsResult{
+					Tools: []mcp.Tool{
+						mcp.NewTool("weather", mcp.WithDescription("weather v1")),
+						mcp.NewTool("forecast", mcp.WithDescription("forecast v2")),
+					},
+				},
+			},
+		},
+	}
+
+	originalBuildTransport := buildGlobalMCPTransport
+	buildGlobalMCPTransport = func(config MCPServerConfig) (transport.Interface, string, error) {
+		return transportInstance, "mock://global", nil
+	}
+	t.Cleanup(func() {
+		buildGlobalMCPTransport = originalBuildTransport
+	})
+
+	manager.mu.Lock()
+	originalServers := manager.servers
+	originalTools := manager.tools
+	manager.servers = make(map[string]*MCPServerConnection)
+	manager.tools = make(map[string]einotool.InvokableTool)
+	manager.mu.Unlock()
+	t.Cleanup(func() {
+		manager.mu.Lock()
+		manager.servers = originalServers
+		manager.tools = originalTools
+		manager.mu.Unlock()
+	})
+
+	conn := &MCPServerConnection{
+		config: MCPServerConfig{
+			Name:    "periodic_server",
+			Type:    "streamablehttp",
+			Url:     "mock://global",
+			Enabled: true,
+		},
+		tools: make(map[string]einotool.InvokableTool),
+	}
+
+	require.NoError(t, conn.connect())
+
+	manager.mu.Lock()
+	manager.servers[conn.config.Name] = conn
+	manager.mu.Unlock()
+
+	initialTools := manager.GetAllTools()
+	require.Contains(t, initialTools, "periodic_server_weather")
+	require.NotContains(t, initialTools, "periodic_server_forecast")
+
+	manager.schedulePeriodicToolsRefresh()
+
+	require.Eventually(t, func() bool {
+		tools := manager.GetAllTools()
+		_, exists := tools["periodic_server_forecast"]
+		return exists
+	}, time.Second, 20*time.Millisecond)
+}
+
 func TestGlobalMCPConnectionFailsWhenInitialToolsListFails(t *testing.T) {
 	manager := GetGlobalMCPManager()
 	transportInstance := &mockGlobalTransport{
@@ -449,6 +521,7 @@ type mockGlobalTransport struct {
 	notificationHandler func(notification mcp.JSONRPCNotification)
 	listResponses       []mockGlobalTransportListResponse
 	defaultListResult   *mcp.ListToolsResult
+	requestMethods      []string
 }
 
 func (t *mockGlobalTransport) Start(ctx context.Context) error {
@@ -456,6 +529,10 @@ func (t *mockGlobalTransport) Start(ctx context.Context) error {
 }
 
 func (t *mockGlobalTransport) SendRequest(ctx context.Context, request transport.JSONRPCRequest) (*transport.JSONRPCResponse, error) {
+	t.mu.Lock()
+	t.requestMethods = append(t.requestMethods, request.Method)
+	t.mu.Unlock()
+
 	switch request.Method {
 	case string(mcp.MethodInitialize):
 		return buildJSONRPCTransportSuccessResponse(request.ID, mcp.InitializeResult{
@@ -489,6 +566,15 @@ func (t *mockGlobalTransport) SendRequest(ctx context.Context, request transport
 	default:
 		return nil, fmt.Errorf("unexpected method: %s", request.Method)
 	}
+}
+
+func (t *mockGlobalTransport) drainRequestMethods() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	methods := append([]string(nil), t.requestMethods...)
+	t.requestMethods = t.requestMethods[:0]
+	return methods
 }
 
 func (t *mockGlobalTransport) SendNotification(ctx context.Context, notification mcp.JSONRPCNotification) error {
@@ -1041,6 +1127,82 @@ func TestHeartbeatIotRuntimeSkipsPingAndRefreshesLastPing(t *testing.T) {
 	defer methodsMu.Unlock()
 	assert.Contains(t, methods, string(mcp.MethodToolsList))
 	assert.NotContains(t, methods, string(mcp.MethodPing))
+}
+
+func TestHeartbeatWsEndpointRuntimeSkipsToolsRefreshBeforeTenMinutesAndPings(t *testing.T) {
+	transportInstance := &mockGlobalTransport{
+		defaultListResult: &mcp.ListToolsResult{
+			Tools: []mcp.Tool{
+				mcp.NewTool("weather", mcp.WithDescription("weather")),
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	instance := &McpClientInstance{
+		serverName: "ws_endpoint_mcp_test",
+		mcpClient:  client.NewClient(transportInstance),
+		Ctx:        ctx,
+		cancel:     cancel,
+	}
+	instance.storeToolsSnapshot(make(map[string]einotool.InvokableTool))
+	instance.setConnected(true)
+	require.NoError(t, instance.sendInitlize(context.Background()))
+
+	oldPing := time.Unix(100, 0)
+	instance.setLastPing(oldPing)
+	instance.setLastToolsRefresh(time.Now().Add(-5 * time.Minute))
+
+	session := &DeviceMcpSession{}
+	transportInstance.drainRequestMethods()
+
+	session.heartbeatMcpInstance(instance)
+
+	assert.True(t, instance.LastPing().After(oldPing))
+	methods := transportInstance.drainRequestMethods()
+	assert.Contains(t, methods, string(mcp.MethodPing))
+	assert.NotContains(t, methods, string(mcp.MethodToolsList))
+}
+
+func TestHeartbeatWsEndpointRuntimeRefreshesToolsAfterTenMinutesAndPings(t *testing.T) {
+	transportInstance := &mockGlobalTransport{
+		defaultListResult: &mcp.ListToolsResult{
+			Tools: []mcp.Tool{
+				mcp.NewTool("weather", mcp.WithDescription("weather")),
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	instance := &McpClientInstance{
+		serverName: "ws_endpoint_mcp_test",
+		mcpClient:  client.NewClient(transportInstance),
+		Ctx:        ctx,
+		cancel:     cancel,
+	}
+	instance.storeToolsSnapshot(make(map[string]einotool.InvokableTool))
+	instance.setConnected(true)
+	require.NoError(t, instance.sendInitlize(context.Background()))
+
+	oldPing := time.Unix(100, 0)
+	oldRefresh := time.Now().Add(-11 * time.Minute)
+	instance.setLastPing(oldPing)
+	instance.setLastToolsRefresh(oldRefresh)
+
+	session := &DeviceMcpSession{}
+	transportInstance.drainRequestMethods()
+
+	session.heartbeatMcpInstance(instance)
+
+	assert.True(t, instance.LastPing().After(oldPing))
+	assert.True(t, instance.LastToolsRefresh().After(oldRefresh))
+	methods := transportInstance.drainRequestMethods()
+	assert.Contains(t, methods, string(mcp.MethodToolsList))
+	assert.Contains(t, methods, string(mcp.MethodPing))
 }
 
 func TestGetToolByNameWithTransport_PrefersCurrentTransport(t *testing.T) {

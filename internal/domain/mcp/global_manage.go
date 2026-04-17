@@ -20,6 +20,12 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 )
 
+const (
+	globalMCPPingInterval                 = 60 * time.Second
+	globalMCPPingTimeout                  = 5 * time.Second
+	globalMCPPeriodicToolsRefreshInterval = 2 * time.Minute
+)
+
 // MCPServerConfig MCP服务器配置
 type MCPServerConfig struct {
 	Name         string            `json:"name" mapstructure:"name"`
@@ -335,6 +341,14 @@ func (conn *MCPServerConnection) handleJSONRPCNotification(notification mcp.JSON
 }
 
 func (conn *MCPServerConnection) scheduleToolsRefresh() {
+	conn.scheduleToolsRefreshWithReason("基于通知")
+}
+
+func (conn *MCPServerConnection) schedulePeriodicToolsRefresh() {
+	conn.scheduleToolsRefreshWithReason("周期")
+}
+
+func (conn *MCPServerConnection) scheduleToolsRefreshWithReason(reason string) {
 	conn.mu.Lock()
 	if conn.refreshing {
 		conn.refreshQueued = true
@@ -344,16 +358,16 @@ func (conn *MCPServerConnection) scheduleToolsRefresh() {
 	conn.refreshing = true
 	conn.mu.Unlock()
 
-	go conn.runScheduledToolsRefresh()
+	go conn.runScheduledToolsRefresh(reason)
 }
 
-func (conn *MCPServerConnection) runScheduledToolsRefresh() {
+func (conn *MCPServerConnection) runScheduledToolsRefresh(reason string) {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err := conn.refreshTools(ctx)
 		cancel()
 		if err != nil {
-			log.Warnf("MCP服务器 %s 基于通知刷新工具列表失败: %v", conn.config.Name, err)
+			log.Warnf("MCP服务器 %s %s刷新工具列表失败: %v", conn.config.Name, reason, err)
 		}
 
 		conn.mu.Lock()
@@ -732,10 +746,33 @@ func isRetryableRemoteCallError(err error) bool {
 	return false
 }
 
+func (g *GlobalMCPManager) schedulePeriodicToolsRefresh() {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	for _, conn := range g.servers {
+		if conn == nil {
+			continue
+		}
+
+		conn.mu.RLock()
+		connected := conn.connected
+		hasClient := conn.client != nil
+		conn.mu.RUnlock()
+		if !connected || !hasClient {
+			continue
+		}
+
+		conn.schedulePeriodicToolsRefresh()
+	}
+}
+
 // monitorConnections 监控连接状态
 func (g *GlobalMCPManager) monitorConnections() {
-	pingTicker := time.NewTicker(20 * time.Second) // 每60秒ping一次
+	pingTicker := time.NewTicker(globalMCPPingInterval) // 每60秒ping一次
 	defer pingTicker.Stop()
+	toolsRefreshTicker := time.NewTicker(globalMCPPeriodicToolsRefreshInterval)
+	defer toolsRefreshTicker.Stop()
 
 	for {
 		select {
@@ -746,7 +783,7 @@ func (g *GlobalMCPManager) monitorConnections() {
 			g.mu.RLock()
 			for name, conn := range g.servers {
 				go func(name string, conn *MCPServerConnection) {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), globalMCPPingTimeout)
 					defer cancel()
 
 					if err := conn.ping(ctx); err != nil {
@@ -765,6 +802,8 @@ func (g *GlobalMCPManager) monitorConnections() {
 				}(name, conn)
 			}
 			g.mu.RUnlock()
+		case <-toolsRefreshTicker.C:
+			g.schedulePeriodicToolsRefresh()
 		}
 	}
 }
