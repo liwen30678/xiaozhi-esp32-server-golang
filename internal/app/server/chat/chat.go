@@ -60,6 +60,11 @@ type ChatManager struct {
 	closeOnce      sync.Once
 	managerClosing atomic.Bool
 	needFreshHello bool
+
+	retainedSessionCleanupMu     sync.Mutex
+	retainedSessionCleanupTimer  *time.Timer
+	retainedSessionCleanupTarget *ChatSession
+	retainedSessionIdleTimeout   time.Duration
 }
 
 type pendingSpeakRequest struct {
@@ -107,6 +112,7 @@ const (
 const (
 	defaultSpeakRequestReuseWindow = 60 * time.Second
 	defaultSpeakReadyTimeout       = 5 * time.Second
+	defaultRetainedSessionIdleTTL  = 10 * time.Minute
 )
 
 type brokerOnlineAwareTransport interface {
@@ -415,6 +421,10 @@ func (c *ChatManager) handleTextMessage(message []byte) error {
 		return fmt.Errorf("解析消息失败: %v", err)
 	}
 
+	if clientMsg.Type != MessageTypeGoodBye {
+		c.cancelRetainedSessionCleanup("收到设备活动消息")
+	}
+
 	switch clientMsg.Type {
 	case MessageTypeHello:
 		return c.HandleHelloMessage(&clientMsg)
@@ -501,11 +511,18 @@ func (c *ChatManager) scheduleMcpInitLocked() {
 	if c.mcpTransport == nil {
 		return
 	}
-	if c.mcpInitState == chatMcpInitStateInFlight || c.mcpInitState == chatMcpInitStateReady {
+	if c.mcpInitState == chatMcpInitStateInFlight {
 		return
 	}
-	if !mcp.ShouldScheduleDeviceIotOverMcp(c.clientState.DeviceID, c.mcpTransport) {
+	if !shouldScheduleDeviceMcpRuntimeInit(c.clientState.DeviceID, c.mcpTransport) {
 		return
+	}
+	if c.mcpInitState == chatMcpInitStateReady {
+		log.Warnf(
+			"设备 %s MCP 状态漂移: ChatManager 已ready，但 transport=%s 需要重新初始化",
+			c.DeviceID,
+			strings.TrimSpace(c.mcpTransport.GetMcpTransportType()),
+		)
 	}
 
 	c.mcpInitState = chatMcpInitStateInFlight
@@ -630,6 +647,16 @@ func (c *ChatManager) HandleMcpMessage(msg *ClientMessage) error {
 }
 
 func (c *ChatManager) HandleGoodByeMessage(msg *ClientMessage) error {
+	session := c.GetSession()
+	if session != nil {
+		log.Infof("设备 %s 收到设备端 goodbye，保留 ChatSession 并重置为静默态", c.DeviceID)
+		session.ResetToSilentState()
+		c.scheduleRetainedSessionCleanup(session, "peer_goodbye")
+	} else {
+		log.Infof("设备 %s 收到设备端 goodbye，但当前无活动 ChatSession，仅清理音频链路", c.DeviceID)
+	}
+
+	c.resetSpeakPathAfterGoodbye()
 	return c.transport.CloseAudioChannel()
 }
 
@@ -747,6 +774,98 @@ func (c *ChatManager) setNeedFreshHello(required bool) {
 	c.sessionMu.Unlock()
 }
 
+func (c *ChatManager) resetSpeakPathAfterGoodbye() {
+	if c == nil {
+		return
+	}
+	c.lastSpeakPathWarmAt.Store(0)
+
+	c.speakRequestMu.Lock()
+	pending := c.pendingSpeakRequest
+	c.speakRequestMu.Unlock()
+	if pending != nil {
+		c.finishPendingSpeakRequest(pending, fmt.Errorf("设备端goodbye导致主动播报链路已重置"))
+	}
+}
+
+func (c *ChatManager) getRetainedSessionIdleTimeout() time.Duration {
+	if c != nil && c.retainedSessionIdleTimeout > 0 {
+		return c.retainedSessionIdleTimeout
+	}
+	if !viper.IsSet("chat.retained_session_idle_timeout_ms") {
+		return defaultRetainedSessionIdleTTL
+	}
+	ms := viper.GetInt64("chat.retained_session_idle_timeout_ms")
+	if ms <= 0 {
+		return defaultRetainedSessionIdleTTL
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func (c *ChatManager) cancelRetainedSessionCleanup(reason string) {
+	if c == nil {
+		return
+	}
+	c.retainedSessionCleanupMu.Lock()
+	timer := c.retainedSessionCleanupTimer
+	c.retainedSessionCleanupTimer = nil
+	c.retainedSessionCleanupTarget = nil
+	c.retainedSessionCleanupMu.Unlock()
+
+	if timer != nil {
+		timer.Stop()
+		log.Debugf("设备 %s 取消 ChatSession 保留期清理: reason=%s", c.DeviceID, reason)
+	}
+}
+
+func (c *ChatManager) scheduleRetainedSessionCleanup(session *ChatSession, reason string) {
+	if c == nil || session == nil || session.IsClosing() {
+		return
+	}
+
+	timeout := c.getRetainedSessionIdleTimeout()
+	c.cancelRetainedSessionCleanup("reschedule")
+
+	c.retainedSessionCleanupMu.Lock()
+	c.retainedSessionCleanupTarget = session
+	c.retainedSessionCleanupTimer = time.AfterFunc(timeout, func() {
+		c.runRetainedSessionCleanup(session, timeout)
+	})
+	c.retainedSessionCleanupMu.Unlock()
+
+	log.Infof(
+		"设备 %s ChatSession 已进入保留态: timeout=%s reason=%s",
+		c.DeviceID,
+		timeout,
+		reason,
+	)
+}
+
+func (c *ChatManager) runRetainedSessionCleanup(session *ChatSession, timeout time.Duration) {
+	if c == nil || session == nil {
+		return
+	}
+
+	c.retainedSessionCleanupMu.Lock()
+	if c.retainedSessionCleanupTarget != session {
+		c.retainedSessionCleanupMu.Unlock()
+		return
+	}
+	c.retainedSessionCleanupTimer = nil
+	c.retainedSessionCleanupTarget = nil
+	c.retainedSessionCleanupMu.Unlock()
+
+	c.sessionMu.RLock()
+	currentSession := c.session
+	c.sessionMu.RUnlock()
+	if currentSession != session || session.IsClosing() {
+		return
+	}
+
+	log.Infof("设备 %s ChatSession 空闲超过 %s，执行彻底清理", c.DeviceID, timeout)
+	session.CloseWithReason(chatSessionCloseReasonRetainedIdleTimeout)
+}
+
 func (c *ChatManager) finishSessionStart(session *ChatSession, allowFreshHello bool, startErr error) {
 	var waitCh chan struct{}
 
@@ -771,6 +890,8 @@ func (c *ChatManager) finishSessionStart(session *ChatSession, allowFreshHello b
 
 func (c *ChatManager) handleSessionClosed(session *ChatSession, reason string) {
 	var waitCh chan struct{}
+
+	c.cancelRetainedSessionCleanup("session_closed")
 
 	c.sessionMu.Lock()
 	switch {
@@ -830,6 +951,8 @@ func (c *ChatManager) shutdown(closeTransport bool) error {
 	var shutdownErr error
 
 	c.closeOnce.Do(func() {
+		c.cancelRetainedSessionCleanup("manager_shutdown")
+
 		if c.clientState != nil {
 			log.Infof("关闭 ChatManager, 设备 %s", c.clientState.DeviceID)
 		}
@@ -928,6 +1051,7 @@ func (c *ChatManager) GetSession() *ChatSession {
 }
 
 func (c *ChatManager) InjectMessage(message string, skipLlm bool) error {
+	c.cancelRetainedSessionCleanup("inject_message")
 	session, err := c.ensureSession()
 	if err != nil {
 		return err
@@ -1147,6 +1271,7 @@ func (c *ChatManager) newInjectedSpeechStartHook() func() {
 }
 
 func (c *ChatManager) InjectOpenClawResponse(event openclaw.ResponseDelivery) error {
+	c.cancelRetainedSessionCleanup("openclaw_response")
 	session, err := c.ensureSession()
 	if err != nil {
 		return err

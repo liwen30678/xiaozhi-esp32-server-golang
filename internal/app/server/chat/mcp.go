@@ -12,6 +12,15 @@ import (
 	"github.com/spf13/viper"
 )
 
+var (
+	ensureDeviceMcpRuntime = func(deviceID string, mcpTransport *McpTransport) error {
+		return mcp.EnsureDeviceIotOverMcp(deviceID, mcpTransport)
+	}
+	shouldScheduleDeviceMcpRuntimeInit = func(deviceID string, mcpTransport *McpTransport) bool {
+		return mcp.ShouldScheduleDeviceIotOverMcp(deviceID, mcpTransport)
+	}
+)
+
 type McpTransport struct {
 	Client          *ClientState
 	ServerTransport *ServerTransport
@@ -66,7 +75,7 @@ func (c *McpTransport) GetMcpTransportType() string {
 }
 
 func initMcp(deviceID string, mcpTransport *McpTransport) error {
-	if err := mcp.EnsureDeviceIotOverMcp(deviceID, mcpTransport); err != nil {
+	if err := ensureDeviceMcpRuntime(deviceID, mcpTransport); err != nil {
 		log.Errorf("确保IotOverMcp客户端失败: %v", err)
 		return err
 	}

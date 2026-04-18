@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -609,7 +610,11 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 
 			result, isRetry, err := state.RetireAsrResult(ctx)
 			if err != nil {
-				log.Errorf("处理asr结果失败: %v", err)
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					log.Debugf("处理asr结果失败，ASR已取消: %v", err)
+				} else {
+					log.Errorf("处理asr结果失败: %v", err)
+				}
 				if onError != nil {
 					onError(err)
 				}

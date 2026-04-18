@@ -53,9 +53,10 @@ const (
 )
 
 const (
-	chatSessionCloseReasonManagerShutdown = "manager_shutdown"
-	chatSessionCloseReasonExplicitExit    = "explicit_exit"
-	chatSessionCloseReasonFatalError      = "fatal_error"
+	chatSessionCloseReasonManagerShutdown     = "manager_shutdown"
+	chatSessionCloseReasonExplicitExit        = "explicit_exit"
+	chatSessionCloseReasonFatalError          = "fatal_error"
+	chatSessionCloseReasonRetainedIdleTimeout = "retained_idle_timeout"
 )
 
 type ChatSession struct {
@@ -501,6 +502,19 @@ func (s *ChatSession) shouldIgnoreListenStartError(startSeq uint64, ctx context.
 	return errors.Is(err, context.Canceled)
 }
 
+func (s *ChatSession) shouldIgnoreAsrLoopError(startSeq uint64, ctx context.Context, err error) bool {
+	if !s.isCurrentListenStart(startSeq) {
+		return true
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	if s.clientState.Ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
+
 func isWithinCommandTTL(at time.Time, now time.Time) bool {
 	return !at.IsZero() && now.Sub(at) <= listenCommandHistoryTTL
 }
@@ -847,6 +861,24 @@ func (s *ChatSession) clearOpenClawStreams() {
 	s.openClawStreamMu.Unlock()
 }
 
+func (s *ChatSession) clearPendingSpeakerResult() {
+	if s == nil {
+		return
+	}
+
+	s.speakerResultMu.Lock()
+	s.pendingSpeakerResult = nil
+	s.speakerResultMu.Unlock()
+
+	for {
+		select {
+		case <-s.speakerResultReady:
+		default:
+			return
+		}
+	}
+}
+
 func (s *ChatSession) InjectOpenClawResponse(event openclaw.ResponseDelivery) error {
 	correlationID := strings.TrimSpace(event.CorrelationID)
 	text := strings.TrimSpace(event.Text)
@@ -1154,6 +1186,10 @@ func (s *ChatSession) OnListenStart(startSeq uint64) error {
 
 	// 定义错误处理回调
 	onError := func(err error) {
+		if s.shouldIgnoreAsrLoopError(startSeq, ctx, err) {
+			log.Infof("ASR识别循环在重置/退出中结束，忽略 err: %v", err)
+			return
+		}
 		log.Errorf("ASR识别循环错误: %v", err)
 		s.CloseWithReason(chatSessionCloseReasonFatalError)
 	}
