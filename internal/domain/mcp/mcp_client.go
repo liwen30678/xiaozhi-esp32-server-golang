@@ -351,6 +351,27 @@ func GetReportedToolsByDeviceID(deviceId string) (map[string]tool.InvokableTool,
 	return retTools, nil
 }
 
+// RefreshReportedToolsByDeviceID 强制向当前在线 transport 发起一次 tools/list。
+// 刷新失败时返回空列表，同时清空对应 runtime 的内存工具快照。
+func RefreshReportedToolsByDeviceID(deviceId string) (map[string]tool.InvokableTool, error) {
+	retTools := make(map[string]tool.InvokableTool)
+	if deviceId == "" {
+		return retTools, nil
+	}
+
+	client := mcpClientPool.GetMcpClient(deviceId)
+	if client == nil {
+		return retTools, nil
+	}
+
+	transportType, resolved := ResolveCurrentDeviceTransport(deviceId)
+	if !resolved || transportType == "" {
+		return retTools, nil
+	}
+
+	return client.RefreshIotToolsByTransport(transportType)
+}
+
 // GetReportedToolsByAgentID 仅获取智能体(WebSocket端点)上报的MCP工具
 func GetReportedToolsByAgentID(agentId string) (map[string]tool.InvokableTool, error) {
 	retTools := make(map[string]tool.InvokableTool)
@@ -359,6 +380,22 @@ func GetReportedToolsByAgentID(agentId string) (map[string]tool.InvokableTool, e
 	}
 
 	return mcpClientPool.GetWsEndpointMcpTools(agentId)
+}
+
+// RefreshReportedToolsByAgentID 强制向智能体的 ws endpoint 发起一次 tools/list。
+// 刷新失败时返回空列表，同时清空对应 runtime 的内存工具快照。
+func RefreshReportedToolsByAgentID(agentId string) (map[string]tool.InvokableTool, error) {
+	retTools := make(map[string]tool.InvokableTool)
+	if agentId == "" {
+		return retTools, nil
+	}
+
+	client := mcpClientPool.GetMcpClient(agentId)
+	if client == nil {
+		return retTools, nil
+	}
+
+	return client.RefreshWsEndpointTools()
 }
 
 // GetReportedToolByDeviceIDAndName 仅在设备上报工具中查找

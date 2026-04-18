@@ -771,6 +771,9 @@ func (t *TTSManager) enqueueDelayedSentenceTask(ctx context.Context, elem AudioQ
 		t.delayedSentenceQueue <- task
 		return true
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 	select {
 	case <-ctx.Done():
 		return false
@@ -874,6 +877,9 @@ func (t *TTSManager) enqueueSessionElem(ctx context.Context, generation uint64, 
 	if ctx == nil {
 		t.sessionAudioQueue <- elem
 		return true
+	}
+	if ctx.Err() != nil {
+		return false
 	}
 	select {
 	case <-ctx.Done():

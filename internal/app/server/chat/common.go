@@ -57,3 +57,28 @@ func (s *ChatSession) stopSpeaking(cancelSession bool, isSendTtsStop bool, suspe
 func (s *ChatSession) MqttClose() {
 	s.serverTransport.SendMqttGoodbye()
 }
+
+func (s *ChatSession) ResetToSilentState() {
+	if s == nil || s.IsClosing() {
+		return
+	}
+
+	s.cancelPendingDetectLLM()
+	s.finishOpenClawWarmup("", false)
+	s.clearOpenClawStreams()
+	s.clearPendingSpeakerResult()
+
+	if s.clientState != nil {
+		s.clientState.Abort = false
+		s.clientState.IsWelcomeSpeaking = false
+	}
+
+	s.stopSpeakingWithLock(true, true, true)
+
+	if s.clientState != nil {
+		s.clientState.Destroy()
+		s.clientState.Abort = false
+		s.clientState.IsWelcomeSpeaking = false
+		s.clientState.IsWelcomePlaying = false
+	}
+}

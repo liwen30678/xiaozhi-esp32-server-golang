@@ -1050,9 +1050,9 @@ func convertReportedToolsToToolList(reportedTools map[string]tool.InvokableTool)
 }
 
 func getDeviceMcpTools(deviceID string) ([]map[string]interface{}, error) {
-	reportedTools, err := mcp.GetReportedToolsByDeviceID(deviceID)
+	reportedTools, err := mcp.RefreshReportedToolsByDeviceID(deviceID)
 	if err != nil {
-		log.Errorf("获取设备上报MCP工具列表失败: %v", err)
+		log.Errorf("刷新设备上报MCP工具列表失败: %v", err)
 		return nil, err
 	}
 
@@ -1060,9 +1060,9 @@ func getDeviceMcpTools(deviceID string) ([]map[string]interface{}, error) {
 }
 
 func getAgentMcpTools(agentID string) ([]map[string]interface{}, error) {
-	reportedTools, err := mcp.GetReportedToolsByAgentID(agentID)
+	reportedTools, err := mcp.RefreshReportedToolsByAgentID(agentID)
 	if err != nil {
-		log.Errorf("获取智能体上报MCP工具列表失败: %v", err)
+		log.Errorf("刷新智能体上报MCP工具列表失败: %v", err)
 		return nil, err
 	}
 

@@ -1038,7 +1038,7 @@ func TestShouldScheduleDeviceIotOverMcp_UsesTransportInitState(t *testing.T) {
 	assert.True(t, ShouldScheduleDeviceIotOverMcp(deviceID, otherConn))
 }
 
-func TestHeartbeatRefreshToolsFailure_DestroysRuntime(t *testing.T) {
+func TestHeartbeatRefreshToolsFailure_DestroysRuntimeAfterFiveFailures(t *testing.T) {
 	deviceID := fmt.Sprintf("heartbeat-refresh-fail-%d", time.Now().UnixNano())
 	conn := newTestIotConn("websocket")
 	conn.deviceID = deviceID
@@ -1062,10 +1062,61 @@ func TestHeartbeatRefreshToolsFailure_DestroysRuntime(t *testing.T) {
 	require.NotNil(t, instance)
 
 	conn.sendErrByMethod[string(mcp.MethodToolsList)] = fmt.Errorf("list tools failed")
+	for i := 1; i < heartbeatRefreshFailureLimit; i++ {
+		session.heartbeatMcpInstance(instance)
+
+		session = GetDeviceMcpClient(deviceID)
+		require.NotNil(t, session)
+		assert.EqualValues(t, i, instance.RefreshFailureCount())
+		assert.True(t, instance.IsConnected())
+	}
+
 	session.heartbeatMcpInstance(instance)
 
 	session = GetDeviceMcpClient(deviceID)
 	assert.Nil(t, session)
+}
+
+func TestHeartbeatRefreshToolsFailure_SuccessResetsCounter(t *testing.T) {
+	deviceID := fmt.Sprintf("heartbeat-refresh-reset-%d", time.Now().UnixNano())
+	conn := newTestIotConn("websocket")
+	conn.deviceID = deviceID
+	conn.autoRespond = true
+
+	t.Cleanup(func() {
+		if session := GetDeviceMcpClient(deviceID); session != nil && session.cancel != nil {
+			session.cancel()
+		}
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	require.NoError(t, EnsureDeviceIotOverMcp(deviceID, conn))
+
+	session := GetDeviceMcpClient(deviceID)
+	require.NotNil(t, session)
+
+	session.iotMux.RLock()
+	instance := session.iotOverMcpByTransport[normalizeDeviceTransportType(conn.transportType)]
+	session.iotMux.RUnlock()
+	require.NotNil(t, instance)
+
+	conn.sendErrByMethod[string(mcp.MethodToolsList)] = fmt.Errorf("list tools failed")
+	for i := 1; i < heartbeatRefreshFailureLimit; i++ {
+		session.heartbeatMcpInstance(instance)
+		assert.EqualValues(t, i, instance.RefreshFailureCount())
+	}
+
+	delete(conn.sendErrByMethod, string(mcp.MethodToolsList))
+	session.heartbeatMcpInstance(instance)
+	assert.Zero(t, instance.RefreshFailureCount())
+
+	conn.sendErrByMethod[string(mcp.MethodToolsList)] = fmt.Errorf("list tools failed again")
+	for i := 1; i < heartbeatRefreshFailureLimit; i++ {
+		session.heartbeatMcpInstance(instance)
+		session = GetDeviceMcpClient(deviceID)
+		require.NotNil(t, session)
+		assert.EqualValues(t, i, instance.RefreshFailureCount())
+	}
 }
 
 func buildJSONRPCTransportSuccessResponse(id mcp.RequestId, result any) (*transport.JSONRPCResponse, error) {
@@ -1441,6 +1492,156 @@ func TestGetReportedToolsByDeviceID_IgnoresUnsupportedIotTransport(t *testing.T)
 	invokable, ok := GetReportedToolByDeviceIDAndName(deviceID, "serial_only")
 	require.False(t, ok)
 	assert.Nil(t, invokable)
+}
+
+func TestRefreshReportedToolsByDeviceID_UsesRemoteToolsListAndUpdatesSnapshot(t *testing.T) {
+	deviceID := fmt.Sprintf("refresh-reported-tools-device-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	transportInstance := &mockGlobalTransport{
+		defaultListResult: &mcp.ListToolsResult{
+			Tools: []mcp.Tool{
+				mcp.NewTool("fresh_tool", mcp.WithDescription("fresh tool from remote")),
+			},
+		},
+	}
+
+	instance := &McpClientInstance{
+		serverName: buildIotServerName(deviceID, "udp"),
+		mcpClient:  client.NewClient(transportInstance),
+		Ctx:        ctx,
+		cancel:     cancel,
+		tools: map[string]einotool.InvokableTool{
+			"stale_tool": &McpTool{info: &schema.ToolInfo{Name: "stale_tool"}},
+		},
+	}
+	instance.storeToolsSnapshot(instance.tools)
+	instance.setConnected(true)
+	instance.setInitState(mcpClientInitStateReady)
+	require.NoError(t, instance.sendInitlize(context.Background()))
+	transportInstance.drainRequestMethods()
+
+	session := &DeviceMcpSession{
+		deviceID:              deviceID,
+		Ctx:                   ctx,
+		cancel:                cancel,
+		iotOverMcpByTransport: map[string]*McpClientInstance{"udp": instance},
+	}
+	require.NoError(t, AddDeviceMcpClient(deviceID, session))
+	RegisterCurrentDeviceTransportResolver(func(id string) string {
+		if id == deviceID {
+			return "udp"
+		}
+		return ""
+	})
+
+	t.Cleanup(func() {
+		RegisterCurrentDeviceTransportResolver(nil)
+		cancel()
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	reportedTools, err := RefreshReportedToolsByDeviceID(deviceID)
+	require.NoError(t, err)
+	require.Contains(t, reportedTools, "fresh_tool")
+	assert.NotContains(t, reportedTools, "stale_tool")
+	assert.Contains(t, instance.loadToolsSnapshot(), "fresh_tool")
+	assert.NotContains(t, instance.loadToolsSnapshot(), "stale_tool")
+	assert.Contains(t, transportInstance.drainRequestMethods(), string(mcp.MethodToolsList))
+}
+
+func TestRefreshReportedToolsByDeviceID_ClearsSnapshotOnFailure(t *testing.T) {
+	deviceID := fmt.Sprintf("refresh-reported-tools-device-fail-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	transportInstance := &mockGlobalTransport{
+		listResponses: []mockGlobalTransportListResponse{
+			{err: fmt.Errorf("tools/list failed")},
+		},
+	}
+
+	instance := &McpClientInstance{
+		serverName: buildIotServerName(deviceID, "udp"),
+		mcpClient:  client.NewClient(transportInstance),
+		Ctx:        ctx,
+		cancel:     cancel,
+		tools: map[string]einotool.InvokableTool{
+			"stale_tool": &McpTool{info: &schema.ToolInfo{Name: "stale_tool"}},
+		},
+	}
+	instance.storeToolsSnapshot(instance.tools)
+	instance.setConnected(true)
+	instance.setInitState(mcpClientInitStateReady)
+	require.NoError(t, instance.sendInitlize(context.Background()))
+
+	session := &DeviceMcpSession{
+		deviceID:              deviceID,
+		Ctx:                   ctx,
+		cancel:                cancel,
+		iotOverMcpByTransport: map[string]*McpClientInstance{"udp": instance},
+	}
+	require.NoError(t, AddDeviceMcpClient(deviceID, session))
+	RegisterCurrentDeviceTransportResolver(func(id string) string {
+		if id == deviceID {
+			return "udp"
+		}
+		return ""
+	})
+
+	t.Cleanup(func() {
+		RegisterCurrentDeviceTransportResolver(nil)
+		cancel()
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	reportedTools, err := RefreshReportedToolsByDeviceID(deviceID)
+	require.Error(t, err)
+	assert.Empty(t, reportedTools)
+	assert.Empty(t, instance.loadToolsSnapshot())
+}
+
+func TestRefreshReportedToolsByAgentID_ClearsSnapshotOnFailure(t *testing.T) {
+	agentID := fmt.Sprintf("refresh-reported-tools-agent-fail-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithCancel(context.Background())
+
+	transportInstance := &mockGlobalTransport{
+		listResponses: []mockGlobalTransportListResponse{
+			{err: fmt.Errorf("tools/list failed")},
+		},
+	}
+
+	instance := &McpClientInstance{
+		serverName: "ws_endpoint_mcp_test",
+		mcpClient:  client.NewClient(transportInstance),
+		Ctx:        ctx,
+		cancel:     cancel,
+		tools: map[string]einotool.InvokableTool{
+			"stale_tool": &McpTool{info: &schema.ToolInfo{Name: "stale_tool"}},
+		},
+	}
+	instance.storeToolsSnapshot(instance.tools)
+	instance.setConnected(true)
+	instance.setInitState(mcpClientInitStateReady)
+	require.NoError(t, instance.sendInitlize(context.Background()))
+
+	session := &DeviceMcpSession{
+		deviceID:              agentID,
+		Ctx:                   ctx,
+		cancel:                cancel,
+		iotOverMcpByTransport: make(map[string]*McpClientInstance),
+	}
+	session.wsEndPointMcp.Store(instance.serverName, instance)
+	require.NoError(t, AddDeviceMcpClient(agentID, session))
+
+	t.Cleanup(func() {
+		cancel()
+		_ = RemoveDeviceMcpClient(agentID)
+	})
+
+	reportedTools, err := RefreshReportedToolsByAgentID(agentID)
+	require.Error(t, err)
+	assert.Empty(t, reportedTools)
+	assert.Empty(t, instance.loadToolsSnapshot())
 }
 
 func TestRawCallReportedToolByDeviceID_UsesResolvedTransport(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -510,7 +511,7 @@ func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 		)
 		if err != nil {
 			log.Errorf("获取ASR资源失败: %v", err)
-			return fmt.Errorf("获取ASR资源失败: %v", err)
+			return fmt.Errorf("获取ASR资源失败: %w", err)
 		}
 
 		// 保存资源引用到私有字段
@@ -536,7 +537,7 @@ func (a *ASRManager) RestartAsrRecognition(ctx context.Context) error {
 		// 识别失败，归还资源（因为资源可能已损坏）
 		a.releaseResource()
 		log.Errorf("重启ASR流式识别失败: %v", err)
-		return fmt.Errorf("重启ASR流式识别失败: %v", err)
+		return fmt.Errorf("重启ASR流式识别失败: %w", err)
 	}
 
 	state.AsrResultChannel = asrResultChannel
@@ -609,7 +610,11 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 
 			result, isRetry, err := state.RetireAsrResult(ctx)
 			if err != nil {
-				log.Errorf("处理asr结果失败: %v", err)
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					log.Debugf("处理asr结果失败，ASR已取消: %v", err)
+				} else {
+					log.Errorf("处理asr结果失败: %v", err)
+				}
 				if onError != nil {
 					onError(err)
 				}

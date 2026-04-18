@@ -43,6 +43,10 @@ const (
 	ListenPhaseStarting  = "starting"
 	ListenPhaseListening = "listening"
 
+	CommandTypeDetect      = "detect"
+	CommandTypeListenStart = "listen_start"
+	CommandTypeListenStop  = "listen_stop"
+
 	MemoryModeNone  = "none"
 	MemoryModeShort = "short"
 	MemoryModeLong  = "long"
@@ -75,6 +79,8 @@ type SendAudioData func(audioData []byte) error
 
 // ClientState 表示客户端状态
 type ClientState struct {
+	cmdMu sync.Mutex
+
 	IsActivated bool
 	// 对话历史
 	Dialogue *Dialogue
@@ -135,6 +141,9 @@ type ClientState struct {
 	IsTtsStart        bool //是否tts开始
 	IsWelcomeSpeaking bool //是否已经播放过欢迎语
 	IsWelcomePlaying  bool //是否正在播放欢迎语
+
+	LastCmdType string
+	LastCmdAt   time.Time
 
 	// 声纹识别相关
 	SpeakerProvider speaker.SpeakerProvider // 声纹识别提供者（在 session 中初始化）
@@ -501,6 +510,49 @@ func (c *ClientState) Destroy() {
 	c.SetListenPhase(ListenPhaseIdle)
 	c.SetTtsStart(false)
 	c.IsWelcomePlaying = false
+}
+
+type CommandHistorySnapshot struct {
+	LastCmdType string
+	LastCmdAt   time.Time
+}
+
+func (s CommandHistorySnapshot) DebugString(now time.Time) string {
+	formatAt := func(at time.Time) string {
+		if at.IsZero() {
+			return "zero"
+		}
+		return at.Format(time.RFC3339Nano)
+	}
+	formatAge := func(at time.Time) string {
+		if at.IsZero() {
+			return "n/a"
+		}
+		return now.Sub(at).Truncate(time.Millisecond).String()
+	}
+
+	return fmt.Sprintf(
+		"lastCmd=%q lastCmdAt=%s lastCmdAge=%s",
+		s.LastCmdType,
+		formatAt(s.LastCmdAt),
+		formatAge(s.LastCmdAt),
+	)
+}
+
+func (c *ClientState) RecordCommandArrival(cmdType string, at time.Time) {
+	c.cmdMu.Lock()
+	c.LastCmdType = cmdType
+	c.LastCmdAt = at
+	c.cmdMu.Unlock()
+}
+
+func (c *ClientState) GetCommandHistorySnapshot() CommandHistorySnapshot {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+	return CommandHistorySnapshot{
+		LastCmdType: c.LastCmdType,
+		LastCmdAt:   c.LastCmdAt,
+	}
 }
 
 func (state *ClientState) OnManualStop() {

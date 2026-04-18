@@ -20,6 +20,7 @@ import (
 const (
 	deviceMCPPingInterval          = 2 * time.Minute
 	wsEndpointToolsRefreshInterval = 10 * time.Minute
+	heartbeatRefreshFailureLimit   = 5
 )
 
 // DeviceMcpSession 代表一个设备的MCP会话，聚合了多种MCP连接
@@ -145,6 +146,7 @@ type McpClientInstance struct {
 	initState        uint32
 	lastPing         atomic.Int64
 	lastToolsRefresh atomic.Int64
+	refreshFailures  atomic.Int32
 	connected        atomic.Bool
 
 	// 添加关闭回调
@@ -242,17 +244,39 @@ func (dc *McpClientInstance) startIotOverMcp() error {
 
 // refreshToolsCommon 通用的工具列表刷新逻辑
 func (dc *McpClientInstance) refreshTools() error {
+	_, err := dc.refreshToolsWithPolicy(false)
+	return err
+}
+
+func (dc *McpClientInstance) refreshToolsStrict() (map[string]tool.InvokableTool, error) {
+	return dc.refreshToolsWithPolicy(true)
+}
+
+func (dc *McpClientInstance) refreshToolsWithPolicy(clearOnFailure bool) (map[string]tool.InvokableTool, error) {
+	emptyTools := make(map[string]tool.InvokableTool)
 	if dc == nil || dc.mcpClient == nil {
-		return fmt.Errorf("mcp client未初始化")
+		err := fmt.Errorf("mcp client未初始化")
+		if clearOnFailure {
+			dc.clearToolsSnapshot()
+		}
+		return emptyTools, err
 	}
 	if dc.serverInfo == nil {
-		return fmt.Errorf("client not initialized")
+		err := fmt.Errorf("client not initialized")
+		if clearOnFailure {
+			dc.clearToolsSnapshot()
+		}
+		return emptyTools, err
 	}
 
 	tools, err := dc.mcpClient.ListTools(dc.Ctx, mcp.ListToolsRequest{})
 	if err != nil {
 		logger.Errorf("刷新工具列表失败: %v", err)
-		return err
+		if clearOnFailure {
+			dc.clearToolsSnapshot()
+			logger.Warnf("刷新工具列表失败，已清空 %s 的内存工具快照", dc.serverName)
+		}
+		return emptyTools, err
 	}
 
 	// 工具转换可能比较重，先在锁外完成，避免阻塞读工具列表的路径。
@@ -261,9 +285,10 @@ func (dc *McpClientInstance) refreshTools() error {
 	dc.storeToolsSnapshot(convertedTools)
 	dc.setLastPing(time.Now())
 	dc.setLastToolsRefresh(time.Now())
+	dc.resetRefreshFailures()
 
 	logger.Infof("刷新工具列表成功: %s 获取到 %d 个工具", dc.serverName, len(convertedTools))
-	return nil
+	return convertedTools, nil
 }
 
 func (dc *McpClientInstance) GetServerName() string {
@@ -283,6 +308,14 @@ func (dc *McpClientInstance) storeToolsSnapshot(tools map[string]tool.InvokableT
 	}
 	dc.tools = tools
 	dc.toolsState.Store(tools)
+}
+
+func (dc *McpClientInstance) clearToolsSnapshot() {
+	if dc == nil {
+		return
+	}
+	dc.storeToolsSnapshot(make(map[string]tool.InvokableTool))
+	dc.setLastToolsRefresh(time.Time{})
 }
 
 func (dc *McpClientInstance) loadToolsSnapshot() map[string]tool.InvokableTool {
@@ -343,6 +376,27 @@ func (dc *McpClientInstance) setLastToolsRefresh(ts time.Time) {
 		return
 	}
 	dc.lastToolsRefresh.Store(ts.UnixNano())
+}
+
+func (dc *McpClientInstance) incrementRefreshFailures() int32 {
+	if dc == nil {
+		return 0
+	}
+	return dc.refreshFailures.Add(1)
+}
+
+func (dc *McpClientInstance) resetRefreshFailures() {
+	if dc == nil {
+		return
+	}
+	dc.refreshFailures.Store(0)
+}
+
+func (dc *McpClientInstance) RefreshFailureCount() int32 {
+	if dc == nil {
+		return 0
+	}
+	return dc.refreshFailures.Load()
 }
 
 func (dc *McpClientInstance) LastPing() time.Time {
@@ -458,8 +512,7 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	}
 	if mcpInstance.conn != nil {
 		if err := mcpInstance.refreshTools(); err != nil {
-			logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
-			mcpInstance.closeWithReason("refresh_tools_failed")
+			dc.handleHeartbeatRefreshFailure(mcpInstance, err)
 			return
 		}
 		logger.Debugf("设备 %s 通过 tools/list 心跳维持 IoT MCP 存活", mcpInstance.serverName)
@@ -467,8 +520,7 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	}
 	if lastRefresh := mcpInstance.LastToolsRefresh(); lastRefresh.IsZero() || time.Since(lastRefresh) >= wsEndpointToolsRefreshInterval {
 		if err := mcpInstance.refreshTools(); err != nil {
-			logger.Warnf("设备 %s 心跳刷新工具列表失败，主动销毁 runtime: %v", mcpInstance.serverName, err)
-			mcpInstance.closeWithReason("refresh_tools_failed")
+			dc.handleHeartbeatRefreshFailure(mcpInstance, err)
 			return
 		}
 	}
@@ -479,6 +531,28 @@ func (dc *DeviceMcpSession) heartbeatMcpInstance(mcpInstance *McpClientInstance)
 	} else {
 		logger.Warnf("设备 %s ping失败: %v", mcpInstance.serverName, err)
 	}
+}
+
+func (dc *DeviceMcpSession) handleHeartbeatRefreshFailure(mcpInstance *McpClientInstance, err error) {
+	failures := mcpInstance.incrementRefreshFailures()
+	if failures < heartbeatRefreshFailureLimit {
+		logger.Warnf(
+			"设备 %s 心跳刷新工具列表失败(%d/%d)，暂不销毁 runtime: %v",
+			mcpInstance.serverName,
+			failures,
+			heartbeatRefreshFailureLimit,
+			err,
+		)
+		return
+	}
+
+	logger.Warnf(
+		"设备 %s 心跳刷新工具列表连续失败 %d 次，主动销毁 runtime: %v",
+		mcpInstance.serverName,
+		failures,
+		err,
+	)
+	mcpInstance.closeWithReason("refresh_tools_failed")
 }
 
 func (dc *DeviceMcpSession) refreshToolsAndPing() {
@@ -692,6 +766,23 @@ func (dc *DeviceMcpSession) GetWsEndpointMcpTools() map[string]tool.InvokableToo
 	return tools
 }
 
+func (dc *DeviceMcpSession) RefreshWsEndpointTools() (map[string]tool.InvokableTool, error) {
+	tools := make(map[string]tool.InvokableTool)
+	for _, mcpInstance := range dc.snapshotWsEndpointClients() {
+		refreshedTools, err := mcpInstance.refreshToolsStrict()
+		if err != nil {
+			for _, cleanupTarget := range dc.snapshotWsEndpointClients() {
+				cleanupTarget.clearToolsSnapshot()
+			}
+			return map[string]tool.InvokableTool{}, err
+		}
+		for name, invokable := range refreshedTools {
+			tools[name] = invokable
+		}
+	}
+	return tools, nil
+}
+
 // GetPreferredIotTransportType 返回当前设备最适合用于设备维度 MCP 查询/调用的 transport。
 // 优先选择仍处于 connected 状态且最近有心跳的 transport；如果都不活跃，则退回最近一次存在的 transport。
 func (dc *DeviceMcpSession) GetPreferredIotTransportType() string {
@@ -765,6 +856,23 @@ func (dc *DeviceMcpSession) GetIotToolsByTransport(transportType string) map[str
 	iotClient.copyToolsInto(tools)
 
 	return tools
+}
+
+func (dc *DeviceMcpSession) RefreshIotToolsByTransport(transportType string) (map[string]tool.InvokableTool, error) {
+	transportType = normalizeDeviceTransportType(transportType)
+	tools := make(map[string]tool.InvokableTool)
+	if transportType == "unknown" {
+		return tools, nil
+	}
+
+	dc.iotMux.RLock()
+	iotClient := dc.iotOverMcpByTransport[transportType]
+	dc.iotMux.RUnlock()
+	if iotClient == nil {
+		return tools, nil
+	}
+
+	return iotClient.refreshToolsStrict()
 }
 
 func (dc *DeviceMcpSession) GetIotToolByTransportAndName(transportType, toolName string) (tool.InvokableTool, bool) {

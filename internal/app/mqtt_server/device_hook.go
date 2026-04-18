@@ -70,24 +70,36 @@ func (h *DeviceHook) OnConnect(cl *mqttServer.Client, pk packets.Packet) error {
 }
 
 func (h *DeviceHook) OnDisconnect(cl *mqttServer.Client, err error, ok bool) {
+	if cl == nil {
+		log.Warnf("OnDisconnect: 客户端为空, err=%v, ok=%v", err, ok)
+		return
+	}
 	isAdmin := isAdminUser(cl)
+	mac := parseMacFromClientId(cl.ID)
+	deviceID := deviceIDFromClientId(cl.ID)
+	takenOver := cl.IsTakenOver()
+
+	log.Infof("OnDisconnect: clientID=%s, deviceID=%s, mac=%s, ok=%v, err=%v, takenOver=%v, isAdmin=%v",
+		cl.ID, deviceID, mac, ok, err, takenOver, isAdmin)
+
 	if isAdmin {
 		return
 	}
-	if cl.IsTakenOver() {
-		log.Infof("客户端 %s 已被同ID新连接接管，跳过取消订阅", cl.ID)
+	if takenOver {
+		log.Infof("客户端 %s 已被同ID新连接接管，跳过取消订阅和离线生命周期发布", cl.ID)
 		return
 	}
-	mac := parseMacFromClientId(cl.ID)
 	if mac == "" {
-		log.Info("警告: 无法从客户端ID解析MAC地址:", cl.ID)
+		log.Infof("OnDisconnect: 无法从客户端ID解析MAC地址, clientID=%s, err=%v, ok=%v", cl.ID, err, ok)
 		return
 	}
+
+	log.Infof("OnDisconnect: 准备发布离线生命周期, clientID=%s, deviceID=%s", cl.ID, deviceID)
 	h.publishLifecycleEvent(cl.ID, client.MqttLifecycleStateOffline)
 	topic := deviceSubTopic(mac)
 
 	action := h.server.Topics.Unsubscribe(topic, cl.ID)
-	log.Infof("取消订阅客户端 %s 到主题 %s, action: %v", cl.ID, topic, action)
+	log.Infof("OnDisconnect: 取消订阅客户端 %s 到主题 %s, action=%v", cl.ID, topic, action)
 
 	return
 }
@@ -96,6 +108,7 @@ func (h *DeviceHook) OnDisconnect(cl *mqttServer.Client, err error, ok bool) {
 func (h *DeviceHook) OnSessionEstablished(cl *mqttServer.Client, pk packets.Packet) {
 	isAdmin := isAdminUser(cl)
 	mac := parseMacFromClientId(cl.ID)
+	deviceID := deviceIDFromClientId(cl.ID)
 	if isAdmin {
 		return // 超级管理员不做限制
 	}
@@ -103,6 +116,7 @@ func (h *DeviceHook) OnSessionEstablished(cl *mqttServer.Client, pk packets.Pack
 		log.Info("警告: 无法从客户端ID解析MAC地址:", cl.ID)
 		return
 	}
+	log.Infof("OnSessionEstablished: clientID=%s, deviceID=%s, mac=%s, clean=%v", cl.ID, deviceID, mac, pk.Connect.Clean)
 	h.publishLifecycleEvent(cl.ID, client.MqttLifecycleStateOnline)
 
 	topic := deviceSubTopic(mac)
@@ -207,6 +221,7 @@ func (h *DeviceHook) publishLifecycleEvent(clientID string, state string) {
 	}
 	deviceID := deviceIDFromClientId(clientID)
 	if deviceID == "" {
+		log.Warnf("发布 MQTT 生命周期事件跳过: 无法解析 deviceID, clientID=%s, state=%s", clientID, state)
 		return
 	}
 	event := client.MqttLifecycleEvent{
@@ -216,6 +231,7 @@ func (h *DeviceHook) publishLifecycleEvent(clientID string, state string) {
 		ClientID: clientID,
 		Ts:       time.Now().UnixMilli(),
 	}
+	log.Infof("发布 MQTT 生命周期事件: device=%s, clientID=%s, state=%s, ts=%d", deviceID, clientID, state, event.Ts)
 	if err := h.publishLifecycle(event); err != nil {
 		log.Warnf("发布 MQTT 生命周期事件失败: device=%s state=%s err=%v", deviceID, state, err)
 	}
