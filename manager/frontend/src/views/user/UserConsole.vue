@@ -1401,6 +1401,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   width: 100%;
+  align-items: flex-start;
+  text-align: left;
 }
 
 .radio-title {
@@ -1441,6 +1443,8 @@ onMounted(() => {
   align-items: flex-start;
   height: auto;
   line-height: 1.4;
+  margin-left: 0;
+  padding-left: 0;
 }
 
 :deep(.inject-message-dialog .el-radio__input) {
