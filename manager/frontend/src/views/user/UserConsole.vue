@@ -1433,6 +1433,7 @@ onMounted(() => {
 :deep(.inject-message-dialog .el-radio-group) {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   width: 100%;
   gap: 10px;
 }
@@ -1445,6 +1446,7 @@ onMounted(() => {
   line-height: 1.4;
   margin-left: 0;
   padding-left: 0;
+  width: 100%;
 }
 
 :deep(.inject-message-dialog .el-radio__input) {
