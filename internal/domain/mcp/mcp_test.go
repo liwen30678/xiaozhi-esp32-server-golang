@@ -506,6 +506,14 @@ type testIotConn struct {
 	sendErrByMethod map[string]error
 }
 
+type closeAwareIotConn struct {
+	transportType string
+	recvEntered   chan struct{}
+	ctxCanceled   chan struct{}
+	enterOnce     sync.Once
+	cancelOnce    sync.Once
+}
+
 type capturedJSONRPCRequest struct {
 	Method string          `json:"method"`
 	ID     json.RawMessage `json:"id"`
@@ -611,6 +619,42 @@ func newTestIotConn(transportType string) *testIotConn {
 		recv:            make(chan []byte, 8),
 		sendErrByMethod: make(map[string]error),
 	}
+}
+
+func newCloseAwareIotConn(transportType string) *closeAwareIotConn {
+	return &closeAwareIotConn{
+		transportType: transportType,
+		recvEntered:   make(chan struct{}),
+		ctxCanceled:   make(chan struct{}),
+	}
+}
+
+func (c *closeAwareIotConn) SendMcpMsg(payload []byte) error {
+	return nil
+}
+
+func (c *closeAwareIotConn) RecvMcpMsg(ctx context.Context, timeout int) ([]byte, error) {
+	c.enterOnce.Do(func() {
+		close(c.recvEntered)
+	})
+
+	select {
+	case <-ctx.Done():
+		c.cancelOnce.Do(func() {
+			close(c.ctxCanceled)
+		})
+		return nil, ctx.Err()
+	case <-time.After(time.Duration(timeout) * time.Millisecond):
+		return nil, fmt.Errorf("timeout")
+	}
+}
+
+func (c *closeAwareIotConn) HandleMcpMessage(payload []byte) error {
+	return nil
+}
+
+func (c *closeAwareIotConn) GetMcpTransportType() string {
+	return c.transportType
 }
 
 func (c *testIotConn) SendMcpMsg(payload []byte) error {
@@ -1072,6 +1116,42 @@ func TestShouldScheduleDeviceIotOverMcp_UsesTransportInitState(t *testing.T) {
 
 	otherConn := newTestIotConn("websocket")
 	assert.True(t, ShouldScheduleDeviceIotOverMcp(deviceID, otherConn))
+}
+
+func TestCloseDeviceIotOverMcpClosesUnderlyingTransport(t *testing.T) {
+	deviceID := fmt.Sprintf("close-iot-device-%d", time.Now().UnixNano())
+	conn := newCloseAwareIotConn("websocket")
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &DeviceMcpSession{
+		deviceID:              deviceID,
+		Ctx:                   ctx,
+		cancel:                cancel,
+		iotOverMcpByTransport: make(map[string]*McpClientInstance),
+	}
+	instance := NewIotOverMcpClient(deviceID, conn.transportType, conn)
+	require.NotNil(t, instance)
+	instance.SetOnCloseHandler(session.handleMcpClientClose)
+	session.iotOverMcpByTransport[normalizeDeviceTransportType(conn.transportType)] = instance
+	require.NoError(t, AddDeviceMcpClient(deviceID, session))
+
+	t.Cleanup(func() {
+		cancel()
+		_ = RemoveDeviceMcpClient(deviceID)
+	})
+
+	select {
+	case <-conn.recvEntered:
+	case <-time.After(time.Second):
+		t.Fatal("expected IoT transport read loop to start")
+	}
+
+	CloseDeviceIotOverMcp(deviceID, conn)
+
+	select {
+	case <-conn.ctxCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("expected closing device IoT MCP to cancel the transport read loop")
+	}
 }
 
 func TestHeartbeatRefreshToolsFailure_DestroysRuntimeAfterFiveFailures(t *testing.T) {

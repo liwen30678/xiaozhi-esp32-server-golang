@@ -79,8 +79,7 @@ func (dcs *DeviceMcpSession) SetIotOverMcp(transportType string, mcpClient *McpC
 
 	// 锁外关闭旧实例，避免在会话锁里执行取消逻辑。
 	if old != nil {
-		old.setConnected(false)
-		old.cancel()
+		old.closeWithReason("iot_transport_replaced")
 	}
 }
 
@@ -151,7 +150,7 @@ type McpClientInstance struct {
 
 	// 添加关闭回调
 	onCloseHandler func(instance *McpClientInstance, reason string)
-	closeOnce      sync.Once
+	closed         atomic.Bool
 }
 
 // NewDeviceMCPClient 创建新的MCP客户端
@@ -447,17 +446,23 @@ func (dc *McpClientInstance) closeWithReason(reason string) {
 	if dc == nil {
 		return
 	}
-	dc.closeOnce.Do(func() {
-		logger.Infof("MCP客户端 %s 关闭，原因: %s", dc.serverName, reason)
+	if !dc.closed.CompareAndSwap(false, true) {
+		return
+	}
+	logger.Infof("MCP客户端 %s 关闭，原因: %s", dc.serverName, reason)
 
-		dc.setConnected(false)
-		dc.setInitState(mcpClientInitStateIdle)
-		dc.cancel()
-
-		if dc.onCloseHandler != nil {
-			dc.onCloseHandler(dc, reason)
+	dc.setConnected(false)
+	dc.setInitState(mcpClientInitStateIdle)
+	dc.cancel()
+	if dc.mcpClient != nil && reason != "connection_closed" && reason != "manual_close" {
+		if err := dc.mcpClient.Close(); err != nil {
+			logger.Warnf("关闭MCP客户端 %s transport 失败: %v", dc.serverName, err)
 		}
-	})
+	}
+
+	if dc.onCloseHandler != nil {
+		dc.onCloseHandler(dc, reason)
+	}
 }
 
 func (dc *DeviceMcpSession) snapshotWsEndpointClients() []*McpClientInstance {

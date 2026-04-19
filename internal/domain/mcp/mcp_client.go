@@ -194,8 +194,7 @@ func EnsureDeviceIotOverMcp(deviceId string, conn ConnInterface) error {
 	iotOverMcpClient.SetOnCloseHandler(mcpClientSession.handleMcpClientClose)
 	mcpClientSession.iotMux.Unlock()
 	if old != nil {
-		old.setConnected(false)
-		old.cancel()
+		old.closeWithReason("iot_transport_replaced")
 	}
 
 	if err := iotOverMcpClient.startIotOverMcp(); err != nil {
@@ -250,8 +249,7 @@ func CloseDeviceIotOverMcp(deviceId string, conn ConnInterface) {
 	delete(mcpClientSession.iotOverMcpByTransport, transportType)
 	mcpClientSession.iotMux.Unlock()
 
-	iotClient.setConnected(false)
-	iotClient.cancel()
+	iotClient.closeWithReason("device_iot_closed")
 }
 
 func GetToolsByDeviceId(deviceId string, agentId string, selectedMCPServiceNames string) (map[string]tool.InvokableTool, error) {
