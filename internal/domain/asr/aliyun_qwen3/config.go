@@ -13,7 +13,7 @@ const (
 	defaultFormat         = "pcm"
 	defaultSampleRate     = 16000
 	defaultLanguage       = "zh"
-	defaultAutoEnd        = true
+	defaultAutoEnd        = false
 	defaultVADThreshold   = 0.0
 	defaultVADSilenceMs   = 400
 	defaultTimeoutSeconds = 30

@@ -274,7 +274,7 @@ const asrForm = reactive({
     format: 'pcm',
     sample_rate: 16000,
     language: 'zh',
-    auto_end: true,
+    auto_end: false,
     vad_threshold: 0.0,
     vad_silence_ms: 400,
     timeout: 30
