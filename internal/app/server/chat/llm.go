@@ -681,8 +681,7 @@ func (l *LLMManager) handleLLMResponseChannelAsync(ctx context.Context, userMess
 
 			if handleResult.suppressProtocolTtsStop {
 				l.ttsManager.FinishTtsWithoutProtocolStop(ctx, err)
-			} else if !l.clientState.IsRealTime() {
-				// 非 realtime 模式下，由 runSenderLoop 统一发送 TtsStop
+			} else {
 				l.ttsManager.EnqueueTtsStop(ctx)
 			}
 			l.ttsManager.RequestTurnEnd(ctx, err)
@@ -791,7 +790,7 @@ func (l *LLMManager) HandleLLMResponseChannelSync(ctx context.Context, userMessa
 	if needSendTtsCmd {
 		if result.suppressProtocolTtsStop {
 			l.ttsManager.FinishTtsWithoutProtocolStop(ctx, err)
-		} else if !l.clientState.IsRealTime() {
+		} else {
 			l.ttsManager.EnqueueTtsStop(ctx)
 		}
 		l.ttsManager.RequestTurnEnd(ctx, err)

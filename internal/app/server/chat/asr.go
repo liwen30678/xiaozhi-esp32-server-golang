@@ -248,14 +248,17 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 				}
 
 				if !haveVoice || state.Asr.AutoEnd {
-					state.Vad.AddIdleDuration(int64(frameDurationMs))
-					idleDuration := state.Vad.GetIdleDuration()
-					log.Infof("空闲时间: %dms", idleDuration)
-					if idleDuration > state.GetMaxIdleDuration() {
-						log.Infof("超出空闲时长: %dms, 断开连接", idleDuration)
-						//断开连接
-						onClose()
-						return
+					if state.ShouldCountAudioIdleTimeout() {
+						idleDuration := state.Vad.AddIdleDuration(int64(frameDurationMs))
+						log.Infof("空闲时间: %dms", idleDuration)
+						if idleDuration > state.GetMaxIdleDuration() {
+							log.Infof("超出空闲时长: %dms, 断开连接", idleDuration)
+							//断开连接
+							onClose()
+							return
+						}
+					} else {
+						state.Vad.ResetIdleDuration()
 					}
 				}
 

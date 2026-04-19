@@ -1054,6 +1054,10 @@ func (t *TTSManager) InterruptAndClearQueueSync(ctx context.Context) error {
 
 func (t *TTSManager) finishTtsStop(ctx context.Context, sendTtsStop bool, stopErr error) bool {
 	if !t.ttsActive.Swap(false) {
+		if sendTtsStop && t.clientState != nil && t.clientState.IsRealTime() {
+			t.clientState.SetStatus(ClientStatusListenStop)
+			t.clientState.SetTtsStart(false)
+		}
 		return false
 	}
 
@@ -1061,19 +1065,20 @@ func (t *TTSManager) finishTtsStop(ctx context.Context, sendTtsStop bool, stopEr
 		ctx = context.Background()
 	}
 
-	shouldSendTtsStop := sendTtsStop
-	if shouldSendTtsStop && t.clientState.IsRealTime() {
-		shouldSendTtsStop = false
-		log.Debugf("realtime 模式跳过发送 TtsStop: stop_err=%v", stopErr)
-	}
-
-	if shouldSendTtsStop {
+	sentTtsStop := false
+	if sendTtsStop {
 		if err := t.serverTransport.SendTtsStop(); err != nil {
 			if stopErr == nil {
 				stopErr = err
 			}
 			log.Errorf("发送 TtsStop 失败: %v", err)
+		} else {
+			sentTtsStop = true
 		}
+	}
+	if !sentTtsStop && t.clientState != nil {
+		t.clientState.SetStatus(ClientStatusListenStop)
+		t.clientState.SetTtsStart(false)
 	}
 	if t.session != nil {
 		hookErr := t.session.hookHub.EmitTTSOutputStop(t.session.hookContext(ctx), chathooks.TTSOutputStopData{Err: stopErr})

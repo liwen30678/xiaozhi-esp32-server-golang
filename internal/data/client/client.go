@@ -339,6 +339,21 @@ func (c *ClientState) GetMaxIdleDuration() int64 {
 	return maxIdleDuration
 }
 
+func (c *ClientState) ShouldCountAudioIdleTimeout() bool {
+	if c == nil || !c.IsRealTime() {
+		return true
+	}
+	if c.GetTtsStart() {
+		return false
+	}
+	switch c.GetStatus() {
+	case ClientStatusLLMStart, ClientStatusTTSStart:
+		return false
+	default:
+		return true
+	}
+}
+
 func (c *ClientState) GetPreAsrTextSilenceDuration() int64 {
 	if viper.IsSet("chat.pre_asr_text_silence_duration") {
 		preTextSilenceDuration := viper.GetInt64("chat.pre_asr_text_silence_duration")

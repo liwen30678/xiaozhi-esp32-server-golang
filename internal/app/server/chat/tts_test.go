@@ -169,6 +169,90 @@ func TestStopSpeakingSendsTtsStopForActiveTTS(t *testing.T) {
 	}
 }
 
+func TestRealtimeStopSpeakingSendsTtsStopForActiveTTS(t *testing.T) {
+	session, conn, cleanup := newStartedTTSControlTestSession(t)
+	defer cleanup()
+	session.clientState.ListenMode = "realtime"
+
+	session.ttsManager.EnqueueTtsStart(context.Background())
+
+	startMsg := waitForServerMessage(t, conn, 0)
+	if startMsg.Type != msgdata.ServerMessageTypeTts || startMsg.State != msgdata.MessageStateStart {
+		t.Fatalf("expected first server message to be tts start, got type=%s state=%s", startMsg.Type, startMsg.State)
+	}
+
+	session.StopSpeaking(true)
+
+	stopMsg := waitForServerMessage(t, conn, 1)
+	if stopMsg.Type != msgdata.ServerMessageTypeTts || stopMsg.State != msgdata.MessageStateStop {
+		t.Fatalf("expected realtime tts stop after interrupt, got type=%s state=%s", stopMsg.Type, stopMsg.State)
+	}
+	if session.clientState.GetTtsStart() {
+		t.Fatal("expected realtime tts stop to clear TTS start flag")
+	}
+}
+
+func TestRealtimeLLMNaturalEndEnqueuesTtsStop(t *testing.T) {
+	session, conn, cleanup := newStartedTTSControlTestSession(t)
+	defer cleanup()
+	session.clientState.ListenMode = "realtime"
+
+	responseChan := make(chan llm_common.LLMResponseStruct)
+	close(responseChan)
+
+	if _, err := session.llmManager.HandleLLMResponseChannelSync(context.Background(), nil, responseChan, nil); err != nil {
+		t.Fatalf("HandleLLMResponseChannelSync returned error: %v", err)
+	}
+
+	startMsg := waitForServerMessage(t, conn, 0)
+	if startMsg.Type != msgdata.ServerMessageTypeTts || startMsg.State != msgdata.MessageStateStart {
+		t.Fatalf("expected first server message to be tts start, got type=%s state=%s", startMsg.Type, startMsg.State)
+	}
+
+	stopMsg := waitForServerMessage(t, conn, 1)
+	if stopMsg.Type != msgdata.ServerMessageTypeTts || stopMsg.State != msgdata.MessageStateStop {
+		t.Fatalf("expected realtime natural end to send tts stop, got type=%s state=%s", stopMsg.Type, stopMsg.State)
+	}
+	if session.clientState.GetStatus() != data_client.ClientStatusListenStop {
+		t.Fatalf("expected realtime tts stop to return status to listenStop, got %s", session.clientState.GetStatus())
+	}
+}
+
+func TestFinishTtsWithoutProtocolStopClearsLocalTTSState(t *testing.T) {
+	manager := newTestTTSManager(false)
+	manager.clientState.ListenMode = "realtime"
+	manager.clientState.SetStatus(data_client.ClientStatusTTSStart)
+	manager.clientState.SetTtsStart(true)
+	manager.ttsActive.Store(true)
+
+	if !manager.FinishTtsWithoutProtocolStop(context.Background(), nil) {
+		t.Fatal("expected active TTS turn to finish")
+	}
+	if manager.clientState.GetTtsStart() {
+		t.Fatal("expected logical TTS stop to clear local TTS start flag")
+	}
+	if manager.clientState.GetStatus() != data_client.ClientStatusListenStop {
+		t.Fatalf("expected logical TTS stop to return status to listenStop, got %s", manager.clientState.GetStatus())
+	}
+}
+
+func TestRealtimeInactiveTTSStopClearsInterruptedLLMState(t *testing.T) {
+	manager := newTestTTSManager(false)
+	manager.clientState.ListenMode = "realtime"
+	manager.clientState.SetStatus(data_client.ClientStatusLLMStart)
+	manager.clientState.SetTtsStart(false)
+
+	if manager.finishTtsStop(context.Background(), true, context.Canceled) {
+		t.Fatal("expected inactive TTS stop to report no active TTS turn")
+	}
+	if manager.clientState.GetStatus() != data_client.ClientStatusListenStop {
+		t.Fatalf("expected interrupted realtime LLM state to return to listenStop, got %s", manager.clientState.GetStatus())
+	}
+	if manager.clientState.GetTtsStart() {
+		t.Fatal("expected interrupted realtime LLM state to keep TTS start flag cleared")
+	}
+}
+
 func newTestTTSManager(dualStream bool) *TTSManager {
 	ttsConfig := map[string]interface{}{}
 	if dualStream {
