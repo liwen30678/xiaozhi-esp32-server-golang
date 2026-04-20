@@ -286,8 +286,14 @@ func (s *MqttUdpAdapter) handleMessage(client mqtt.Client, msg mqtt.Message) {
 }
 
 // 断开连接，超时或goodbye主动断开
-func (s *MqttUdpAdapter) handleDisconnect(deviceId string) {
+func (s *MqttUdpAdapter) handleDisconnect(deviceId string, closingConn *MqttUdpConn) {
 	Debugf("handleDisconnect, deviceId: %s", deviceId)
+
+	conn := s.getDeviceSession(deviceId)
+	if closingConn != nil && conn != nil && conn != closingConn {
+		Debugf("handleDisconnect, ignore stale conn for deviceId: %s", deviceId)
+		return
+	}
 
 	notifyOffline := false
 	if state := s.getLifecycleState(deviceId); state != nil {
@@ -309,7 +315,6 @@ func (s *MqttUdpAdapter) handleDisconnect(deviceId string) {
 		}
 	}
 
-	conn := s.getDeviceSession(deviceId)
 	if conn == nil {
 		Debugf("handleDisconnect, deviceId: %s not found", deviceId)
 		if notifyOffline && s.onDeviceOffline != nil {
@@ -510,7 +515,9 @@ func (s *MqttUdpAdapter) EnsureDeviceTransport(deviceId string) (*MqttUdpConn, e
 	deviceSession.MarkBrokerOnline()
 
 	s.SetDeviceSession(deviceId, deviceSession)
-	deviceSession.OnClose(s.handleDisconnect)
+	deviceSession.OnClose(func(closedDeviceID string) {
+		s.handleDisconnect(closedDeviceID, deviceSession)
+	})
 
 	if s.onNewConnection != nil {
 		s.onNewConnection(deviceSession)

@@ -1,6 +1,7 @@
 package mqtt_udp
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -17,10 +18,7 @@ func TestRotateDeviceUdpSessionReplacesSessionAndCleansOldIndexes(t *testing.T) 
 	require.NotNil(t, oldSession)
 
 	oldAddr := testUDPAddr(10001)
-	oldAliasAddr := testUDPAddr(10002)
 	oldSession.SetRemoteAddr(oldAddr)
-	udpServer.addUdpSession(oldAddr, oldSession)
-	udpServer.addUdpSession(oldAliasAddr, oldSession)
 
 	conn := NewMqttUdpConn("device-1", "topic/device-1", nil, udpServer, oldSession)
 	t.Cleanup(func() {
@@ -36,10 +34,9 @@ func TestRotateDeviceUdpSessionReplacesSessionAndCleansOldIndexes(t *testing.T) 
 
 	assert.NotSame(t, oldSession, newSession)
 	assert.Same(t, newSession, conn.GetUdpSession())
-	assert.Same(t, newSession, udpServer.GetNonce(newSession.ConnId))
-	assert.Nil(t, udpServer.GetNonce(oldSession.ConnId))
-	assert.Nil(t, udpServer.getUdpSession(oldAddr))
-	assert.Nil(t, udpServer.getUdpSession(oldAliasAddr))
+	assert.Same(t, newSession, udpServer.GetSessionByConnID(newSession.ConnId))
+	assert.Nil(t, udpServer.GetSessionByConnID(oldSession.ConnId))
+	assert.Nil(t, oldSession.GetRemoteAddr())
 	assert.True(t, oldSession.IsClosed())
 	assert.NotEqual(t, oldSession.ConnId, newSession.ConnId)
 
@@ -55,7 +52,7 @@ func TestRotateDeviceUdpSessionReplacesSessionAndCleansOldIndexes(t *testing.T) 
 	assert.Equal(t, newNonce, boundNonce)
 }
 
-func TestProcessPacketRebindsSessionByConnIDAndRemovesOldAlias(t *testing.T) {
+func TestProcessPacketUpdatesRemoteAddrByConnID(t *testing.T) {
 	udpServer := NewUDPServer(0, "", 0)
 
 	session := udpServer.CreateSession("device-2", "")
@@ -67,16 +64,12 @@ func TestProcessPacketRebindsSessionByConnIDAndRemovesOldAlias(t *testing.T) {
 	oldAddr := testUDPAddr(10011)
 	newAddr := testUDPAddr(10012)
 	session.SetRemoteAddr(oldAddr)
-	udpServer.addUdpSession(oldAddr, session)
 
 	payload := []byte("hello-audio")
 	packet, err := session.Encrypt(payload)
 	require.NoError(t, err)
 
 	udpServer.processPacket(newAddr, packet)
-
-	assert.Nil(t, udpServer.getUdpSession(oldAddr))
-	assert.Same(t, session, udpServer.getUdpSession(newAddr))
 
 	remoteAddr := session.GetRemoteAddr()
 	require.NotNil(t, remoteAddr)
@@ -95,7 +88,6 @@ func TestOldPacketCannotRebindAfterSessionRotation(t *testing.T) {
 
 	oldAddr := testUDPAddr(10021)
 	oldSession.SetRemoteAddr(oldAddr)
-	udpServer.addUdpSession(oldAddr, oldSession)
 
 	oldPacket, err := oldSession.Encrypt([]byte("stale-packet"))
 	require.NoError(t, err)
@@ -112,9 +104,61 @@ func TestOldPacketCannotRebindAfterSessionRotation(t *testing.T) {
 
 	udpServer.processPacket(oldAddr, oldPacket)
 
-	assert.Nil(t, udpServer.GetNonce(oldSession.ConnId))
-	assert.Nil(t, udpServer.getUdpSession(oldAddr))
+	assert.Nil(t, udpServer.GetSessionByConnID(oldSession.ConnId))
+	assert.Nil(t, oldSession.GetRemoteAddr())
 	assert.Same(t, newSession, conn.GetUdpSession())
+}
+
+func TestCloseSessionByRefClearsRemoteAddr(t *testing.T) {
+	udpServer := NewUDPServer(0, "", 0)
+
+	session := udpServer.CreateSession("device-4", "")
+	require.NotNil(t, session)
+	session.SetRemoteAddr(testUDPAddr(10031))
+
+	udpServer.CloseSessionByRef(session)
+
+	assert.Nil(t, udpServer.GetSessionByConnID(session.ConnId))
+	assert.Nil(t, session.GetRemoteAddr())
+	assert.True(t, session.IsClosed())
+}
+
+func TestCreateSessionRetriesConnIDCollision(t *testing.T) {
+	originalReader := udpRandReader
+	udpRandReader = bytes.NewReader(buildCollisionRandomStream())
+	t.Cleanup(func() {
+		udpRandReader = originalReader
+	})
+
+	udpServer := NewUDPServer(0, "", 0)
+
+	first := udpServer.CreateSession("device-a", "")
+	require.NotNil(t, first)
+	t.Cleanup(func() {
+		udpServer.CloseSessionByRef(first)
+	})
+
+	second := udpServer.CreateSession("device-b", "")
+	require.NotNil(t, second)
+	t.Cleanup(func() {
+		udpServer.CloseSessionByRef(second)
+	})
+
+	assert.NotEqual(t, first.ConnId, second.ConnId)
+	assert.Same(t, first, udpServer.GetSessionByConnID(first.ConnId))
+	assert.Same(t, second, udpServer.GetSessionByConnID(second.ConnId))
+}
+
+func buildCollisionRandomStream() []byte {
+	stream := make([]byte, 0, 60)
+	stream = append(stream, []byte{0, 1, 2, 3, 4, 5, 6, 7}...)
+	stream = append(stream, bytes.Repeat([]byte{0x11}, 16)...)
+	stream = append(stream, []byte{0xaa, 0xbb, 0xcc, 0xdd}...)
+	stream = append(stream, []byte{8, 9, 10, 11, 12, 13, 14, 15}...)
+	stream = append(stream, bytes.Repeat([]byte{0x22}, 16)...)
+	stream = append(stream, []byte{0xaa, 0xbb, 0xcc, 0xdd}...)
+	stream = append(stream, []byte{0xde, 0xad, 0xbe, 0xef}...)
+	return stream
 }
 
 func testUDPAddr(port int) *net.UDPAddr {
