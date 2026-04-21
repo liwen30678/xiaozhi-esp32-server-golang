@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -24,24 +25,26 @@ type UDPServer struct {
 }*/
 
 type UdpServer struct {
-	conn          *net.UDPConn
-	udpPort       int      //udp server listen port
-	externalHost  string   //udp server external host
-	externalPort  int      //udp server external port
-	nonce2Session sync.Map //nonce => UdpSession
-	addr2Session  sync.Map //addr => UdpSession
-	mqttAdapter   *MqttUdpAdapter
+	conn           *net.UDPConn
+	udpPort        int      //udp server listen port
+	externalHost   string   //udp server external host
+	externalPort   int      //udp server external port
+	connId2Session sync.Map //connId => UdpSession
+	mqttAdapter    *MqttUdpAdapter
 	sync.RWMutex
 }
+
+const maxConnIDGenerateAttempts = 16
+
+var udpRandReader io.Reader = rand.Reader
 
 // NewUDPServer 创建新的UDP服务器
 func NewUDPServer(udpPort int, externalHost string, externalPort int) *UdpServer {
 	return &UdpServer{
-		udpPort:       udpPort,
-		externalHost:  externalHost,
-		externalPort:  externalPort,
-		nonce2Session: sync.Map{},
-		addr2Session:  sync.Map{},
+		udpPort:        udpPort,
+		externalHost:   externalHost,
+		externalPort:   externalPort,
+		connId2Session: sync.Map{},
 	}
 }
 
@@ -112,8 +115,8 @@ func (s *UdpServer) handlePackets() {
 	}
 }
 
-func (s *UdpServer) getSessionByNonce(connID string) *UdpSession {
-	val, ok := s.nonce2Session.Load(connID)
+func (s *UdpServer) getSessionByConnID(connID string) *UdpSession {
+	val, ok := s.connId2Session.Load(connID)
 	if ok {
 		return val.(*UdpSession)
 	}
@@ -131,21 +134,9 @@ func (s *UdpServer) processPacket(addr *net.UDPAddr, data []byte) {
 	fullNonce := data[:16]
 	connID := fullNonce[4:8] // 取5-8字节作为连接id
 	strConnID := hex.EncodeToString(connID)
-	udpSession := s.getSessionByNonce(strConnID)
+	udpSession := s.getSessionByConnID(strConnID)
 	if udpSession == nil {
 		Warnf("session不存在 addr: %s, connID: %s", addr, strConnID)
-		return
-	}
-	addrSession := s.getUdpSession(addr)
-	if addrSession != udpSession {
-		if addrSession != nil {
-			s.removeUdpSession(addr)
-		}
-		s.rebindSessionAddr(addr, udpSession)
-	}
-
-	if udpSession == nil {
-		Warnf("udpSession不存在 addr: %s", addr)
 		return
 	}
 
@@ -156,6 +147,10 @@ func (s *UdpServer) processPacket(addr *net.UDPAddr, data []byte) {
 	if err != nil {
 		Errorf("addr: %s 解密失败: %v", addr, err)
 		return
+	}
+	currentAddr := udpSession.GetRemoteAddr()
+	if currentAddr == nil || currentAddr.String() != addr.String() {
+		udpSession.SetRemoteAddr(addr)
 	}
 	Debugf("收到音频数据, addr: %s, 大小: %d 字节", addr, len(decrypted))
 	ok, err := udpSession.RecvData(decrypted)
@@ -180,10 +175,10 @@ func (s *UdpServer) cleanupSessions() {
 	ticker := time.NewTicker(time.Minute)
 	for range ticker.C {
 		now := time.Now()
-		s.nonce2Session.Range(func(key, value interface{}) bool {
+		s.connId2Session.Range(func(key, value interface{}) bool {
 			session := value.(*UdpSession)
 			if now.Sub(session.LastActive) > 5*time.Minute {
-				s.nonce2Session.Delete(key)
+				s.connId2Session.Delete(key)
 				Infof("清理过期会话: %s", key)
 			}
 			return true
@@ -194,23 +189,18 @@ func (s *UdpServer) cleanupSessions() {
 // CreateSession 创建新会话
 func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 	// 生成会话ID
-	sessionID := generateSessionID()
+	sessionID, err := generateSessionID()
+	if err != nil {
+		Errorf("生成会话ID失败: %v", err)
+		return nil
+	}
 
 	// 生成AES密钥
 	key := make([]byte, 16)
-	rand.Read(key)
-
-	// 生成4字节连接id
-	connID := make([]byte, 4)
-	rand.Read(connID)
-	strConnID := hex.EncodeToString(connID)
-
-	// 4字节时间戳
-	timestamp := make([]byte, 4)
-	binary.BigEndian.PutUint32(timestamp, uint32(time.Now().Unix()))
-
-	// 拼接nonce: 4字节连接id + 4字节时间戳
-	nonce := append(connID, timestamp...)
+	if err := fillRandomBytes(key); err != nil {
+		Errorf("生成AES密钥失败: %v", err)
+		return nil
+	}
 
 	// 创建AES块
 	block, err := aes.NewCipher(key)
@@ -223,27 +213,57 @@ func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 	aesKey := [16]byte{}
 	copy(aesKey[:], key)
 
-	// 将nonce转换为[8]byte
-	nonceBytes := [8]byte{}
-	copy(nonceBytes[:], nonce)
+	for attempt := 0; attempt < maxConnIDGenerateAttempts; attempt++ {
+		// 生成4字节连接id
+		connID := make([]byte, 4)
+		if err := fillRandomBytes(connID); err != nil {
+			Errorf("生成连接ID失败: %v", err)
+			return nil
+		}
+		strConnID := hex.EncodeToString(connID)
 
-	// 创建会话
-	session := &UdpSession{
-		ID:          sessionID,
-		ConnId:      strConnID,
-		ClientId:    clientId,
-		DeviceId:    deviceId,
-		AesKey:      aesKey,
-		Nonce:       nonceBytes, // 保存原始nonce模板
-		CreatedAt:   time.Now(),
-		LastActive:  time.Now(),
-		Block:       block,
-		RecvChannel: make(chan []byte, 100),
-		SendChannel: make(chan []byte, 100),
-		Status:      UdpSessionStatusActive,
-		Lock:        sync.Mutex{},
+		// 4字节时间戳
+		timestamp := make([]byte, 4)
+		binary.BigEndian.PutUint32(timestamp, uint32(time.Now().Unix()))
+
+		// 拼接nonce: 4字节连接id + 4字节时间戳
+		nonce := append(connID, timestamp...)
+
+		// 将nonce转换为[8]byte
+		nonceBytes := [8]byte{}
+		copy(nonceBytes[:], nonce)
+
+		// 创建会话
+		session := &UdpSession{
+			ID:          sessionID,
+			ConnId:      strConnID,
+			ClientId:    clientId,
+			DeviceId:    deviceId,
+			AesKey:      aesKey,
+			Nonce:       nonceBytes, // 保存原始nonce模板
+			CreatedAt:   time.Now(),
+			LastActive:  time.Now(),
+			Block:       block,
+			RecvChannel: make(chan []byte, 100),
+			SendChannel: make(chan []byte, 100),
+			Status:      UdpSessionStatusActive,
+			Lock:        sync.Mutex{},
+		}
+
+		if _, loaded := s.connId2Session.LoadOrStore(strConnID, session); loaded {
+			Warnf("UDP connID冲突，重试生成: device=%s, connID=%s, attempt=%d", deviceId, strConnID, attempt+1)
+			continue
+		}
+
+		s.startSessionSender(session)
+		return session
 	}
-	//通过channel发送音频数据, 当channel关闭的时候停止
+
+	Errorf("生成唯一UDP connID失败: device=%s", deviceId)
+	return nil
+}
+
+func (s *UdpServer) startSessionSender(session *UdpSession) {
 	go func() {
 		for data := range session.SendChannel {
 			remoteAddr := session.WaitRemoteAddr(2 * time.Second)
@@ -257,45 +277,48 @@ func (s *UdpServer) CreateSession(deviceId, clientId string) *UdpSession {
 				Errorf("加密失败: %v", err)
 				continue
 			}
-			//Debugf("发送音频数据, nonce: %s, 大小: %d 字节", hex.EncodeToString(encrypted[:16]), len(encrypted))
-			_, err = s.conn.WriteToUDP(encrypted, remoteAddr)
+			_, err = s.writeToUDP(encrypted, remoteAddr)
 			if err != nil {
 				Errorf("发送音频数据失败: %v", err)
 				continue
 			}
-			//Debugf("发送音频数据成功, nonce: %s, 大小: %d 字节, 发送字节数: %d", hex.EncodeToString(encrypted[:16]), len(encrypted), n)
 		}
 	}()
+}
 
-	// 只用连接id（前4字节）作为key
-	s.SetNonce2Session(strConnID, session)
-
-	return session
+func (s *UdpServer) writeToUDP(data []byte, remoteAddr *net.UDPAddr) (int, error) {
+	s.RLock()
+	conn := s.conn
+	s.RUnlock()
+	if conn == nil {
+		return 0, fmt.Errorf("udp server is closed")
+	}
+	return conn.WriteToUDP(data, remoteAddr)
 }
 
 // CloseSession 关闭会话
 func (s *UdpServer) CloseSession(connID string) {
-	session := s.getSessionByNonce(connID)
+	session := s.getSessionByConnID(connID)
 	s.CloseSessionByRef(session)
 }
 
 // ClearSessionAddrBinding 清理 connID 对应会话的 UDP 地址绑定，不销毁会话本身
 func (s *UdpServer) ClearSessionAddrBinding(connID string) {
-	session := s.getSessionByNonce(connID)
+	session := s.getSessionByConnID(connID)
 	if session == nil {
 		return
 	}
-	s.clearSessionAddrBindings(session)
+	session.SetRemoteAddr(nil)
 }
 
-func (s *UdpServer) SetNonce2Session(connID string, session *UdpSession) {
-	Debugf("SetNonce2Session, connID: %s, session: %+v", connID, session)
-	s.nonce2Session.Store(connID, session)
+func (s *UdpServer) SetConnId2Session(connID string, session *UdpSession) {
+	Debugf("SetConnId2Session, connID: %s, session: %+v", connID, session)
+	s.connId2Session.Store(connID, session)
 }
 
-// GetSession 获取会话信息
-func (s *UdpServer) GetNonce(connID string) *UdpSession {
-	val, ok := s.nonce2Session.Load(connID)
+// GetSessionByConnID 获取会话信息
+func (s *UdpServer) GetSessionByConnID(connID string) *UdpSession {
+	val, ok := s.connId2Session.Load(connID)
 	if ok {
 		return val.(*UdpSession)
 	}
@@ -303,55 +326,24 @@ func (s *UdpServer) GetNonce(connID string) *UdpSession {
 }
 
 // generateSessionID 生成会话ID
-func generateSessionID() string {
+func generateSessionID() (string, error) {
 	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func (s *UdpServer) getUdpSession(addr *net.UDPAddr) *UdpSession {
-	val, ok := s.addr2Session.Load(addr.String())
-	if ok {
-		return val.(*UdpSession)
+	if err := fillRandomBytes(b); err != nil {
+		return "", err
 	}
-	return nil
+	return hex.EncodeToString(b), nil
 }
 
-func (s *UdpServer) addUdpSession(addr *net.UDPAddr, session *UdpSession) {
-	s.addr2Session.Store(addr.String(), session)
-}
-
-func (s *UdpServer) removeUdpSession(addr *net.UDPAddr) {
-	s.addr2Session.Delete(addr.String())
+func fillRandomBytes(buffer []byte) error {
+	_, err := io.ReadFull(udpRandReader, buffer)
+	return err
 }
 
 func (s *UdpServer) CloseSessionByRef(session *UdpSession) {
 	if session == nil {
 		return
 	}
-	s.clearSessionAddrBindings(session)
-	s.nonce2Session.Delete(session.ConnId)
-	session.Destroy()
-}
-
-func (s *UdpServer) clearSessionAddrBindings(session *UdpSession) {
-	if session == nil {
-		return
-	}
-	s.addr2Session.Range(func(key, value interface{}) bool {
-		if value == session {
-			s.addr2Session.Delete(key)
-		}
-		return true
-	})
+	s.connId2Session.Delete(session.ConnId)
 	session.SetRemoteAddr(nil)
-}
-
-func (s *UdpServer) rebindSessionAddr(addr *net.UDPAddr, session *UdpSession) {
-	if addr == nil || session == nil {
-		return
-	}
-	s.clearSessionAddrBindings(session)
-	session.SetRemoteAddr(addr)
-	s.addUdpSession(addr, session)
+	session.Destroy()
 }

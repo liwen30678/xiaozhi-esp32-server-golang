@@ -39,7 +39,12 @@ type UdpSession struct {
 func (s *UdpSession) SetRemoteAddr(addr *net.UDPAddr) {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
-	s.RemoteAddr = addr
+	if addr == nil {
+		s.RemoteAddr = nil
+		return
+	}
+	addrCopy := *addr
+	s.RemoteAddr = &addrCopy
 }
 
 func (s *UdpSession) GetRemoteAddr() *net.UDPAddr {
