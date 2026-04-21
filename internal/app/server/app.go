@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 	"xiaozhi-esp32-server-golang/internal/app/mqtt_server"
 	"xiaozhi-esp32-server-golang/internal/app/server/chat"
+	"xiaozhi-esp32-server-golang/internal/app/server/companion"
 	"xiaozhi-esp32-server-golang/internal/app/server/mqtt_udp"
 	"xiaozhi-esp32-server-golang/internal/app/server/types"
 	"xiaozhi-esp32-server-golang/internal/app/server/websocket"
@@ -176,10 +178,31 @@ func (app *App) newUdpServer() (*mqtt_udp.UdpServer, error) {
 
 func (app *App) newWebSocketServer() *websocket.WebSocketServer {
 	port := viper.GetInt("websocket.port")
+
+	// 初始化伴侣模块
+	var compHandler interface{ RegisterRoutes(*http.ServeMux) }
+	if viper.GetBool("companion.enable") {
+		var compCfg companion.Config
+		if err := viper.UnmarshalKey("companion", &compCfg); err != nil {
+			log.Errorf("解析companion配置失败: %v", err)
+		} else {
+			comp := companion.New(compCfg)
+			compHandler = companion.NewHandler(comp, func(deviceID string) (companion.ChatManager, bool) {
+				cm, exists := app.GetChatManager(deviceID)
+				if !exists {
+					return nil, false
+				}
+				return cm, true
+			})
+			log.Infof("[Companion] 模块已启用")
+		}
+	}
+
 	return websocket.NewWebSocketServer(
 		port,
 		websocket.WithOnNewConnection(app.OnNewConnection),
 		websocket.WithOnOpenClawResponse(app.OnOpenClawResponse),
+		websocket.WithCompanionHandler(compHandler),
 	)
 }
 

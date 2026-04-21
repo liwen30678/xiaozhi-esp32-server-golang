@@ -563,7 +563,7 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 // getSystemConfigsData 获取系统配置数据（与 GetSystemConfigs 返回的 data 一致），供接口与 WebSocket 推送复用
 func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision", "auth", "chat", "knowledge_search"}).Find(&allConfigs).Error; err != nil {
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision", "auth", "chat", "knowledge_search", "companion"}).Find(&allConfigs).Error; err != nil {
 		return nil, err
 	}
 

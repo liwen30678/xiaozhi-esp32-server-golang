@@ -31,6 +31,7 @@ type WebSocketServer struct {
 
 	onNewConnection    types.OnNewConnection
 	onOpenClawResponse func(event openclaw.ResponseDelivery) bool
+	companionHandler   interface{ RegisterRoutes(*http.ServeMux) }
 }
 
 // Option 类型定义
@@ -60,6 +61,12 @@ func WithOnNewConnection(onNewConnection types.OnNewConnection) WebSocketServerO
 func WithOnOpenClawResponse(handler func(event openclaw.ResponseDelivery) bool) WebSocketServerOption {
 	return func(s *WebSocketServer) {
 		s.onOpenClawResponse = handler
+	}
+}
+
+func WithCompanionHandler(handler interface{ RegisterRoutes(*http.ServeMux) }) WebSocketServerOption {
+	return func(s *WebSocketServer) {
+		s.companionHandler = handler
 	}
 }
 
@@ -106,6 +113,11 @@ func (s *WebSocketServer) Start() error {
 	http.HandleFunc("/xiaozhi/api/vision", s.handleVisionAPI) //图片识别API
 
 	http.HandleFunc("/admin/inject_msg", s.handleInjectMsg)
+
+	// Companion routes
+	if s.companionHandler != nil {
+		s.companionHandler.RegisterRoutes(http.DefaultServeMux)
+	}
 
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", s.port)
 	log.Infof("WebSocket 服务器启动在 ws://%s/xiaozhi/v1/", listenAddr)

@@ -1566,6 +1566,18 @@ func (c *ChatManager) ExitChat() error {
 	return nil
 }
 
+// SendCustomJson 向设备发送自定义JSON消息（用于companion等模块）
+func (c *ChatManager) SendCustomJson(msg interface{}) error {
+	if c.serverTransport == nil {
+		return fmt.Errorf("server transport not available")
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal custom json: %w", err)
+	}
+	return c.serverTransport.SendCmd(data)
+}
+
 func (c *ChatManager) resetOpenClawModeOnHello(agentIDs ...string) {
 	deviceID := strings.TrimSpace(c.clientState.DeviceID)
 	if deviceID == "" {
