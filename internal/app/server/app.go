@@ -203,6 +203,7 @@ func (app *App) newWebSocketServer() *websocket.WebSocketServer {
 		websocket.WithOnNewConnection(app.OnNewConnection),
 		websocket.WithOnOpenClawResponse(app.OnOpenClawResponse),
 		websocket.WithCompanionHandler(compHandler),
+		websocket.WithInjectMsgHandler(app.HandleInjectMsgHTTP),
 	)
 }
 
@@ -573,4 +574,24 @@ func (a *App) HandleInjectMsg(ctx context.Context, eventType string, eventData m
 	}
 
 	return "message injected successfully", nil
+}
+
+// HandleInjectMsgHTTP 处理 /admin/inject_msg HTTP 请求
+func (a *App) HandleInjectMsgHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var eventData map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&eventData); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := a.HandleInjectMsg(r.Context(), "inject_msg", eventData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "result": result})
 }

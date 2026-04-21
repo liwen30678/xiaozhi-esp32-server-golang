@@ -31,6 +31,7 @@ type WebSocketServer struct {
 
 	onNewConnection    types.OnNewConnection
 	onOpenClawResponse func(event openclaw.ResponseDelivery) bool
+	onInjectMsg        func(w http.ResponseWriter, r *http.Request)
 	companionHandler   interface{ RegisterRoutes(*http.ServeMux) }
 }
 
@@ -67,6 +68,12 @@ func WithOnOpenClawResponse(handler func(event openclaw.ResponseDelivery) bool) 
 func WithCompanionHandler(handler interface{ RegisterRoutes(*http.ServeMux) }) WebSocketServerOption {
 	return func(s *WebSocketServer) {
 		s.companionHandler = handler
+	}
+}
+
+func WithInjectMsgHandler(handler func(w http.ResponseWriter, r *http.Request)) WebSocketServerOption {
+	return func(s *WebSocketServer) {
+		s.onInjectMsg = handler
 	}
 }
 
@@ -244,5 +251,7 @@ func findQueryValue(values url.Values, keys []string) (string, string) {
 }
 
 func (s *WebSocketServer) handleInjectMsg(w http.ResponseWriter, r *http.Request) {
-
+	if s.onInjectMsg != nil {
+		s.onInjectMsg(w, r)
+	}
 }
