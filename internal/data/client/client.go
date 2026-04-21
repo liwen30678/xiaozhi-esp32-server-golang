@@ -130,6 +130,7 @@ type ClientState struct {
 	AsrAudioBuffer *AsrAudioBuffer
 
 	VoiceStatus
+	AudioIdle AudioIdleClock
 
 	UdpSendAudioData SendAudioData //发送音频数据
 	Statistic        Statistic     //耗时统计
@@ -339,6 +340,100 @@ func (c *ClientState) GetMaxIdleDuration() int64 {
 	return maxIdleDuration
 }
 
+func (c *ClientState) UsesAudioIdleClock() bool {
+	if c == nil {
+		return false
+	}
+	return c.ListenMode == "auto" || c.IsRealTime()
+}
+
+func (c *ClientState) ShouldCountAudioIdleTimeout() bool {
+	if c == nil || !c.IsRealTime() {
+		return true
+	}
+	if c.GetTtsStart() {
+		return false
+	}
+	switch c.GetStatus() {
+	case ClientStatusLLMStart, ClientStatusTTSStart:
+		return false
+	default:
+		return true
+	}
+}
+
+func (c *ClientState) StartAudioIdleWindow(now time.Time) {
+	if c == nil || !c.UsesAudioIdleClock() {
+		return
+	}
+	c.AudioIdle.Start(now)
+	c.SetClientVoiceStop(false)
+}
+
+func (c *ClientState) PauseAudioIdleWindow(now time.Time) {
+	if c == nil || !c.UsesAudioIdleClock() {
+		return
+	}
+	c.AudioIdle.Pause(now)
+}
+
+func (c *ClientState) ResumeAudioIdleWindow(now time.Time) {
+	if c == nil || !c.UsesAudioIdleClock() {
+		return
+	}
+	c.AudioIdle.Resume(now)
+	c.SetClientVoiceStop(false)
+}
+
+func (c *ClientState) ResetAudioIdleWindow() {
+	if c == nil {
+		return
+	}
+	c.AudioIdle.Reset()
+}
+
+func (c *ClientState) GetAudioIdleElapsed(now time.Time) time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.AudioIdle.Elapsed(now)
+}
+
+func (c *ClientState) AudioIdleStarted() bool {
+	if c == nil {
+		return false
+	}
+	return c.AudioIdle.Started()
+}
+
+func (c *ClientState) AudioIdlePaused() bool {
+	if c == nil {
+		return false
+	}
+	return c.AudioIdle.Paused()
+}
+
+func (c *ClientState) MarkAudioIdleTimeoutPending() bool {
+	if c == nil {
+		return false
+	}
+	return c.AudioIdle.MarkTimeoutPending()
+}
+
+func (c *ClientState) ClearAudioIdleTimeoutPending() {
+	if c == nil {
+		return
+	}
+	c.AudioIdle.ClearTimeoutPending()
+}
+
+func (c *ClientState) AudioIdleTimeoutPending() bool {
+	if c == nil {
+		return false
+	}
+	return c.AudioIdle.TimeoutPending()
+}
+
 func (c *ClientState) GetPreAsrTextSilenceDuration() int64 {
 	if viper.IsSet("chat.pre_asr_text_silence_duration") {
 		preTextSilenceDuration := viper.GetInt64("chat.pre_asr_text_silence_duration")
@@ -493,6 +588,8 @@ func (s *ClientState) InitAsr() error {
 func (c *ClientState) Destroy() {
 	c.Asr.StopWithReason("ClientState.Destroy")
 	c.Vad.Reset()
+	c.ResetAudioIdleWindow()
+	c.ClearAudioIdleTimeoutPending()
 
 	// 归还ASR资源（如果存在）
 	// 注意：这里需要导入 pool 包，但为了避免循环依赖，在调用处处理
@@ -556,6 +653,7 @@ func (c *ClientState) GetCommandHistorySnapshot() CommandHistorySnapshot {
 }
 
 func (state *ClientState) OnManualStop() {
+	state.ClearAudioIdleTimeoutPending()
 	state.OnVoiceSilence()
 }
 

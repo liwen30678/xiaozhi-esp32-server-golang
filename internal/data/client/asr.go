@@ -139,6 +139,13 @@ func (a *Asr) Stop() {
 	a.StopWithReason("Asr.Stop")
 }
 
+func (a *Asr) HasOpenAudioInput() bool {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	return a.AsrAudioChannel != nil
+}
+
 func (a *Asr) AddAudioData(pcmFrameData []float32) error {
 	a.lock.Lock()
 	defer a.lock.Unlock()

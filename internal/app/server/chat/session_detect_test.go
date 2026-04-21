@@ -77,6 +77,77 @@ func TestHandleListenStartCancelsPendingDetectLLM(t *testing.T) {
 	}
 }
 
+func TestHandleListenStartIgnoresDuplicateRealtimeStart(t *testing.T) {
+	session := newDetectDebounceTestSession(t)
+	session.clientState.ListenMode = "realtime"
+	session.clientState.SetListenPhase(data_client.ListenPhaseListening)
+	session.realtimeListenSessionActive.Store(true)
+	session.clientState.RecordCommandArrival(data_client.CommandTypeListenStart, time.Now().Add(-2*time.Second))
+
+	sessionCtx := session.clientState.SessionCtx.Get(session.clientState.Ctx)
+	afterAsrCtx := session.clientState.AfterAsrSessionCtx.Get(sessionCtx)
+	initialSeq := session.listenStartSeq.Load()
+	initialHistory := session.clientState.GetCommandHistorySnapshot()
+
+	if err := session.HandleListenStart(&data_client.ClientMessage{
+		Type:     msgdata.MessageTypeListen,
+		DeviceID: session.clientState.DeviceID,
+		Mode:     "realtime",
+	}); err != nil {
+		t.Fatalf("HandleListenStart returned error: %v", err)
+	}
+
+	if got := session.clientState.GetListenPhase(); got != data_client.ListenPhaseListening {
+		t.Fatalf("expected listen phase to remain listening, got %s", got)
+	}
+	if sessionCtx.Err() != nil {
+		t.Fatalf("expected duplicate realtime start to keep session context alive, got %v", sessionCtx.Err())
+	}
+	if afterAsrCtx.Err() != nil {
+		t.Fatalf("expected duplicate realtime start to keep after-asr context alive, got %v", afterAsrCtx.Err())
+	}
+	if got := session.listenStartSeq.Load(); got != initialSeq {
+		t.Fatalf("expected duplicate realtime start not to advance listenStartSeq, got %d want %d", got, initialSeq)
+	}
+	if !session.isRealtimeListenSessionActive() {
+		t.Fatal("expected duplicate realtime start to keep realtime listen session active")
+	}
+
+	history := session.clientState.GetCommandHistorySnapshot()
+	if history.LastCmdType != initialHistory.LastCmdType || !history.LastCmdAt.Equal(initialHistory.LastCmdAt) {
+		t.Fatalf("expected duplicate realtime start not to update command history, got %+v want %+v", history, initialHistory)
+	}
+}
+
+func TestStopSpeakingClearsRealtimeListenSessionActive(t *testing.T) {
+	session := newDetectDebounceTestSession(t)
+	session.realtimeListenSessionActive.Store(true)
+
+	session.StopSpeaking(true)
+
+	if session.isRealtimeListenSessionActive() {
+		t.Fatal("expected session cancel path to clear realtime listen session active")
+	}
+}
+
+func TestHandleListenStopClearsRealtimeListenSessionActive(t *testing.T) {
+	session := newDetectDebounceTestSession(t)
+	session.clientState.ListenMode = "realtime"
+	session.realtimeListenSessionActive.Store(true)
+	initialSeq := session.listenStartSeq.Load()
+
+	if err := session.HandleListenStop(); err != nil {
+		t.Fatalf("HandleListenStop returned error: %v", err)
+	}
+
+	if session.isRealtimeListenSessionActive() {
+		t.Fatal("expected realtime listen stop to clear realtime listen session active")
+	}
+	if got := session.listenStartSeq.Load(); got != initialSeq+1 {
+		t.Fatalf("expected realtime listen stop to invalidate listen start sequence, got %d want %d", got, initialSeq+1)
+	}
+}
+
 func newDetectDebounceTestSession(t *testing.T) *ChatSession {
 	t.Helper()
 

@@ -1058,6 +1058,7 @@ func shouldSendMqttGoodbyeOnSessionClose(reason string) bool {
 	switch reason {
 	case chatSessionCloseReasonExplicitExit,
 		chatSessionCloseReasonFatalError,
+		chatSessionCloseReasonAudioIdleTimeout,
 		chatSessionCloseReasonRetainedIdleTimeout:
 		return true
 	default:

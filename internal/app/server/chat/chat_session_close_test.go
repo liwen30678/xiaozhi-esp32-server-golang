@@ -174,6 +174,37 @@ func TestHandleSessionClosedSendsMqttGoodbyeOnRetainedIdleTimeout(t *testing.T) 
 	}
 }
 
+func TestHandleSessionClosedSendsMqttGoodbyeOnAudioIdleTimeout(t *testing.T) {
+	fakeConn := &sessionCloseTestConn{
+		deviceID:      "device-1",
+		transportType: types_conn.TransportTypeMqttUdp,
+	}
+	clientState := &ClientState{SessionID: "session-1"}
+	session := &ChatSession{}
+	manager := &ChatManager{
+		transport:       fakeConn,
+		serverTransport: NewServerTransport(fakeConn, clientState),
+		session:         session,
+		helloInited:     true,
+	}
+
+	manager.handleSessionClosed(session, chatSessionCloseReasonAudioIdleTimeout)
+
+	if manager.GetSession() != nil {
+		t.Fatalf("expected session to be cleared after audio_idle_timeout")
+	}
+	if fakeConn.closeAudioCalls != 0 {
+		t.Fatalf("expected CloseAudioChannel to be skipped on audio_idle_timeout, got %d", fakeConn.closeAudioCalls)
+	}
+	assertSingleGoodbyeCommand(t, fakeConn, "session-1")
+	if !manager.helloInited {
+		t.Fatalf("expected helloInited to stay true after audio_idle_timeout")
+	}
+	if !manager.needFreshHello {
+		t.Fatalf("expected audio_idle_timeout to require a fresh hello before the next session bootstrap")
+	}
+}
+
 func TestHandleSessionClosedDoesNotRequireHelloAfterMqttExplicitExit(t *testing.T) {
 	fakeConn := &sessionCloseTestConn{
 		deviceID:      "device-1",

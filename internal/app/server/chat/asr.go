@@ -51,8 +51,69 @@ func NewASRManager(clientState *ClientState, serverTransport *ServerTransport, o
 	return asr
 }
 
+func (a *ASRManager) runAudioIdleTimeoutWatchdog(ctx context.Context) {
+	state := a.clientState
+	if state == nil {
+		return
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !state.UsesAudioIdleClock() || !state.AudioIdleStarted() || state.AudioIdlePaused() {
+				continue
+			}
+			if !state.ShouldCountAudioIdleTimeout() || state.Asr.HasReceivedText() {
+				continue
+			}
+			if state.GetClientVoiceStop() || state.AudioIdleTimeoutPending() {
+				continue
+			}
+
+			elapsed := state.GetAudioIdleElapsed(time.Now())
+			threshold := time.Duration(state.GetMaxIdleDuration()) * time.Millisecond
+			if elapsed < threshold {
+				continue
+			}
+			if !state.MarkAudioIdleTimeoutPending() {
+				continue
+			}
+
+			if !state.Asr.HasOpenAudioInput() {
+				log.Infof(
+					"音频空闲超时，当前无活动ASR流，直接关闭会话: device=%s, mode=%s, elapsed=%dms, threshold=%dms",
+					state.DeviceID,
+					state.ListenMode,
+					elapsed.Milliseconds(),
+					state.GetMaxIdleDuration(),
+				)
+				if a.session != nil {
+					a.session.CloseWithReason(chatSessionCloseReasonAudioIdleTimeout)
+				} else {
+					state.ClearAudioIdleTimeoutPending()
+				}
+				continue
+			}
+
+			log.Infof(
+				"音频空闲超时，触发ASR收口: device=%s, mode=%s, elapsed=%dms, threshold=%dms",
+				state.DeviceID,
+				state.ListenMode,
+				elapsed.Milliseconds(),
+				state.GetMaxIdleDuration(),
+			)
+			state.OnVoiceSilence()
+		}
+	}
+}
+
 // ProcessVadAudio 启动VAD音频处理
-func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
+func (a *ASRManager) ProcessVadAudio(ctx context.Context) {
 	state := a.clientState
 	go func() {
 		hasTriggeredCancel := true // 标志位，记录是否已触发过取消操作（当 voiceDuration > 120 时）
@@ -128,7 +189,6 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 			vadLastUseAt = time.Now()
 			return true
 		}
-
 		for {
 			// 使用最大帧大小作为缓冲区，解码后会得到实际帧大小
 			pcmFrame := make([]float32, maxFrameSize)
@@ -149,10 +209,13 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 				var skipVad bool
 				var haveVoice bool
 				clientHaveVoice := state.GetClientHaveVoice()
-				if state.Asr.AutoEnd || state.ListenMode == "manual" {
+				if state.ListenMode == "manual" {
 					skipVad = true         //跳过vad
 					clientHaveVoice = true //之前有声音
 					haveVoice = true       //本次有声音
+				} else if state.Asr.AutoEnd {
+					skipVad = true   // 仍由 provider 控制 stop，但不改变 idle 语义
+					haveVoice = true // 本次音频直接进入 ASR
 				}
 
 				if state.GetClientVoiceStop() { //已停止 说话 则不接收音频数据
@@ -247,26 +310,12 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 					//log.Debugf("isVad, pcmData len: %d, vadPcmData len: %d, haveVoice: %v", len(pcmData), len(vadPcmData), haveVoice)
 				}
 
-				if !haveVoice || state.Asr.AutoEnd {
-					state.Vad.AddIdleDuration(int64(frameDurationMs))
-					idleDuration := state.Vad.GetIdleDuration()
-					log.Infof("空闲时间: %dms", idleDuration)
-					if idleDuration > state.GetMaxIdleDuration() {
-						log.Infof("超出空闲时长: %dms, 断开连接", idleDuration)
-						//断开连接
-						onClose()
-						return
-					}
-				}
-
 				if haveVoice {
 					hasLoggedFirstTextExtendedWait = false
 					//log.Infof("检测到语音, len: %d", len(pcmData))
 					state.SetClientHaveVoice(true)
 					state.SetClientHaveVoiceLastTime(time.Now().UnixMilli())
-					if !state.Asr.AutoEnd {
-						state.Vad.ResetIdleDuration()
-					}
+					state.Vad.ResetIdleDuration()
 					// 累积检测到声音的时长（同时更新一次过程中的时长）
 					state.Vad.AddVoiceDuration(int64(frameDurationMs))
 
@@ -284,6 +333,7 @@ func (a *ASRManager) ProcessVadAudio(ctx context.Context, onClose func()) {
 						}
 					}
 				} else {
+					state.Vad.AddIdleDuration(int64(frameDurationMs))
 					state.Vad.ResetVoiceContinuousDuration()
 
 					// 没有声音时，如果之前也没有语音，则重置累积的声音时长
@@ -599,6 +649,27 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 			}
 			return allowed
 		}
+		resumeAudioIdle := func() {
+			state.ResumeAudioIdleWindow(time.Now())
+		}
+		startAudioIdle := func() {
+			state.StartAudioIdleWindow(time.Now())
+		}
+		closeAudioIdleTimeout := func(reason string) {
+			if !state.AudioIdleTimeoutPending() {
+				return
+			}
+
+			state.ClearAudioIdleTimeoutPending()
+			log.Infof("音频空闲超时收口完成: device=%s, reason=%s", state.DeviceID, reason)
+			if a.session != nil {
+				a.session.CloseWithReason(chatSessionCloseReasonAudioIdleTimeout)
+				return
+			}
+			if onError != nil {
+				onError(fmt.Errorf("audio idle timeout: %s", reason))
+			}
+		}
 
 		for {
 			select {
@@ -630,6 +701,11 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 			log.Debugf("处理asr结果: %s, 耗时: %d ms", text, state.GetAsrDuration())
 
 			if result.RetryReason != "" {
+				if state.AudioIdleTimeoutPending() {
+					closeAudioIdleTimeout(result.RetryReason)
+					return
+				}
+
 				now := time.Now()
 				if now.Sub(recoverableErrorWindowStart) > recoverableErrorProtectWindow {
 					recoverableErrorWindowStart = now
@@ -665,20 +741,24 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 							}
 							return
 						}
+						resumeAudioIdle()
 						continue
 					}
 
 					log.Warnf("ASR可恢复错误发生时当前状态不允许立即重启: reason=%s, status=%s, realtime=%v", result.RetryReason, state.Status, state.IsRealTime())
 					state.Asr.CancelWithReason("ASRManager.StartAsrRecognitionLoop: recoverable error but restart not allowed yet")
+					resumeAudioIdle()
 					continue
 				case asr_types.RetryReasonDoubaoWaitingNextPacketTimeout:
 					log.Warnf("doubao ASR 会话空闲超时，挂起当前流并等待下一次语音时重建")
 					state.Asr.CancelWithReason("ASRManager.StartAsrRecognitionLoop: doubao waiting next packet timeout")
+					resumeAudioIdle()
 					continue
 				}
 			}
 
 			if text != "" {
+				state.ClearAudioIdleTimeoutPending()
 				// 识别成功后重置空结果计数
 				emptyResultWindowStart = time.Now()
 				emptyResultCount = 0
@@ -728,6 +808,11 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 					if stop {
 						log.Infof("ASR_OUTPUT hook 请求停止当前流程")
 						state.Asr.ClearHistoryAudio()
+						if state.UsesAudioIdleClock() {
+							startAudioIdle()
+						} else {
+							state.ResetAudioIdleWindow()
+						}
 						continue
 					}
 				}
@@ -746,6 +831,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 						state.Asr.ClearHistoryAudio()
 
 						if !state.IsRealTime() {
+							startAudioIdle()
 							return
 						}
 						if restartErr := a.RestartAsrRecognition(ctx); restartErr != nil {
@@ -755,6 +841,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 							}
 							return
 						}
+						startAudioIdle()
 						continue
 					}
 				}
@@ -813,6 +900,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 							}
 							return
 						}
+						startAudioIdle()
 						continue
 					}
 				}
@@ -854,6 +942,10 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 					state.Vad.GetIdleDuration(),
 					state.IsRealTime(),
 				)
+				if state.AudioIdleTimeoutPending() {
+					closeAudioIdleTimeout(result.EmptyReason)
+					return
+				}
 				if result.EmptyReason != "" {
 					log.Debugf("ASR空结果已分类: reason=%s, status=%s", result.EmptyReason, state.Status)
 					emptyResultWindowStart = time.Now()
@@ -862,6 +954,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 					if result.EmptyReason == asr_types.EmptyReasonNoServerResponse ||
 						result.EmptyReason == asr_types.EmptyReasonProviderEmptyFinal {
 						state.Asr.CancelWithReason("ASRManager.StartAsrRecognitionLoop: empty final result from provider")
+						resumeAudioIdle()
 						continue
 					}
 				}
@@ -906,6 +999,7 @@ func (a *ASRManager) StartAsrRecognitionLoop(
 							}
 							return
 						}
+						resumeAudioIdle()
 						continue
 					} else {
 						log.Warnf("ASR识别结果为空，已达到最大空闲时间: %d", maxIdleTime)

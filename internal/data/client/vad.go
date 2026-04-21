@@ -50,7 +50,7 @@ func (v *Vad) ResetVoiceContinuousDuration() {
 }
 
 func (v *Vad) GetVoiceContinuousDuration() int64 {
-	return atomic.LoadInt64(&v.VoiceDurationInSession)
+	return atomic.LoadInt64(&v.VoiceDuration)
 }
 
 func (v *Vad) GetVoiceDurationInSession() int64 {
