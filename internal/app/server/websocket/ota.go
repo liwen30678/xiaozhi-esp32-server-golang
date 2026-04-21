@@ -83,6 +83,12 @@ func (s *WebSocketServer) handleOta(w http.ResponseWriter, r *http.Request) {
 
 	mqttInfo := getMqttInfo(deviceId, clientId, otaConfigPrefix, ip)
 	//密码
+	firmwareVersion := viper.GetString("ota.firmware_version")
+	firmwareUrl := viper.GetString("ota.firmware_url")
+	if firmwareVersion == "" {
+		firmwareVersion = "0.9.9"
+	}
+
 	respData := &OtaResponse{
 		Websocket: WebsocketInfo{
 			Url:   viper.GetString(otaConfigPrefix + "websocket.url"),
@@ -95,8 +101,8 @@ func (s *WebSocketServer) handleOta(w http.ResponseWriter, r *http.Request) {
 		},
 		Activation: activationInfo,
 		Firmware: FirmwareInfo{
-			Version: "0.9.9",
-			Url:     "",
+			Version: firmwareVersion,
+			Url:     firmwareUrl,
 		},
 	}
 
